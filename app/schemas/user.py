@@ -19,4 +19,7 @@ class UserResponse(BaseModel):
     is_active: bool
 
     class Config:
-        form_attributes = True
+        # orm_mode = True
+        model_config = {
+            "from_attributes": True
+        }

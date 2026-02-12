@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
 from app.api import health
 from app.api import auth
+from app.api import employees
 app = FastAPI(
     title=settings.APP_NAME,
     description="A simple HRIS API built with FastAPI",
@@ -22,5 +23,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(health.router, prefix="/api/v1")
-app.include_router(auth.router, prefix="/api/v1")
+app.include_router(health.router, prefix="/api")
+app.include_router(auth.router, prefix="/api")
+app.include_router(employees.router, prefix="/api")
