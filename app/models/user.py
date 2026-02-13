@@ -17,3 +17,10 @@ class User(Base):
         back_populates="user",
         cascade="all, delete-orphan"
     )
+
+    # Relationship to attendance records created by this user
+    attendance_created_records = relationship(
+        "AttendanceRecord",
+        back_populates="checked_in_by",
+        cascade="all, delete-orphan"
+    )

@@ -4,6 +4,7 @@ from app.core.config import settings
 from app.api import health
 from app.api import auth
 from app.api import employees
+from app.api import attendance
 app = FastAPI(
     title=settings.APP_NAME,
     description="A simple HRIS API built with FastAPI",
@@ -26,3 +27,4 @@ app.add_middleware(
 app.include_router(health.router, prefix="/api")
 app.include_router(auth.router, prefix="/api")
 app.include_router(employees.router, prefix="/api")
+app.include_router(attendance.router, prefix="/api")

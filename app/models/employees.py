@@ -19,3 +19,9 @@ class Employee(Base):
         "User", 
         back_populates="employees"
     )
+
+    # Relationship to attendance records
+    attendance_records = relationship(
+        "AttendanceRecord", 
+        back_populates="employee"
+    )
