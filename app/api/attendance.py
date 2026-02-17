@@ -1,18 +1,21 @@
 from datetime import datetime
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
 from typing import List
 
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import func
+from sqlalchemy.orm import Session
+
 from app.core.database import get_db
+from app.core.dependencies import get_current_user
 from app.models.attendance import AttendanceRecord
 from app.models.employees import Employee
 from app.models.user import User
 from app.schemas.attendance import (
-    AttendanceResponse,
     AttendanceCreate,
+    AttendanceResponse,
+    AttendanceUpdate,
     BulkAttendanceMixed,
 )
-from app.core.dependencies import get_current_user
 
 router = APIRouter(prefix="/attendance", tags=["Attendance"])
 
@@ -44,7 +47,7 @@ def create_attendance_record(
 def mark_attendance(
     attendance_in: AttendanceCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    _: User = Depends(get_current_user)
 ):
     employee = db.query(Employee).filter_by(id=attendance_in.employee_id).first()
     if not employee:
@@ -76,7 +79,9 @@ def bulk_mark_attendance(
 ):
     employees = db.query(Employee).filter_by(department=department, is_active=1).all()
     if not employees:
-        raise HTTPException(status_code=404, detail="No employees found in this department")
+        raise HTTPException(
+            status_code=404, detail="No employees found in this department"
+        )
 
     records = [
         create_attendance_record(
@@ -106,8 +111,15 @@ def bulk_mixed_attendance(
 ):
     employee_ids = [att.employee_id for att in attendance_in.attendances]
 
-    employees = db.query(Employee).filter(Employee.id.in_(employee_ids), Employee.is_active == 1).all()
-    print("Found employees in DB:", [(emp.id, emp.first_name, emp.is_active) for emp in employees])  
+    employees = (
+        db.query(Employee)
+        .filter(Employee.id.in_(employee_ids), Employee.is_active == 1)
+        .all()
+    )
+    print(
+        "Found employees in DB:",
+        [(emp.id, emp.first_name, emp.is_active) for emp in employees],
+    )
     # employees = (
     #     db.query(Employee)
     #     .filter(Employee.id.in_(employee_ids))
@@ -142,6 +154,7 @@ def bulk_mixed_attendance(
 
     return records
 
+
 @router.get("/list", response_model=List[AttendanceResponse])
 def get_attendance_records(
     skip: int = 0,
@@ -151,3 +164,32 @@ def get_attendance_records(
 ):
     records = db.query(AttendanceRecord).offset(skip).limit(limit).all()
     return records
+
+
+# -------------------------------
+# Update attendance record (for editing)
+# -------------------------------
+@router.patch("/update", response_model=AttendanceResponse)
+def update_attendance(
+    attendance_in: AttendanceUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    record = (
+        db.query(AttendanceRecord)
+        .filter(
+            AttendanceRecord.employee_id == attendance_in.employee_id,
+            func.date(AttendanceRecord.check_in_time) == attendance_in.date,
+        )
+        .first()
+    )
+
+    if not record:
+        raise HTTPException(status_code=404, detail="Attendance record not found")
+
+    record.status = attendance_in.status
+
+    db.commit()
+    db.refresh(record)
+
+    return record

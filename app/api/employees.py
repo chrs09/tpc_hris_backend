@@ -14,8 +14,7 @@ router = APIRouter(prefix="/employees", tags=["Employees"])
 # ==============================
 @router.get("/", response_model=list[EmployeeResponse])
 def get_employees(
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
 ):
     employees = db.query(Employee).filter(Employee.is_active == 1).all()
     return employees
@@ -28,7 +27,7 @@ def get_employees(
 def get_employee(
     employee_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
 ):
     employee = (
         db.query(Employee)
@@ -49,7 +48,7 @@ def get_employee(
 def create_employee(
     employee: EmployeeCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
 ):
     new_employee = Employee(
         first_name=employee.first_name,
@@ -59,7 +58,7 @@ def create_employee(
         date_hired=employee.date_hired,
         department=employee.department,
         is_active=1,  # ALWAYS ACTIVE ON CREATE
-        created_by_user_id=current_user.id
+        created_by_user_id=current_user.id,
     )
 
     db.add(new_employee)
@@ -77,7 +76,7 @@ def update_employee(
     employee_id: int,
     employee: EmployeeUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
 ):
     existing_employee = (
         db.query(Employee)
@@ -111,7 +110,7 @@ def update_employee(
 def delete_employee(
     employee_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
 ):
     employee = db.query(Employee).filter(Employee.id == employee_id).first()
 

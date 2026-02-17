@@ -2,6 +2,7 @@ from sqlalchemy import Column, Integer, String, Date, ForeignKey
 from sqlalchemy.orm import relationship
 from app.core.database import Base
 
+
 class Employee(Base):
     __tablename__ = "tpc_employees"
 
@@ -12,16 +13,12 @@ class Employee(Base):
     position = Column(String(100), nullable=False)
     date_hired = Column(Date, nullable=False)
     department = Column(String(100), nullable=False)
-    is_active = Column(Integer, nullable=False, default=1)  # 1 for active, 0 for inactive
+    is_active = Column(
+        Integer, nullable=False, default=1
+    )  # 1 for active, 0 for inactive
     created_by_user_id = Column(Integer, ForeignKey("tpc_users.id"), nullable=False)
 
-    user = relationship(
-        "User", 
-        back_populates="employees"
-    )
+    user = relationship("User", back_populates="employees")
 
     # Relationship to attendance records
-    attendance_records = relationship(
-        "AttendanceRecord", 
-        back_populates="employee"
-    )
+    attendance_records = relationship("AttendanceRecord", back_populates="employee")

@@ -1,6 +1,6 @@
-from typing import Optional
 from pydantic import BaseModel, EmailStr
 from datetime import date
+
 
 class EmployeeCreate(BaseModel):
     first_name: str
@@ -10,6 +10,7 @@ class EmployeeCreate(BaseModel):
     date_hired: date
     department: str
     # created_by_user_id: int
+
 
 class EmployeeUpdate(BaseModel):
     first_name: str
@@ -34,6 +35,4 @@ class EmployeeResponse(BaseModel):
 
     class Config:
         # orm_mode = True
-        model_config = {
-            "from_attributes": True
-        }
+        model_config = {"from_attributes": True}

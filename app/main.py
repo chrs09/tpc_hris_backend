@@ -5,17 +5,14 @@ from app.api import health
 from app.api import auth
 from app.api import employees
 from app.api import attendance
+
 app = FastAPI(
     title=settings.APP_NAME,
     description="A simple HRIS API built with FastAPI",
-    version="1.0.0"
+    version="1.0.0",
 )
 
-origins = [
-    "http://localhost:3000",
-    "http://localhost:5173",
-    "http://127.0.0.1:8000/"
-    ]
+origins = ["http://localhost:3000", "http://localhost:5173", "http://127.0.0.1:8000/"]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
