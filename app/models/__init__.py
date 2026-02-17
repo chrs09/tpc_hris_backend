@@ -1,2 +1,3 @@
-# from .user import User
-# from .employees import Employee
+from .employees import Employee
+from .attendance import AttendanceRecord
+from .user import User  # if exists
