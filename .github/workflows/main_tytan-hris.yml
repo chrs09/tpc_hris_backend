@@ -73,4 +73,5 @@ jobs:
         with:
           app-name: 'tytan-hris'
           slot-name: 'Production'
+          package: .
           
