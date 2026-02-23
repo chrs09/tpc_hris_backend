@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
-from app.api import health, auth, employees, attendance, dashboard
+from app.api import health, auth, employees, attendance, dashboard, reminder
 
 app = FastAPI(
     title=settings.APP_NAME,
@@ -24,3 +24,4 @@ app.include_router(auth.router, prefix="/api")
 app.include_router(employees.router, prefix="/api")
 app.include_router(attendance.router, prefix="/api")
 app.include_router(dashboard.router, prefix="/api")
+app.include_router(reminder.router, prefix="/api")

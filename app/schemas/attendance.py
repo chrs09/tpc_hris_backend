@@ -6,6 +6,7 @@ from typing import List, Optional
 class AttendanceCreate(BaseModel):
     employee_id: int
     status: str
+    attendance_date: date
     check_in_time: Optional[datetime] = None  # defaults to now if not provided
 
 
@@ -16,7 +17,7 @@ class EmployeeAttendance(BaseModel):
 
 class AttendanceUpdate(BaseModel):
     employee_id: int
-    date: date
+    attendance_date: date
     status: str
 
 
@@ -27,6 +28,7 @@ class BulkAttendanceMixed(BaseModel):
 class AttendanceResponse(BaseModel):
     id: int
     employee_id: int
+    attendance_date: date
     check_in_time: datetime
     status: str
     created_by_user_id: int

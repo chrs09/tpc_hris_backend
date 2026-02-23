@@ -1,8 +1,7 @@
-from datetime import datetime
+from datetime import datetime, date
 from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -23,43 +22,65 @@ router = APIRouter(prefix="/attendance", tags=["Attendance"])
 # -------------------------------
 # Helper function
 # -------------------------------
+
+
 def create_attendance_record(
     db: Session,
     employee_id: int,
     status: str,
     user_id: int,
-    check_in_time: datetime | None = None,
+    attendance_date: date,
 ):
+    existing = db.query(AttendanceRecord).filter(
+        AttendanceRecord.employee_id == employee_id,
+        AttendanceRecord.attendance_date == attendance_date,
+    ).first()
+
+    if existing:
+        return None
+
     record = AttendanceRecord(
         employee_id=employee_id,
         status=status,
-        check_in_time=check_in_time or datetime.utcnow(),
+        attendance_date=attendance_date,
+        check_in_time=datetime.utcnow(),  # audit only
         created_by_user_id=user_id,
     )
+
     db.add(record)
     return record
-
 
 # -------------------------------
 # Single attendance
 # -------------------------------
+
+
 @router.post("/", response_model=AttendanceResponse)
 def mark_attendance(
     attendance_in: AttendanceCreate,
     db: Session = Depends(get_db),
-    _: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
 ):
     employee = db.query(Employee).filter_by(id=attendance_in.employee_id).first()
+
     if not employee:
         raise HTTPException(status_code=404, detail="Employee not found")
+
+    today = date.today()
 
     record = create_attendance_record(
         db=db,
         employee_id=employee.id,
         status=attendance_in.status,
         user_id=current_user.id,
-        check_in_time=attendance_in.check_in_time,
+        attendance_date=attendance_in.attendance_date,
     )
+
+    if not record:
+        raise HTTPException(
+            status_code=400,
+            detail="Attendance already recorded for today.",
+        )
 
     db.commit()
     db.refresh(record)
@@ -68,42 +89,9 @@ def mark_attendance(
 
 
 # -------------------------------
-# Bulk by department
-# -------------------------------
-@router.post("/bulk/", response_model=List[AttendanceResponse])
-def bulk_mark_attendance(
-    department: str,
-    status: str,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    employees = db.query(Employee).filter_by(department=department, is_active=1).all()
-    if not employees:
-        raise HTTPException(
-            status_code=404, detail="No employees found in this department"
-        )
-
-    records = [
-        create_attendance_record(
-            db=db,
-            employee_id=emp.id,
-            status=status,
-            user_id=current_user.id,
-        )
-        for emp in employees
-    ]
-
-    db.commit()
-    for record in records:
-        db.refresh(record)
-
-    return records
-
-
-# -------------------------------
 # Bulk mixed (different status per employee)
 # -------------------------------
-@router.post("/bulk-mixed/", response_model=List[AttendanceResponse])
+@router.post("/bulk-mixed/")
 def bulk_mixed_attendance(
     attendance_in: BulkAttendanceMixed,
     db: Session = Depends(get_db),
@@ -116,22 +104,15 @@ def bulk_mixed_attendance(
         .filter(Employee.id.in_(employee_ids), Employee.is_active == 1)
         .all()
     )
-    print(
-        "Found employees in DB:",
-        [(emp.id, emp.first_name, emp.is_active) for emp in employees],
-    )
-    # employees = (
-    #     db.query(Employee)
-    #     .filter(Employee.id.in_(employee_ids))
-    #     .all()
-    # )
 
     if not employees:
         raise HTTPException(status_code=404, detail="No valid employees found")
 
     valid_employee_ids = {emp.id for emp in employees}
+    today = date.today()
 
-    records = []
+    saved_records = []
+    skipped_employee_ids = []
 
     for att in attendance_in.attendances:
         if att.employee_id not in valid_employee_ids:
@@ -142,17 +123,30 @@ def bulk_mixed_attendance(
             employee_id=att.employee_id,
             status=att.status,
             user_id=current_user.id,
+            attendance_date=today,
         )
-        records.append(record)
 
-    if not records:
-        raise HTTPException(status_code=400, detail="No attendance records created")
+        if record:
+            saved_records.append(record)
+        else:
+            skipped_employee_ids.append(att.employee_id)
+
+    if not saved_records:
+        raise HTTPException(
+            status_code=400,
+            detail="All selected employees already have attendance for today.",
+        )
 
     db.commit()
-    for record in records:
+
+    for record in saved_records:
         db.refresh(record)
 
-    return records
+    return {
+        "saved_count": len(saved_records),
+        "skipped_count": len(skipped_employee_ids),
+        "skipped_employee_ids": skipped_employee_ids,
+    }
 
 
 @router.get("/list", response_model=List[AttendanceResponse])
@@ -162,9 +156,15 @@ def get_attendance_records(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    records = db.query(AttendanceRecord).offset(skip).limit(limit).all()
-    return records
+    records = (
+        db.query(AttendanceRecord)
+        .order_by(AttendanceRecord.attendance_date.desc())
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
 
+    return records
 
 # -------------------------------
 # Update attendance record (for editing)
@@ -175,17 +175,41 @@ def update_attendance(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    # 🚫 Only superadmin can edit
+    if current_user.role != "superadmin":
+        raise HTTPException(
+            status_code=403,
+            detail="Not allowed to edit attendance records.",
+        )
+
+    # 🚫 Cannot edit today or future
+    if attendance_in.attendance_date > date.today():
+        raise HTTPException(
+            status_code=403,
+            detail="Only past attendance can be edited.",
+        )
+
     record = (
         db.query(AttendanceRecord)
         .filter(
             AttendanceRecord.employee_id == attendance_in.employee_id,
-            func.date(AttendanceRecord.check_in_time) == attendance_in.date,
+            AttendanceRecord.attendance_date == attendance_in.attendance_date,
         )
         .first()
     )
 
     if not record:
-        raise HTTPException(status_code=404, detail="Attendance record not found")
+        raise HTTPException(
+            status_code=404,
+            detail="Attendance record not found",
+        )
+
+    # 🚫 Prevent unnecessary overwrite
+    if record.status == attendance_in.status:
+        raise HTTPException(
+            status_code=400,
+            detail="Attendance status is already the same.",
+        )
 
     record.status = attendance_in.status
 
