@@ -46,7 +46,7 @@ def get_reminders(
 
     return (
         db.query(Reminder)
-        .filter(Reminder.is_resolved == False)
+        .filter(Reminder.is_resolved.is_(False))
         .order_by(Reminder.created_at.desc())
         .all()
     )

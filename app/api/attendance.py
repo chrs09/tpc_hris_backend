@@ -71,7 +71,7 @@ def mark_attendance(
     if not employee:
         raise HTTPException(status_code=404, detail="Employee not found")
 
-    today = date.today()
+    # today = date.today()
 
     record = create_attendance_record(
         db=db,
