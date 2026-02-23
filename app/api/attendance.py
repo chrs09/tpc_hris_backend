@@ -71,7 +71,12 @@ def mark_attendance(
     if not employee:
         raise HTTPException(status_code=404, detail="Employee not found")
 
-    # today = date.today()
+    # 🚫 BLOCK FUTURE DATES
+    if attendance_in.attendance_date > date.today():
+        raise HTTPException(
+            status_code=403,
+            detail="Cannot record attendance for future dates.",
+        )
 
     record = create_attendance_record(
         db=db,
@@ -84,7 +89,7 @@ def mark_attendance(
     if not record:
         raise HTTPException(
             status_code=400,
-            detail="Attendance already recorded for today.",
+            detail="Attendance already recorded for this date.",
         )
 
     db.commit()
@@ -181,15 +186,17 @@ def update_attendance(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    today = date.today()
+
     # 🚫 Only superadmin can edit
     if current_user.role != "superadmin":
         raise HTTPException(
             status_code=403,
-            detail="Not allowed to edit attendance records.",
+            detail="Only superadmin can edit attendance records.",
         )
 
-    # 🚫 Cannot edit today or future
-    if attendance_in.attendance_date > date.today():
+    # 🚫 Block today & future
+    if attendance_in.attendance_date >= today:
         raise HTTPException(
             status_code=403,
             detail="Only past attendance can be edited.",
@@ -210,7 +217,6 @@ def update_attendance(
             detail="Attendance record not found",
         )
 
-    # 🚫 Prevent unnecessary overwrite
     if record.status == attendance_in.status:
         raise HTTPException(
             status_code=400,
