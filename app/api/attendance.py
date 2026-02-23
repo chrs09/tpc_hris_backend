@@ -196,7 +196,7 @@ def update_attendance(
         )
 
     # 🚫 Block today & future
-    if attendance_in.attendance_date >= today:
+    if attendance_in.attendance_date > today:
         raise HTTPException(
             status_code=403,
             detail="Only past attendance can be edited.",
