@@ -186,7 +186,8 @@ def update_attendance(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    today = date.today()
+    # ✅ Business timezone (Philippines)
+    today = datetime.now(ZoneInfo("Asia/Manila")).date()
 
     # 🚫 Only superadmin can edit
     if current_user.role != "superadmin":
@@ -195,7 +196,7 @@ def update_attendance(
             detail="Only superadmin can edit attendance records.",
         )
 
-    # 🚫 Block today & future
+    # 🚫 Block future dates only (allow today & past)
     if attendance_in.attendance_date > today:
         raise HTTPException(
             status_code=403,
