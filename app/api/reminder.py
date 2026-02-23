@@ -10,6 +10,7 @@ from app.schemas.reminder import ReminderCreate, ReminderResponse
 
 router = APIRouter(prefix="/reminders", tags=["Reminders"])
 
+
 @router.post("/", response_model=ReminderResponse)
 def create_reminder(
     reminder_in: ReminderCreate,
@@ -34,6 +35,7 @@ def create_reminder(
 
     return reminder
 
+
 @router.get("/", response_model=List[ReminderResponse])
 def get_reminders(
     db: Session = Depends(get_db),
@@ -48,6 +50,7 @@ def get_reminders(
         .order_by(Reminder.created_at.desc())
         .all()
     )
+
 
 @router.patch("/{reminder_id}")
 def resolve_reminder(

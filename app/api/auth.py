@@ -52,10 +52,10 @@ def login(credentials: UserLogin, db: Session = Depends(get_db)):
 
     token = create_access_token(
         {
-            "sub": user.username, 
-            "role": user.role, 
-            "user_id": user.id, 
-            "exp": datetime.utcnow() + timedelta(minutes=60)
+            "sub": user.username,
+            "role": user.role,
+            "user_id": user.id,
+            "exp": datetime.utcnow() + timedelta(minutes=60),
         }
     )
 

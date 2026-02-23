@@ -10,15 +10,10 @@ if os.getenv("WEBSITE_HOSTNAME"):
     engine = create_engine(
         DATABASE_URL,
         pool_pre_ping=True,
-        connect_args={
-            "ssl": {"fake_flag_to_enable_tls": True}
-        }
+        connect_args={"ssl": {"fake_flag_to_enable_tls": True}},
     )
 else:
-    engine = create_engine(
-        DATABASE_URL,
-        pool_pre_ping=True
-    )
+    engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()

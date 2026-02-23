@@ -12,6 +12,7 @@ router = APIRouter()
 philippines = ZoneInfo("Asia/Manila")
 utc = ZoneInfo("UTC")
 
+
 @router.get("/dashboard/summary")
 def get_dashboard_summary(db: Session = Depends(get_db)):
 
@@ -28,21 +29,17 @@ def get_dashboard_summary(db: Session = Depends(get_db)):
 
     total_employees = db.query(Employee).count()
 
-    attendance_counts = db.query(
-        AttendanceRecord.status,
-        func.count(AttendanceRecord.id)
-    ).filter(
-        AttendanceRecord.check_in_time >= start_utc,
-        AttendanceRecord.check_in_time < end_utc
-    ).group_by(
-        AttendanceRecord.status
-    ).all()
+    attendance_counts = (
+        db.query(AttendanceRecord.status, func.count(AttendanceRecord.id))
+        .filter(
+            AttendanceRecord.check_in_time >= start_utc,
+            AttendanceRecord.check_in_time < end_utc,
+        )
+        .group_by(AttendanceRecord.status)
+        .all()
+    )
 
-    summary = {
-        "Present": 0,
-        "Absent": 0,
-        "On Leave": 0
-    }
+    summary = {"Present": 0, "Absent": 0, "On Leave": 0}
 
     for status, count in attendance_counts:
         if status in summary:
@@ -52,5 +49,5 @@ def get_dashboard_summary(db: Session = Depends(get_db)):
         "total_employees": total_employees,
         "present": summary["Present"],
         "absent": summary["Absent"],
-        "on_leave": summary["On Leave"]
+        "on_leave": summary["On Leave"],
     }

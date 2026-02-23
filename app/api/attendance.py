@@ -31,10 +31,14 @@ def create_attendance_record(
     user_id: int,
     attendance_date: date,
 ):
-    existing = db.query(AttendanceRecord).filter(
-        AttendanceRecord.employee_id == employee_id,
-        AttendanceRecord.attendance_date == attendance_date,
-    ).first()
+    existing = (
+        db.query(AttendanceRecord)
+        .filter(
+            AttendanceRecord.employee_id == employee_id,
+            AttendanceRecord.attendance_date == attendance_date,
+        )
+        .first()
+    )
 
     if existing:
         return None
@@ -49,6 +53,7 @@ def create_attendance_record(
 
     db.add(record)
     return record
+
 
 # -------------------------------
 # Single attendance
@@ -165,6 +170,7 @@ def get_attendance_records(
     )
 
     return records
+
 
 # -------------------------------
 # Update attendance record (for editing)
