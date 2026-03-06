@@ -1,6 +1,7 @@
 from sqlalchemy import Column, Integer, String, Date, ForeignKey
 from sqlalchemy.orm import relationship
 from app.core.database import Base
+from app.models.user import User
 
 
 class Employee(Base):
@@ -9,16 +10,33 @@ class Employee(Base):
     id = Column(Integer, primary_key=True, index=True)
     first_name = Column(String(50), nullable=False)
     last_name = Column(String(50), nullable=False)
-    email = Column(String(50), unique=True, index=True, nullable=False)
+    email = Column(String(100), unique=True, nullable=False)
     position = Column(String(100), nullable=False)
     date_hired = Column(Date, nullable=False)
     department = Column(String(100), nullable=False)
-    is_active = Column(
-        Integer, nullable=False, default=1
-    )  # 1 for active, 0 for inactive
+    is_active = Column(Integer, nullable=False, default=1)
+    is_available = Column(Integer, nullable=False, default=True)
+
     created_by_user_id = Column(Integer, ForeignKey("tpc_users.id"), nullable=False)
 
-    user = relationship("User", back_populates="employees")
+    # 1️⃣ One-to-one: employee may have login
+    user = relationship(
+        "User",
+        foreign_keys=[User.employee_id],
+        back_populates="employee",
+        uselist=False,
+    )
 
-    # Relationship to attendance records
+    # 2️⃣ Many employees created by one user
+    created_by_user = relationship(
+        "User", foreign_keys=[created_by_user_id], back_populates="created_employees"
+    )
+
+    # 3️⃣ Attendance records
     attendance_records = relationship("AttendanceRecord", back_populates="employee")
+
+    trip_assignments = relationship(
+        "TripHelper", back_populates="helper", cascade="all, delete-orphan"
+    )
+
+    trips = relationship("Trip", secondary="tpc_trip_helpers", viewonly=True)

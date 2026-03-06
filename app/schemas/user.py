@@ -1,12 +1,30 @@
 from pydantic import BaseModel, EmailStr
+from enum import Enum
+from app.models.user import UserRole
+
+
+class CreateUserRole(str, Enum):
+    ADMIN = "admin"
+    DRIVER = "driver"
+    HELPER = "helper"
+    EMPLOYEE = "employee"
+
+
+class UpdateUserRole(str, Enum):
+    ADMIN = "admin"
+    DRIVER = "driver"
+    HELPER = "helper"
+    EMPLOYEE = "employee"
 
 
 class UserCreate(BaseModel):
-    username: str
-    email: EmailStr
-    password: str
-    role: str
-    is_active: bool
+    employee_id: int
+    role: CreateUserRole
+
+
+class UserUpdate(BaseModel):
+    role: UpdateUserRole | None = None
+    is_active: bool | None = None
 
 
 class UserLogin(BaseModel):
@@ -16,8 +34,9 @@ class UserLogin(BaseModel):
 
 class UserResponse(BaseModel):
     id: int
+    username: str
     email: EmailStr
-    role: str
+    role: UserRole
     is_active: bool
 
     class Config:

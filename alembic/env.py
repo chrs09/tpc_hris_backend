@@ -8,7 +8,6 @@ from alembic import context
 from app.core.database import Base
 import app.models  # noqa: F401
 
-
 # Alembic Config object
 config = context.config
 
@@ -50,9 +49,7 @@ def run_migrations_online() -> None:
     connectable = create_engine(
         database_url,
         poolclass=pool.NullPool,
-        connect_args={
-            "ssl": {"ssl_mode": "REQUIRED"}
-        },  # Proper Azure SSL
+        connect_args={"ssl": {"ssl_mode": "REQUIRED"}},  # Proper Azure SSL
     )
 
     with connectable.connect() as connection:

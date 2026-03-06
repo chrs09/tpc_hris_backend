@@ -1,7 +1,11 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from app.core.config import settings
-from app.api import health, auth, employees, attendance, dashboard, reminder
+from app.api import health, auth, employees, attendance, dashboard, reminder, users
+from app.api.driver import trips
+from app.api.admin import trips as admin_trips
+from app.api.admin import stores
 
 app = FastAPI(
     title=settings.APP_NAME,
@@ -30,3 +34,9 @@ app.include_router(employees.router, prefix="/api")
 app.include_router(attendance.router, prefix="/api")
 app.include_router(dashboard.router, prefix="/api")
 app.include_router(reminder.router, prefix="/api")
+app.include_router(users.router, prefix="/api")
+# app.include_router(trip_stops.router, prefix="/api")
+app.include_router(trips.router, prefix="/api")
+app.include_router(admin_trips.router, prefix="/api")
+app.include_router(stores.router, prefix="/api")
+app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")

@@ -9,6 +9,11 @@ class Settings:
     APP_NAME = os.getenv("APP_NAME", "FastAPI Application")
     ENV = os.getenv("ENV", "development")
 
+    # FILE STORAGE
+    FILE_STORAGE = os.getenv("FILE_STORAGE", "local")
+    AZURE_STORAGE_CONNECTION_STRING = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
+    AZURE_CONTAINER = os.getenv("AZURE_CONTAINER", "tpc_files")
+
     # DATABASE
     DATABASE_URL = os.getenv("DATABASE_URL")
 

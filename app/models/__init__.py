@@ -2,3 +2,9 @@ from .employees import Employee as Employee
 from .attendance import AttendanceRecord as AttendanceRecord
 from .reminders import Reminder as Reminder
 from .user import User as User  # if exists
+from .trips import Trip as Trip  # if exists
+from .trip_stops import TripStop as TripStop  # if exists
+from .notification import Notification as Notification  # if exists
+from .stores import Store as Store  # if exists
+from .gps_log import GPSLog as GPSLog  # if existsists
+from .files import File as File  # if exists

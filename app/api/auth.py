@@ -3,8 +3,9 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func
 from typing import List
 from app.core.database import get_db
+from app.core.dependencies import get_current_user
 from app.models.user import User
-from app.schemas.user import UserCreate, UserLogin, UserResponse
+from app.schemas.user import UserLogin, UserResponse
 from app.core.security import hash_password, verify_password, create_access_token
 from datetime import datetime, timedelta
 
@@ -18,27 +19,6 @@ def get_users(db: Session = Depends(get_db)):
     return users
 
 
-# endpoint for post register request
-@router.post("/register")
-def register(user: UserCreate, db: Session = Depends(get_db)):
-    exists = db.query(User).filter(User.email == user.email).first()
-    if exists:
-        raise HTTPException(status_code=400, detail="Email already registered")
-
-    new_user = User(
-        username=user.username.lower(),
-        email=user.email,
-        hashed_password=hash_password(user.password),
-        role=user.role,
-        is_active=True,
-    )
-    db.add(new_user)
-    db.commit()
-    db.refresh(new_user)
-
-    return {"message": "User created"}
-
-
 # endpoint for post login request
 @router.post("/login")
 def login(credentials: UserLogin, db: Session = Depends(get_db)):
@@ -50,6 +30,8 @@ def login(credentials: UserLogin, db: Session = Depends(get_db)):
     if not user or not verify_password(credentials.password, user.hashed_password):
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
+    if not user.is_active:
+        raise HTTPException(status_code=403, detail="Account is inactive")
     token = create_access_token(
         {
             "sub": user.username,
@@ -65,4 +47,30 @@ def login(credentials: UserLogin, db: Session = Depends(get_db)):
         "role": user.role,
         "user_id": user.id,
         "username": user.username,
+        "must_change_password": user.must_change_password,
     }
+
+
+# =============================
+# CHANGE PASSWORD
+# =============================
+@router.post("/change-password")
+def change_password(
+    data: dict,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+
+    new_password = data.get("new_password")
+
+    if not new_password or len(new_password) < 8:
+        raise HTTPException(
+            status_code=400, detail="Password must be at least 8 characters"
+        )
+
+    current_user.hashed_password = hash_password(new_password)
+    current_user.must_change_password = False
+
+    db.commit()
+
+    return {"message": "Password updated successfully"}
