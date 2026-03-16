@@ -15,8 +15,11 @@ class Employee(Base):
     date_hired = Column(Date, nullable=False)
     department = Column(String(100), nullable=False)
     is_active = Column(Integer, nullable=False, default=1)
+<<<<<<< Updated upstream
     is_available = Column(Integer, nullable=False, default=True)
 
+=======
+>>>>>>> Stashed changes
     created_by_user_id = Column(Integer, ForeignKey("tpc_users.id"), nullable=False)
 
     # 1️⃣ One-to-one: employee may have login
@@ -40,3 +43,57 @@ class Employee(Base):
     )
 
     trips = relationship("Trip", secondary="tpc_trip_helpers", viewonly=True)
+    # Attendance
+    attendance_records = relationship("AttendanceRecord", back_populates="employee")
+
+    # Extended HRIS relationships
+    personal_details = relationship(
+        "EmployeePersonalDetails",
+        back_populates="employee",
+        uselist=False,
+        cascade="all, delete-orphan"
+    )
+
+    family_details = relationship(
+        "EmployeeFamilyDetails",
+        back_populates="employee",
+        uselist=False,
+        cascade="all, delete-orphan"
+    )
+
+    government_details = relationship(
+        "EmployeeGovernmentDetails",
+        back_populates="employee",
+        uselist=False,
+        cascade="all, delete-orphan"
+    )
+
+    emergency_contacts = relationship(
+        "EmployeeEmergencyContact",
+        back_populates="employee",
+        cascade="all, delete-orphan"
+    )
+
+    education_records = relationship(
+        "EmployeeEducation",
+        back_populates="employee",
+        cascade="all, delete-orphan"
+    )
+
+    employment_history = relationship(
+        "EmployeeEmploymentHistory",
+        back_populates="employee",
+        cascade="all, delete-orphan"
+    )
+
+    references = relationship(
+        "EmployeeReference",
+        back_populates="employee",
+        cascade="all, delete-orphan"
+    )
+
+    documents = relationship(
+        "EmployeeDocument",
+        back_populates="employee",
+        cascade="all, delete-orphan"
+    )

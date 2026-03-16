@@ -8,3 +8,11 @@ from .notification import Notification as Notification  # if exists
 from .stores import Store as Store  # if exists
 from .gps_log import GPSLog as GPSLog  # if existsists
 from .files import File as File  # if exists
+from .employee_personal import EmployeePersonalDetails as EmployeePersonalDetails
+from .employee_family import EmployeeFamilyDetails as EmployeeFamilyDetails
+from .employee_emergency import EmployeeEmergencyContact as EmployeeEmergencyContact
+from .employee_education import EmployeeEducation as EmployeeEducation
+from .employee_employment import EmployeeEmploymentHistory as EmployeeEmploymentHistory
+from .employee_reference import EmployeeReference as EmployeeReference
+from .employee_government import EmployeeGovernmentDetails as EmployeeGovernmentDetails
+from .employee_document import EmployeeDocument as EmployeeDocument
