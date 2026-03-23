@@ -13,10 +13,10 @@ class File(Base):
 
     id = Column(Integer, primary_key=True, index=True)
 
-    entity_type = Column(String(50), nullable=False)   # "employee", "trip"
+    entity_type = Column(String(50), nullable=False)  # "employee", "trip"
     entity_id = Column(Integer, nullable=False)
 
-    document_type = Column(String(50), nullable=False) # "RESUME", "PROFILE_IMAGE"
+    document_type = Column(String(50), nullable=False)  # "RESUME", "PROFILE_IMAGE"
 
     file_url = Column(String(500), nullable=False)
 

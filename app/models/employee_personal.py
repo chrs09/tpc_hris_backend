@@ -7,7 +7,9 @@ class EmployeePersonalDetails(Base):
     __tablename__ = "tpc_employee_personal_details"
 
     id = Column(Integer, primary_key=True)
-    employee_id = Column(Integer, ForeignKey("tpc_employees.id"), unique=True, nullable=False)
+    employee_id = Column(
+        Integer, ForeignKey("tpc_employees.id"), unique=True, nullable=False
+    )
 
     birthday = Column(Date, nullable=True)
     birthplace = Column(String(150), nullable=True)

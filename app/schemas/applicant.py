@@ -4,6 +4,7 @@ from sqlalchemy import Column, Integer, String, DateTime
 from datetime import datetime
 from app.core.database import Base
 
+
 class Applicant(Base):
     __tablename__ = "tpc_applicants"
 

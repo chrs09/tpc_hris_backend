@@ -40,20 +40,21 @@ def apply(
         file_service = FileService()
 
         file_url = file_service.upload(
-            cv,
-            f"applicants/{applicant.id}"  # ✅ your structure
+            cv, f"applicants/{applicant.id}"  # ✅ your structure
         )
 
         # =========================
         # 3. STORE FILE METADATA
         # =========================
-        db.add(FileModel(
-            entity_type="applicant",   # 🔥 KEY DIFFERENCE
-            entity_id=applicant.id,
-            document_type="CV",
-            file_url=file_url,
-            uploaded_by=None  # public user
-        ))
+        db.add(
+            FileModel(
+                entity_type="applicant",  # 🔥 KEY DIFFERENCE
+                entity_id=applicant.id,
+                document_type="CV",
+                file_url=file_url,
+                uploaded_by=None,  # public user
+            )
+        )
 
         # =========================
         # 4. COMMIT
@@ -62,7 +63,7 @@ def apply(
 
         return {
             "message": "Application submitted successfully",
-            "applicant_id": applicant.id
+            "applicant_id": applicant.id,
         }
 
     except Exception as e:

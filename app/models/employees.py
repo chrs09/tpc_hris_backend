@@ -46,49 +46,43 @@ class Employee(Base):
         "EmployeePersonalDetails",
         back_populates="employee",
         uselist=False,
-        cascade="all, delete-orphan"
+        cascade="all, delete-orphan",
     )
 
     family_details = relationship(
         "EmployeeFamilyDetails",
         back_populates="employee",
         uselist=False,
-        cascade="all, delete-orphan"
+        cascade="all, delete-orphan",
     )
 
     government_details = relationship(
         "EmployeeGovernmentDetails",
         back_populates="employee",
         uselist=False,
-        cascade="all, delete-orphan"
+        cascade="all, delete-orphan",
     )
 
     emergency_contacts = relationship(
         "EmployeeEmergencyContact",
         back_populates="employee",
-        cascade="all, delete-orphan"
+        cascade="all, delete-orphan",
     )
 
     education_records = relationship(
-        "EmployeeEducation",
-        back_populates="employee",
-        cascade="all, delete-orphan"
+        "EmployeeEducation", back_populates="employee", cascade="all, delete-orphan"
     )
 
     employment_history = relationship(
         "EmployeeEmploymentHistory",
         back_populates="employee",
-        cascade="all, delete-orphan"
+        cascade="all, delete-orphan",
     )
 
     references = relationship(
-        "EmployeeReference",
-        back_populates="employee",
-        cascade="all, delete-orphan"
+        "EmployeeReference", back_populates="employee", cascade="all, delete-orphan"
     )
 
     documents = relationship(
-        "EmployeeDocument",
-        back_populates="employee",
-        cascade="all, delete-orphan"
+        "EmployeeDocument", back_populates="employee", cascade="all, delete-orphan"
     )

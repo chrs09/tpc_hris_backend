@@ -2,10 +2,10 @@ import re
 from typing import Dict
 import pdfplumber
 
-
 # =============================
 # TEXT EXTRACTION
 # =============================
+
 
 def extract_text_from_pdf(file) -> str:
     text = ""
@@ -21,6 +21,7 @@ def extract_text_from_pdf(file) -> str:
 # HELPER FUNCTION
 # =============================
 
+
 def find_field(label: str, text: str) -> str:
     pattern = rf"{label}\s*[:\-]?\s*(.+)"
     match = re.search(pattern, text, re.IGNORECASE)
@@ -30,6 +31,7 @@ def find_field(label: str, text: str) -> str:
 # =============================
 # BASIC INFO PARSER
 # =============================
+
 
 def parse_basic_information(text: str) -> Dict:
     email_match = re.search(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+", text)
@@ -58,9 +60,9 @@ def parse_basic_information(text: str) -> Dict:
 # STRUCTURED FIELD PARSER
 # =============================
 
+
 def parse_structured_fields(text: str) -> Dict:
     return {
-
         # PERSONAL
         "birthday": find_field("Birthday", text),
         "birthplace": find_field("Birthplace", text),
@@ -72,22 +74,18 @@ def parse_structured_fields(text: str) -> Dict:
         "weight": find_field("Weight", text),
         "current_address": find_field("Current Address", text),
         "provincial_address": find_field("Provincial Address", text),
-
         # GOVERNMENT
         "sss": find_field("SSS", text),
         "philhealth": find_field("PhilHealth", text),
         "pagibig": find_field("Pag-IBIG", text),
-
         # EDUCATION
         "elementary": find_field("Elementary", text),
         "highschool": find_field("High School", text),
         "college": find_field("College", text),
         "degree": find_field("Degree", text),
-
         # EMPLOYMENT
         "prev_company": find_field("Company", text),
         "prev_position": find_field("Position", text),
-
         # CHARACTER REFERENCE
         "ref_name": find_field("Name", text),
         "ref_contact": find_field("Contact Number", text),
@@ -97,6 +95,7 @@ def parse_structured_fields(text: str) -> Dict:
 # =============================
 # MAIN PARSER
 # =============================
+
 
 def parse_cv(file) -> Dict:
     text = extract_text_from_pdf(file)

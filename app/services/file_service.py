@@ -31,7 +31,7 @@ class FileService:
 
         if self.storage == "azure":
             return self._upload_azure(file, folder_path)
-        
+
         if self.storage == "s3":
             return self._upload_s3(file, folder_path)
 
@@ -80,7 +80,9 @@ class FileService:
     # ===============================
     def _upload_s3(self, file, folder_path):
 
-        extension = file.filename.split(".")[-1].lower() if "." in file.filename else "jpg"
+        extension = (
+            file.filename.split(".")[-1].lower() if "." in file.filename else "jpg"
+        )
         filename = f"{uuid.uuid4()}.{extension}"
 
         key = f"{folder_path}/{filename}"
@@ -98,9 +100,7 @@ class FileService:
             file.file,
             settings.AWS_BUCKET_NAME,
             key,
-            ExtraArgs={
-                "ContentType": content_type
-            }
+            ExtraArgs={"ContentType": content_type},
         )
 
         return f"https://{settings.AWS_BUCKET_NAME}.s3.{settings.AWS_REGION}.amazonaws.com/{key}"
@@ -116,12 +116,11 @@ class FileService:
     def upload_trip_stop_photo(self, file, trip_id):
         folder = f"trips/{trip_id}/stop"
         return self.upload(file, folder)
-    
-    
+
     def upload_gps_log_photo(self, file, trip_id):
         folder = f"gps_logs/{trip_id}"
         return self.upload(file, folder)
-    
+
     # ===============================
     # EMPLOYEE FILES
     # ===============================
@@ -141,4 +140,3 @@ class FileService:
     def upload_employee_photo(self, file, employee_id):
         folder = f"employees/{employee_id}"
         return self.upload(file, folder)
-

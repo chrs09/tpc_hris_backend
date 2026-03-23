@@ -1,17 +1,13 @@
-from fastapi import APIRouter, Depends, Form, HTTPException, status, UploadFile, File
+from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile, File
 from datetime import datetime
 from typing import List
 from sqlalchemy.orm import Session
 from app.core.database import get_db
-from app.models import files
-from app.models.employee_document import EmployeeDocument
 from app.models.employee_emergency import EmployeeEmergencyContact
 from app.models.employee_family import EmployeeFamilyDetails
 from app.models.employee_government import EmployeeGovernmentDetails
 from app.models.employee_personal import EmployeePersonalDetails
 from app.models.employees import Employee
-from app.schemas import employee
-from app.schemas.employee import EmployeeCreate, EmployeeUpdate, EmployeeResponse
 from app.models.user import User
 from app.core.dependencies import get_current_user
 from app.services.cv_parser import parse_cv
@@ -19,7 +15,6 @@ from app.models.files import File as FileModel
 from app.services.file_service import FileService
 
 router = APIRouter(prefix="/employees", tags=["Employees"])
-
 
 
 # ==============================
@@ -53,48 +48,38 @@ def get_employee_detail(
     # =========================
     # RELATED TABLES
     # =========================
-    personal = db.query(EmployeePersonalDetails).filter_by(
-        employee_id=employee.id
-    ).first()
+    personal = (
+        db.query(EmployeePersonalDetails).filter_by(employee_id=employee.id).first()
+    )
 
-    family = db.query(EmployeeFamilyDetails).filter_by(
-        employee_id=employee.id
-    ).first()
+    family = db.query(EmployeeFamilyDetails).filter_by(employee_id=employee.id).first()
 
-    government = db.query(EmployeeGovernmentDetails).filter_by(
-        employee_id=employee.id
-    ).first()
+    government = (
+        db.query(EmployeeGovernmentDetails).filter_by(employee_id=employee.id).first()
+    )
 
-    emergency_contacts = db.query(EmployeeEmergencyContact).filter_by(
-        employee_id=employee.id
-    ).all()
+    emergency_contacts = (
+        db.query(EmployeeEmergencyContact).filter_by(employee_id=employee.id).all()
+    )
 
     # ✅ UNIFIED FILES (IMPORTANT)
-    files = db.query(FileModel).filter(
-        FileModel.entity_type == "employee",
-        FileModel.entity_id == employee.id
-    ).all()
+    files = (
+        db.query(FileModel)
+        .filter(FileModel.entity_type == "employee", FileModel.entity_id == employee.id)
+        .all()
+    )
 
     # =========================
     # BUILD RESPONSE
     # =========================
     return {
         **employee.__dict__,
-
         "personal_details": personal.__dict__ if personal else None,
         "family_details": family.__dict__ if family else None,
         "government_details": government.__dict__ if government else None,
-
-        "emergency_contacts": [
-            contact.__dict__ for contact in emergency_contacts
-        ],
-
+        "emergency_contacts": [contact.__dict__ for contact in emergency_contacts],
         "files": [
-            {
-                "document_type": f.document_type,
-                "file_url": f.file_url
-            }
-            for f in files
+            {"document_type": f.document_type, "file_url": f.file_url} for f in files
         ],
     }
 
@@ -104,7 +89,6 @@ def get_employee_detail(
 # ==============================
 @router.post("/", status_code=201)
 async def create_employee(
-
     files: List[UploadFile] = File(None),
     document_types: List[str] = Form(None),
     # BASIC
@@ -114,32 +98,26 @@ async def create_employee(
     position: str = Form(...),
     department: str = Form(...),
     date_hired: str = Form(...),
-
     # PERSONAL
     birthday: str = Form(None),
     birthplace: str = Form(None),
     civil_status: str = Form(None),
     gender: str = Form(None),
-
     # FAMILY
     spouse: str = Form(None),
     father_name: str = Form(None),
     mother_name: str = Form(None),
-
     # GOVERNMENT
     sss: str = Form(None),
     philhealth: str = Form(None),
     pagibig: str = Form(None),
-
     # EMERGENCY
     emergency_contact_name: str = Form(None),
     emergency_contact_number: str = Form(None),
     emergency_relationship: str = Form(None),
-
     # FILES
     profile_image: UploadFile = File(None),
     resume: UploadFile = File(None),
-
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -158,38 +136,46 @@ async def create_employee(
     db.flush()
 
     # PERSONAL
-    db.add(EmployeePersonalDetails(
-        employee_id=employee.id,
-        birthday=birthday,
-        birthplace=birthplace,
-        civil_status=civil_status,
-        gender=gender,
-    ))
+    db.add(
+        EmployeePersonalDetails(
+            employee_id=employee.id,
+            birthday=birthday,
+            birthplace=birthplace,
+            civil_status=civil_status,
+            gender=gender,
+        )
+    )
 
     # FAMILY
-    db.add(EmployeeFamilyDetails(
-        employee_id=employee.id,
-        spouse_name=spouse,
-        father_name=father_name,
-        mother_name=mother_name,
-    ))
+    db.add(
+        EmployeeFamilyDetails(
+            employee_id=employee.id,
+            spouse_name=spouse,
+            father_name=father_name,
+            mother_name=mother_name,
+        )
+    )
 
     # GOVERNMENT
-    db.add(EmployeeGovernmentDetails(
-        employee_id=employee.id,
-        sss_number=sss,
-        philhealth_number=philhealth,
-        pagibig_number=pagibig,
-    ))
+    db.add(
+        EmployeeGovernmentDetails(
+            employee_id=employee.id,
+            sss_number=sss,
+            philhealth_number=philhealth,
+            pagibig_number=pagibig,
+        )
+    )
 
     # EMERGENCY
     if emergency_contact_name:
-        db.add(EmployeeEmergencyContact(
-            employee_id=employee.id,
-            contact_name=emergency_contact_name,
-            contact_number=emergency_contact_number,
-            relationship_type=emergency_relationship,
-        ))
+        db.add(
+            EmployeeEmergencyContact(
+                employee_id=employee.id,
+                contact_name=emergency_contact_name,
+                contact_number=emergency_contact_number,
+                relationship_type=emergency_relationship,
+            )
+        )
 
     # FILES
     file_service = FileService()
@@ -197,7 +183,9 @@ async def create_employee(
     if files and document_types:
 
         if len(files) != len(document_types):
-            raise HTTPException(status_code=400, detail="Files and document types mismatch")
+            raise HTTPException(
+                status_code=400, detail="Files and document types mismatch"
+            )
 
         for file, doc_type in zip(files, document_types):
 
@@ -205,22 +193,28 @@ async def create_employee(
             file_url = file_service.upload(file, f"employees/{employee.id}")
 
             # check existing (UPSERT)
-            existing = db.query(FileModel).filter_by(
-                entity_type="employee",
-                entity_id=employee.id,
-                document_type=doc_type
-            ).first()
+            existing = (
+                db.query(FileModel)
+                .filter_by(
+                    entity_type="employee",
+                    entity_id=employee.id,
+                    document_type=doc_type,
+                )
+                .first()
+            )
 
             if existing:
                 existing.file_url = file_url
             else:
-                db.add(FileModel(
-                    entity_type="employee",
-                    entity_id=employee.id,
-                    document_type=doc_type,
-                    file_url=file_url,
-                    uploaded_by=current_user.id,
-            ))
+                db.add(
+                    FileModel(
+                        entity_type="employee",
+                        entity_id=employee.id,
+                        document_type=doc_type,
+                        file_url=file_url,
+                        uploaded_by=current_user.id,
+                    )
+                )
 
     db.commit()
 
@@ -235,7 +229,6 @@ async def patch_employee(
     employee_id: int,
     files: List[UploadFile] = File(None),
     document_types: List[str] = Form(None),
-
     # BASIC
     first_name: str = Form(None),
     last_name: str = Form(None),
@@ -244,7 +237,6 @@ async def patch_employee(
     department: str = Form(None),
     date_hired: str = Form(None),
     is_active: int = Form(None),
-
     # PERSONAL
     birthday: str = Form(None),
     birthplace: str = Form(None),
@@ -258,26 +250,21 @@ async def patch_employee(
     contact_number: str = Form(None),
     current_address: str = Form(None),
     provincial_address: str = Form(None),
-
     # FAMILY
     spouse: str = Form(None),
     father_name: str = Form(None),
     mother_name: str = Form(None),
-
     # GOVERNMENT
     sss: str = Form(None),
     philhealth: str = Form(None),
     pagibig: str = Form(None),
     tin: str = Form(None),
-
     # EMERGENCY
     emergency_contact_name: str = Form(None),
     emergency_contact_number: str = Form(None),
     emergency_relationship: str = Form(None),
-
     # FILE
     resume: UploadFile = File(None),
-
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -307,7 +294,9 @@ async def patch_employee(
     # =========================
     # PERSONAL (UPSERT)
     # =========================
-    personal = db.query(EmployeePersonalDetails).filter_by(employee_id=employee.id).first()
+    personal = (
+        db.query(EmployeePersonalDetails).filter_by(employee_id=employee.id).first()
+    )
 
     if not personal:
         personal = EmployeePersonalDetails(employee_id=employee.id)
@@ -378,12 +367,14 @@ async def patch_employee(
     if emergency_contact_name is not None:
         db.query(EmployeeEmergencyContact).filter_by(employee_id=employee.id).delete()
 
-        db.add(EmployeeEmergencyContact(
-            employee_id=employee.id,
-            contact_name=emergency_contact_name,
-            contact_number=emergency_contact_number,
-            relationship_type=emergency_relationship,
-        ))
+        db.add(
+            EmployeeEmergencyContact(
+                employee_id=employee.id,
+                contact_name=emergency_contact_name,
+                contact_number=emergency_contact_number,
+                relationship_type=emergency_relationship,
+            )
+        )
 
     # =========================
     # FILE (UPSERT via FileService)
@@ -393,7 +384,9 @@ async def patch_employee(
     if files and document_types:
 
         if len(files) != len(document_types):
-            raise HTTPException(status_code=400, detail="Files and document types mismatch")
+            raise HTTPException(
+                status_code=400, detail="Files and document types mismatch"
+            )
 
         for file, doc_type in zip(files, document_types):
 
@@ -401,26 +394,33 @@ async def patch_employee(
             file_url = file_service.upload(file, f"employees/{employee.id}")
 
             # check existing (UPSERT)
-            existing = db.query(FileModel).filter_by(
-                entity_type="employee",
-                entity_id=employee.id,
-                document_type=doc_type
-            ).first()
+            existing = (
+                db.query(FileModel)
+                .filter_by(
+                    entity_type="employee",
+                    entity_id=employee.id,
+                    document_type=doc_type,
+                )
+                .first()
+            )
 
             if existing:
                 existing.file_url = file_url
             else:
-                db.add(FileModel(
-                    entity_type="employee",
-                    entity_id=employee.id,
-                    document_type=doc_type,
-                    file_url=file_url,
-                    uploaded_by=current_user.id,
-            ))
+                db.add(
+                    FileModel(
+                        entity_type="employee",
+                        entity_id=employee.id,
+                        document_type=doc_type,
+                        file_url=file_url,
+                        uploaded_by=current_user.id,
+                    )
+                )
 
     db.commit()
 
     return {"message": "Employee updated successfully"}
+
 
 # ==============================
 # Employee Soft Delete
@@ -443,6 +443,7 @@ def delete_employee(
     db.commit()
 
     return {"message": "Employee deactivated"}
+
 
 # CV PARSER
 @router.post("/parse-cv")

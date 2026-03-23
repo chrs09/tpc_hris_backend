@@ -8,6 +8,7 @@ from app.api.driver import trips
 from app.api.admin import trips as admin_trips
 from app.api.admin import stores
 from app.api.public.public_applicant import router as public_applicant_router
+
 app = FastAPI(
     title=settings.APP_NAME,
     description="A simple HRIS API built with FastAPI",
