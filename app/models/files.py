@@ -13,10 +13,10 @@ class File(Base):
 
     id = Column(Integer, primary_key=True, index=True)
 
-    entity_type = Column(String(50), nullable=False)
+    entity_type = Column(String(50), nullable=False)   # "employee", "trip"
     entity_id = Column(Integer, nullable=False)
 
-    document_type = Column(String(50), nullable=False)
+    document_type = Column(String(50), nullable=False) # "RESUME", "PROFILE_IMAGE"
 
     file_url = Column(String(500), nullable=False)
 
@@ -24,4 +24,4 @@ class File(Base):
 
     created_at = Column(DateTime, server_default=func.now())
 
-    __table_args__ = (Index("idx_entity_lookup", "entity_type", "entity_id"),)
+    # __table_args__ = (Index("idx_entity_lookup", "entity_type", "entity_id"),)

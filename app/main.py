@@ -7,7 +7,7 @@ from app.api import health, auth, employees, attendance, dashboard, reminder, us
 from app.api.driver import trips
 from app.api.admin import trips as admin_trips
 from app.api.admin import stores
-
+from app.api.public.public_applicant import router as public_applicant_router
 app = FastAPI(
     title=settings.APP_NAME,
     description="A simple HRIS API built with FastAPI",
@@ -43,3 +43,4 @@ app.include_router(stores.router, prefix="/api")
 if settings.FILE_STORAGE == "local":
     os.makedirs("uploads", exist_ok=True)
     app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
+app.include_router(public_applicant_router)

@@ -116,11 +116,29 @@ class FileService:
     def upload_trip_stop_photo(self, file, trip_id):
         folder = f"trips/{trip_id}/stop"
         return self.upload(file, folder)
+    
+    
+    def upload_gps_log_photo(self, file, trip_id):
+        folder = f"gps_logs/{trip_id}"
+        return self.upload(file, folder)
+    
+    # ===============================
+    # EMPLOYEE FILES
+    # ===============================
+
+    def upload_employee_profile(self, file, employee_id):
+        folder = f"employees/{employee_id}/profile"
+        return self.upload(file, folder)
+
+    def upload_employee_resume(self, file, employee_id):
+        folder = f"employees/{employee_id}/resume"
+        return self.upload(file, folder)
+
+    def upload_employee_document(self, file, employee_id, doc_type):
+        folder = f"employees/{employee_id}/{doc_type}"
+        return self.upload(file, folder)
 
     def upload_employee_photo(self, file, employee_id):
         folder = f"employees/{employee_id}"
         return self.upload(file, folder)
 
-    def upload_gps_log_photo(self, file, trip_id):
-        folder = f"gps_logs/{trip_id}"
-        return self.upload(file, folder)

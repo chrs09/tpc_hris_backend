@@ -15,11 +15,8 @@ class Employee(Base):
     date_hired = Column(Date, nullable=False)
     department = Column(String(100), nullable=False)
     is_active = Column(Integer, nullable=False, default=1)
-<<<<<<< Updated upstream
     is_available = Column(Integer, nullable=False, default=True)
 
-=======
->>>>>>> Stashed changes
     created_by_user_id = Column(Integer, ForeignKey("tpc_users.id"), nullable=False)
 
     # 1️⃣ One-to-one: employee may have login
@@ -43,8 +40,6 @@ class Employee(Base):
     )
 
     trips = relationship("Trip", secondary="tpc_trip_helpers", viewonly=True)
-    # Attendance
-    attendance_records = relationship("AttendanceRecord", back_populates="employee")
 
     # Extended HRIS relationships
     personal_details = relationship(

@@ -30,6 +30,7 @@ class EmployeeResponse(BaseModel):
     position: str
     date_hired: date
     department: str
+    is_active: bool
     # created_by_user_id: Optional[int]  # Make this optional in case it's not always returned
     # created_by_user_id: int
 
