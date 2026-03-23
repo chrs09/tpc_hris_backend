@@ -1,5 +1,6 @@
 import os
 import uuid
+import boto3
 from azure.storage.blob import BlobServiceClient
 from app.core.config import settings
 
@@ -14,6 +15,14 @@ class FileService:
                 settings.AZURE_STORAGE_CONNECTION_STRING
             )
 
+        if self.storage == "s3":
+            self.client = boto3.client(
+                "s3",
+                aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
+                aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
+                region_name=settings.AWS_REGION,
+            )
+
     # ===============================
     # GENERIC UPLOAD HANDLER
     # ===============================
@@ -22,6 +31,9 @@ class FileService:
 
         if self.storage == "azure":
             return self._upload_azure(file, folder_path)
+        
+        if self.storage == "s3":
+            return self._upload_s3(file, folder_path)
 
         return self._upload_local(file, folder_path)
 
@@ -42,7 +54,7 @@ class FileService:
         with open(file_path, "wb") as buffer:
             buffer.write(file.file.read())
 
-        return file_path
+        return f"{settings.API_BASE_URL}/{file_path}"
 
     # ===============================
     # AZURE BLOB STORAGE
@@ -62,6 +74,36 @@ class FileService:
         blob_client.upload_blob(file.file, overwrite=True)
 
         return blob_client.url
+
+    # ===============================
+    # AWS S3 STORAGE
+    # ===============================
+    def _upload_s3(self, file, folder_path):
+
+        extension = file.filename.split(".")[-1].lower() if "." in file.filename else "jpg"
+        filename = f"{uuid.uuid4()}.{extension}"
+
+        key = f"{folder_path}/{filename}"
+
+        # determine correct content type
+        content_type = "image/jpeg"
+        if extension == "png":
+            content_type = "image/png"
+        elif extension == "gif":
+            content_type = "image/gif"
+        elif extension == "webp":
+            content_type = "image/webp"
+
+        self.client.upload_fileobj(
+            file.file,
+            settings.AWS_BUCKET_NAME,
+            key,
+            ExtraArgs={
+                "ContentType": content_type
+            }
+        )
+
+        return f"https://{settings.AWS_BUCKET_NAME}.s3.{settings.AWS_REGION}.amazonaws.com/{key}"
 
     # ===============================
     # SPECIFIC FILE TYPES
