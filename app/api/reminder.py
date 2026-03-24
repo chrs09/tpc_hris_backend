@@ -56,7 +56,9 @@ def get_reminders(
             id=r.id,
             message=r.message,
             created_by_user_id=r.created_by_user_id,
-            created_by_username=r.created_by_user.username if r.created_by_user else None,
+            created_by_username=(
+                r.created_by_user.username if r.created_by_user else None
+            ),
             is_resolved=r.is_resolved,
             created_at=r.created_at,
         )

@@ -20,20 +20,22 @@ from app.services.file_service import FileService
 
 router = APIRouter(prefix="/employees", tags=["Employees"])
 
+
 def parse_date(value: str):
     if not value:
         return None
     return datetime.strptime(value, "%Y-%m-%d").date()
+
 
 def safe_json_loads(value: str, field_name: str):
     try:
         return json.loads(value or "[]")
     except ValueError:
         raise HTTPException(
-            status_code=400,
-            detail=f"Invalid JSON format for {field_name}"
+            status_code=400, detail=f"Invalid JSON format for {field_name}"
         )
-   
+
+
 # ==============================
 # Employee List (Only Active)
 # ==============================
@@ -180,18 +182,16 @@ async def create_employee(
     emergency_contact_name: str = Form(None),
     emergency_contact_number: str = Form(None),
     emergency_relationship: str = Form(None),
-
     # ARRAY FIELDS
     education_records: str = Form("[]"),
     employment_history: str = Form("[]"),
-
     # FILES
     # profile_image: UploadFile = File(None),
     # resume: UploadFile = File(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    
+
     parsed_education = safe_json_loads(education_records, "education_records")
     parsed_employment = safe_json_loads(employment_history, "employment_history")
 
@@ -253,14 +253,16 @@ async def create_employee(
 
     # EDUCATION
     for edu in parsed_education:
-        if not any([
-            edu.get("level"),
-            edu.get("institution"),
-            edu.get("degree"),
-            edu.get("year_from"),
-            edu.get("year_to"),
-            edu.get("skills"),
-        ]):
+        if not any(
+            [
+                edu.get("level"),
+                edu.get("institution"),
+                edu.get("degree"),
+                edu.get("year_from"),
+                edu.get("year_to"),
+                edu.get("skills"),
+            ]
+        ):
             continue
 
         db.add(
@@ -277,12 +279,14 @@ async def create_employee(
 
     # EMPLOYMENT HISTORY
     for job in parsed_employment:
-        if not any([
-            job.get("company_name"),
-            job.get("position"),
-            job.get("date_from"),
-            job.get("date_to"),
-        ]):
+        if not any(
+            [
+                job.get("company_name"),
+                job.get("position"),
+                job.get("date_from"),
+                job.get("date_to"),
+            ]
+        ):
             continue
 
         db.add(
@@ -505,14 +509,16 @@ async def patch_employee(
         db.query(EmployeeEducation).filter_by(employee_id=employee.id).delete()
 
         for edu in parsed_education:
-            if not any([
-                edu.get("level"),
-                edu.get("institution"),
-                edu.get("degree"),
-                edu.get("year_from"),
-                edu.get("year_to"),
-                edu.get("skills"),
-            ]):
+            if not any(
+                [
+                    edu.get("level"),
+                    edu.get("institution"),
+                    edu.get("degree"),
+                    edu.get("year_from"),
+                    edu.get("year_to"),
+                    edu.get("skills"),
+                ]
+            ):
                 continue
 
             db.add(
@@ -534,12 +540,14 @@ async def patch_employee(
         db.query(EmployeeEmploymentHistory).filter_by(employee_id=employee.id).delete()
 
         for job in parsed_employment:
-            if not any([
-                job.get("company_name"),
-                job.get("position"),
-                job.get("date_from"),
-                job.get("date_to"),
-            ]):
+            if not any(
+                [
+                    job.get("company_name"),
+                    job.get("position"),
+                    job.get("date_from"),
+                    job.get("date_to"),
+                ]
+            ):
                 continue
 
             db.add(
@@ -551,7 +559,6 @@ async def patch_employee(
                     date_to=parse_date(job.get("date_to")),
                 )
             )
-
 
     # =========================
     # FILE (UPSERT via FileService)
