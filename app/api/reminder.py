@@ -44,12 +44,24 @@ def get_reminders(
     if current_user.role != "superadmin":
         return []
 
-    return (
+    reminders = (
         db.query(Reminder)
         .filter(Reminder.is_resolved.is_(False))
         .order_by(Reminder.created_at.desc())
         .all()
     )
+
+    return [
+        ReminderResponse(
+            id=r.id,
+            message=r.message,
+            created_by_user_id=r.created_by_user_id,
+            created_by_username=r.created_by_user.username if r.created_by_user else None,
+            is_resolved=r.is_resolved,
+            created_at=r.created_at,
+        )
+        for r in reminders
+    ]
 
 
 @router.patch("/{reminder_id}")

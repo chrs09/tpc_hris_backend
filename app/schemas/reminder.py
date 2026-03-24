@@ -9,6 +9,8 @@ class ReminderCreate(BaseModel):
 class ReminderResponse(BaseModel):
     id: int
     message: str
+    created_by_user_id: int | None = None
+    created_by_username: str | None = None
     is_resolved: bool
     created_at: datetime
 

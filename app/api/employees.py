@@ -1,12 +1,16 @@
+import json
 from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile, File
 from datetime import datetime
 from typing import List
+from sqlalchemy import case
 from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.models.employee_emergency import EmployeeEmergencyContact
 from app.models.employee_family import EmployeeFamilyDetails
 from app.models.employee_government import EmployeeGovernmentDetails
 from app.models.employee_personal import EmployeePersonalDetails
+from app.models.employee_education import EmployeeEducation
+from app.models.employee_employment import EmployeeEmploymentHistory
 from app.models.employees import Employee
 from app.models.user import User
 from app.core.dependencies import get_current_user
@@ -16,7 +20,20 @@ from app.services.file_service import FileService
 
 router = APIRouter(prefix="/employees", tags=["Employees"])
 
+def parse_date(value: str):
+    if not value:
+        return None
+    return datetime.strptime(value, "%Y-%m-%d").date()
 
+def safe_json_loads(value: str, field_name: str):
+    try:
+        return json.loads(value or "[]")
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid JSON format for {field_name}"
+        )
+   
 # ==============================
 # Employee List (Only Active)
 # ==============================
@@ -25,7 +42,25 @@ def get_employees(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    return db.query(Employee).filter(Employee.is_active == 1).all()
+    department_order = case(
+        (Employee.department == "Admin", 1),
+        (Employee.department == "Yard", 2),
+        (Employee.department == "Motorpool", 3),
+        (Employee.department == "Dumptruck", 4),
+        (Employee.department == "Labor", 5),
+        (Employee.department == "CdcDriver", 6),
+        (Employee.department == "CdcHelper", 7),
+        (Employee.department == "CpdcDriver", 8),
+        (Employee.department == "CpdcHelper", 9),
+        else_=100,
+    )
+
+    return (
+        db.query(Employee)
+        .filter(Employee.is_active == 1)
+        .order_by(department_order, Employee.last_name.asc())
+        .all()
+    )
 
 
 # ==============================
@@ -62,6 +97,14 @@ def get_employee_detail(
         db.query(EmployeeEmergencyContact).filter_by(employee_id=employee.id).all()
     )
 
+    education_records = (
+        db.query(EmployeeEducation).filter_by(employee_id=employee.id).all()
+    )
+
+    employment_history = (
+        db.query(EmployeeEmploymentHistory).filter_by(employee_id=employee.id).all()
+    )
+
     # ✅ UNIFIED FILES (IMPORTANT)
     files = (
         db.query(FileModel)
@@ -78,6 +121,28 @@ def get_employee_detail(
         "family_details": family.__dict__ if family else None,
         "government_details": government.__dict__ if government else None,
         "emergency_contacts": [contact.__dict__ for contact in emergency_contacts],
+        "education_records": [
+            {
+                "id": edu.id,
+                "level": edu.level,
+                "institution": edu.institution,
+                "degree": edu.degree,
+                "year_from": edu.year_from,
+                "year_to": edu.year_to,
+                "skills": edu.skills,
+            }
+            for edu in education_records
+        ],
+        "employment_history": [
+            {
+                "id": job.id,
+                "company_name": job.company_name,
+                "position": job.position,
+                "date_from": str(job.date_from) if job.date_from else None,
+                "date_to": str(job.date_to) if job.date_to else None,
+            }
+            for job in employment_history
+        ],
         "files": [
             {"document_type": f.document_type, "file_url": f.file_url} for f in files
         ],
@@ -115,19 +180,28 @@ async def create_employee(
     emergency_contact_name: str = Form(None),
     emergency_contact_number: str = Form(None),
     emergency_relationship: str = Form(None),
+
+    # ARRAY FIELDS
+    education_records: str = Form("[]"),
+    employment_history: str = Form("[]"),
+
     # FILES
-    profile_image: UploadFile = File(None),
-    resume: UploadFile = File(None),
+    # profile_image: UploadFile = File(None),
+    # resume: UploadFile = File(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    
+    parsed_education = safe_json_loads(education_records, "education_records")
+    parsed_employment = safe_json_loads(employment_history, "employment_history")
+
     employee = Employee(
         first_name=first_name,
         last_name=last_name,
         email=email,
         position=position,
         department=department,
-        date_hired=date_hired,
+        date_hired=parse_date(date_hired),
         created_by_user_id=current_user.id,
         is_active=1,
     )
@@ -139,7 +213,7 @@ async def create_employee(
     db.add(
         EmployeePersonalDetails(
             employee_id=employee.id,
-            birthday=birthday,
+            birthday=parse_date(birthday),
             birthplace=birthplace,
             civil_status=civil_status,
             gender=gender,
@@ -174,6 +248,50 @@ async def create_employee(
                 contact_name=emergency_contact_name,
                 contact_number=emergency_contact_number,
                 relationship_type=emergency_relationship,
+            )
+        )
+
+    # EDUCATION
+    for edu in parsed_education:
+        if not any([
+            edu.get("level"),
+            edu.get("institution"),
+            edu.get("degree"),
+            edu.get("year_from"),
+            edu.get("year_to"),
+            edu.get("skills"),
+        ]):
+            continue
+
+        db.add(
+            EmployeeEducation(
+                employee_id=employee.id,
+                level=edu.get("level"),
+                institution=edu.get("institution"),
+                degree=edu.get("degree"),
+                year_from=edu.get("year_from"),
+                year_to=edu.get("year_to"),
+                skills=edu.get("skills"),
+            )
+        )
+
+    # EMPLOYMENT HISTORY
+    for job in parsed_employment:
+        if not any([
+            job.get("company_name"),
+            job.get("position"),
+            job.get("date_from"),
+            job.get("date_to"),
+        ]):
+            continue
+
+        db.add(
+            EmployeeEmploymentHistory(
+                employee_id=employee.id,
+                company_name=job.get("company_name"),
+                position=job.get("position"),
+                date_from=parse_date(job.get("date_from")),
+                date_to=parse_date(job.get("date_to")),
             )
         )
 
@@ -263,8 +381,11 @@ async def patch_employee(
     emergency_contact_name: str = Form(None),
     emergency_contact_number: str = Form(None),
     emergency_relationship: str = Form(None),
+    # ARRAY FIELDS
+    education_records: str = Form(None),
+    employment_history: str = Form(None),
     # FILE
-    resume: UploadFile = File(None),
+    # resume: UploadFile = File(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -367,14 +488,70 @@ async def patch_employee(
     if emergency_contact_name is not None:
         db.query(EmployeeEmergencyContact).filter_by(employee_id=employee.id).delete()
 
-        db.add(
-            EmployeeEmergencyContact(
-                employee_id=employee.id,
-                contact_name=emergency_contact_name,
-                contact_number=emergency_contact_number,
-                relationship_type=emergency_relationship,
+        if emergency_contact_name != "":
+            db.add(
+                EmployeeEmergencyContact(
+                    employee_id=employee.id,
+                    contact_name=emergency_contact_name,
+                    contact_number=emergency_contact_number,
+                    relationship_type=emergency_relationship,
+                )
             )
-        )
+
+    # EDUCATION - replace all if provided
+    if education_records is not None:
+        parsed_education = safe_json_loads(education_records, "education_records")
+
+        db.query(EmployeeEducation).filter_by(employee_id=employee.id).delete()
+
+        for edu in parsed_education:
+            if not any([
+                edu.get("level"),
+                edu.get("institution"),
+                edu.get("degree"),
+                edu.get("year_from"),
+                edu.get("year_to"),
+                edu.get("skills"),
+            ]):
+                continue
+
+            db.add(
+                EmployeeEducation(
+                    employee_id=employee.id,
+                    level=edu.get("level"),
+                    institution=edu.get("institution"),
+                    degree=edu.get("degree"),
+                    year_from=edu.get("year_from"),
+                    year_to=edu.get("year_to"),
+                    skills=edu.get("skills"),
+                )
+            )
+
+    # EMPLOYMENT HISTORY - replace all if provided
+    if employment_history is not None:
+        parsed_employment = safe_json_loads(employment_history, "employment_history")
+
+        db.query(EmployeeEmploymentHistory).filter_by(employee_id=employee.id).delete()
+
+        for job in parsed_employment:
+            if not any([
+                job.get("company_name"),
+                job.get("position"),
+                job.get("date_from"),
+                job.get("date_to"),
+            ]):
+                continue
+
+            db.add(
+                EmployeeEmploymentHistory(
+                    employee_id=employee.id,
+                    company_name=job.get("company_name"),
+                    position=job.get("position"),
+                    date_from=parse_date(job.get("date_from")),
+                    date_to=parse_date(job.get("date_to")),
+                )
+            )
+
 
     # =========================
     # FILE (UPSERT via FileService)

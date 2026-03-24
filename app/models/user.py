@@ -64,3 +64,10 @@ class User(Base):
 
     # 4️⃣ One-to-many: driver has many trips
     trips = relationship("Trip", back_populates="driver", cascade="all, delete-orphan")
+
+    # 5️⃣ One-to-many: user created many reminders
+    created_reminders = relationship(
+        "Reminder",
+        foreign_keys="Reminder.created_by_user_id",
+        back_populates="created_by_user",
+    )
