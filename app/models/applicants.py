@@ -8,14 +8,14 @@ class Applicant(Base):
 
     id = Column(Integer, primary_key=True, index=True)
 
-    first_name = Column(String)
-    last_name = Column(String)
-    email = Column(String)
-    contact_number = Column(String)
-    position_applied = Column(String)
+    first_name = Column(String(100))
+    last_name = Column(String(100))
+    email = Column(String(150))
+    contact_number = Column(String(30))
+    position_applied = Column(String(150))
 
-    cv_file = Column(String)
+    # cv_file = Column(String)
 
-    status = Column(String, default="pending")  # pending, reviewed, hired, rejected
+    status = Column(String(50), default="pending")  # pending, reviewed, hired, rejected
 
     created_at = Column(DateTime, default=datetime.utcnow)

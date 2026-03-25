@@ -7,6 +7,7 @@ from app.api import health, auth, employees, attendance, dashboard, reminder, us
 from app.api.driver import trips
 from app.api.admin import trips as admin_trips
 from app.api.admin import stores
+from app.api.admin.applicants import router as admin_applicants_router
 from app.api.public.public_applicant import router as public_applicant_router
 
 app = FastAPI(
@@ -45,3 +46,4 @@ if settings.FILE_STORAGE == "local":
     os.makedirs("uploads", exist_ok=True)
     app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 app.include_router(public_applicant_router)
+app.include_router(admin_applicants_router)

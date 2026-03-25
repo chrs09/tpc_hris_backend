@@ -1,23 +1,55 @@
-# app/models/applicant.py
-
-from sqlalchemy import Column, Integer, String, DateTime
+from pydantic import BaseModel
 from datetime import datetime
-from app.core.database import Base
+from typing import Optional, List
 
 
-class Applicant(Base):
-    __tablename__ = "tpc_applicants"
+class ApplicantResponse(BaseModel):
+    id: int
+    first_name: str
+    last_name: str
+    email: str
+    contact_number: str
+    position_applied: str
+    status: str
+    created_at: datetime
+    cv_url: Optional[str] = None
 
-    id = Column(Integer, primary_key=True, index=True)
+    class Config:
+        from_attributes = True
 
-    first_name = Column(String)
-    last_name = Column(String)
-    email = Column(String)
-    contact_number = Column(String)
-    position_applied = Column(String)
 
-    cv_file = Column(String)
+class ApplicantStatusUpdate(BaseModel):
+    status: str
 
-    status = Column(String, default="pending")  # pending, reviewed, hired, rejected
 
-    created_at = Column(DateTime, default=datetime.utcnow)
+class ApplicantRemarkCreate(BaseModel):
+    remark: str
+    status: Optional[str] = None
+
+
+class ApplicantRemarkResponse(BaseModel):
+    id: int
+    applicant_id: int
+    status: Optional[str] = None
+    remark: str
+    created_by_user_id: Optional[int] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class ApplicantDetailResponse(BaseModel):
+    id: int
+    first_name: str
+    last_name: str
+    email: str
+    contact_number: str
+    position_applied: str
+    status: str
+    created_at: datetime
+    cv_url: Optional[str] = None
+    remarks: List[ApplicantRemarkResponse] = []
+
+    class Config:
+        from_attributes = True
