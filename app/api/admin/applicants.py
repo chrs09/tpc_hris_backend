@@ -29,6 +29,7 @@ ALLOWED_STATUSES = [
     "no_show",
 ]
 
+
 def get_applicant_cv_url(db: Session, applicant_id: int):
     cv = (
         db.query(FileModel)
@@ -41,29 +42,29 @@ def get_applicant_cv_url(db: Session, applicant_id: int):
     )
     return cv.file_url if cv else None
 
+
 @router.get("/", response_model=List[ApplicantResponse])
 def get_applicants(db: Session = Depends(get_db)):
-    applicants = (
-        db.query(Applicant)
-        .order_by(Applicant.created_at.desc())
-        .all()
-    )
+    applicants = db.query(Applicant).order_by(Applicant.created_at.desc()).all()
 
     result = []
     for applicant in applicants:
-        result.append({
-            "id": applicant.id,
-            "first_name": applicant.first_name,
-            "last_name": applicant.last_name,
-            "email": applicant.email,
-            "contact_number": applicant.contact_number,
-            "position_applied": applicant.position_applied,
-            "status": applicant.status,
-            "created_at": applicant.created_at,
-            "cv_url": get_applicant_cv_url(db, applicant.id),
-        })
+        result.append(
+            {
+                "id": applicant.id,
+                "first_name": applicant.first_name,
+                "last_name": applicant.last_name,
+                "email": applicant.email,
+                "contact_number": applicant.contact_number,
+                "position_applied": applicant.position_applied,
+                "status": applicant.status,
+                "created_at": applicant.created_at,
+                "cv_url": get_applicant_cv_url(db, applicant.id),
+            }
+        )
 
     return result
+
 
 @router.get("/{applicant_id}", response_model=ApplicantDetailResponse)
 def get_applicant_detail(applicant_id: int, db: Session = Depends(get_db)):
@@ -91,6 +92,7 @@ def get_applicant_detail(applicant_id: int, db: Session = Depends(get_db)):
         "cv_url": get_applicant_cv_url(db, applicant.id),
         "remarks": remarks,
     }
+
 
 @router.patch("/{applicant_id}/status")
 def update_applicant_status(
