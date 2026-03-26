@@ -1,6 +1,7 @@
-from pydantic import BaseModel
 from datetime import datetime
-from typing import Optional, List
+from typing import List, Optional
+
+from pydantic import BaseModel, Field
 
 
 class ApplicantResponse(BaseModel):
@@ -13,6 +14,10 @@ class ApplicantResponse(BaseModel):
     status: str
     created_at: datetime
     cv_url: Optional[str] = None
+    is_converted_to_employee: bool
+    employee_id: Optional[int] = None
+    hired_at: Optional[datetime] = None
+    converted_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True
@@ -39,6 +44,11 @@ class ApplicantRemarkResponse(BaseModel):
         from_attributes = True
 
 
+class ConvertApplicantRequest(BaseModel):
+    department: str
+    position: Optional[str] = None
+
+
 class ApplicantDetailResponse(BaseModel):
     id: int
     first_name: str
@@ -49,7 +59,11 @@ class ApplicantDetailResponse(BaseModel):
     status: str
     created_at: datetime
     cv_url: Optional[str] = None
-    remarks: List[ApplicantRemarkResponse] = []
+    is_converted_to_employee: bool
+    employee_id: Optional[int] = None
+    hired_at: Optional[datetime] = None
+    converted_at: Optional[datetime] = None
+    remarks: List[ApplicantRemarkResponse] = Field(default_factory=list)
 
     class Config:
         from_attributes = True

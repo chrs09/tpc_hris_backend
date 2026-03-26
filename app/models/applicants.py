@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime
+from sqlalchemy import Column, Integer, String, DateTime, Boolean, ForeignKey
 from datetime import datetime
 from app.core.database import Base
 
@@ -17,5 +17,9 @@ class Applicant(Base):
     # cv_file = Column(String)
 
     status = Column(String(50), default="pending")  # pending, reviewed, hired, rejected
+    is_converted_to_employee = Column(Boolean, default=False)
+    employee_id = Column(Integer, ForeignKey("tpc_employees.id"), nullable=True)
+    hired_at = Column(DateTime, nullable=True)
+    converted_at = Column(DateTime, nullable=True)
 
     created_at = Column(DateTime, default=datetime.utcnow)
