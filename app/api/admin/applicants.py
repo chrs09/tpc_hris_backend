@@ -198,9 +198,7 @@ def convert_to_employee(
         )
 
     existing_employee = (
-        db.query(Employee)
-        .filter(Employee.email == applicant.email)
-        .first()
+        db.query(Employee).filter(Employee.email == applicant.email).first()
     )
 
     if existing_employee:
@@ -229,7 +227,7 @@ def convert_to_employee(
         is_active=1,
         is_available=1,
         # employment_status="active",
-        created_by_user_id = current_user.id,
+        created_by_user_id=current_user.id,
         date_hired=datetime.utcnow(),
     )
 
