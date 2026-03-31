@@ -1,12 +1,12 @@
 import os
 import uuid
+import mimetypes
 import boto3
-from azure.storage.blob import BlobServiceClient
+from azure.storage.blob import BlobServiceClient, ContentSettings
 from app.core.config import settings
 
 
 class FileService:
-
     def __init__(self):
         self.storage = settings.FILE_STORAGE
 
@@ -28,7 +28,6 @@ class FileService:
     # ===============================
 
     def upload(self, file, folder_path):
-
         if self.storage == "azure":
             return self._upload_azure(file, folder_path)
 
@@ -42,15 +41,16 @@ class FileService:
     # ===============================
 
     def _upload_local(self, file, folder_path):
-
         base_path = f"uploads/{folder_path}"
         os.makedirs(base_path, exist_ok=True)
 
-        extension = file.filename.split(".")[-1]
+        extension = (
+            file.filename.split(".")[-1].lower() if "." in file.filename else "bin"
+        )
         filename = f"{uuid.uuid4()}.{extension}"
-
         file_path = f"{base_path}/{filename}"
 
+        file.file.seek(0)
         with open(file_path, "wb") as buffer:
             buffer.write(file.file.read())
 
@@ -61,46 +61,64 @@ class FileService:
     # ===============================
 
     def _upload_azure(self, file, folder_path):
-
-        extension = file.filename.split(".")[-1]
+        extension = (
+            file.filename.split(".")[-1].lower() if "." in file.filename else "bin"
+        )
         filename = f"{uuid.uuid4()}.{extension}"
-
         blob_path = f"{folder_path}/{filename}"
 
+        content_type, _ = mimetypes.guess_type(file.filename)
+        if not content_type:
+            content_type = (
+                getattr(file, "content_type", None) or "application/octet-stream"
+            )
+
         blob_client = self.client.get_blob_client(
-            container=settings.AZURE_CONTAINER, blob=blob_path
+            container=settings.AZURE_CONTAINER,
+            blob=blob_path,
         )
 
-        blob_client.upload_blob(file.file, overwrite=True)
+        file.file.seek(0)
+        blob_client.upload_blob(
+            file.file,
+            overwrite=True,
+            content_settings=ContentSettings(content_type=content_type),
+        )
 
         return blob_client.url
 
     # ===============================
     # AWS S3 STORAGE
     # ===============================
-    def _upload_s3(self, file, folder_path):
 
+    def _upload_s3(self, file, folder_path):
         extension = (
-            file.filename.split(".")[-1].lower() if "." in file.filename else "jpg"
+            file.filename.split(".")[-1].lower() if "." in file.filename else "bin"
         )
         filename = f"{uuid.uuid4()}.{extension}"
-
         key = f"{folder_path}/{filename}"
 
-        # determine correct content type
-        content_type = "image/jpeg"
-        if extension == "png":
-            content_type = "image/png"
-        elif extension == "gif":
-            content_type = "image/gif"
-        elif extension == "webp":
-            content_type = "image/webp"
+        content_type, _ = mimetypes.guess_type(file.filename)
+        if not content_type:
+            content_type = (
+                getattr(file, "content_type", None) or "application/octet-stream"
+            )
 
+        content_disposition = (
+            "inline"
+            if content_type == "application/pdf" or content_type.startswith("image/")
+            else "attachment"
+        )
+
+        file.file.seek(0)
         self.client.upload_fileobj(
             file.file,
             settings.AWS_BUCKET_NAME,
             key,
-            ExtraArgs={"ContentType": content_type},
+            ExtraArgs={
+                "ContentType": content_type,
+                "ContentDisposition": content_disposition,
+            },
         )
 
         return f"https://{settings.AWS_BUCKET_NAME}.s3.{settings.AWS_REGION}.amazonaws.com/{key}"
