@@ -9,6 +9,9 @@ class Settings:
     APP_NAME = os.getenv("APP_NAME", "FastAPI Application")
     ENV = os.getenv("ENV", "development")
 
+    #FRONTEND
+    FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
+
     # FILE STORAGE
     FILE_STORAGE = os.getenv("FILE_STORAGE", "local")
     AZURE_STORAGE_CONNECTION_STRING = os.getenv("AZURE_STORAGE_CONNECTION_STRING")

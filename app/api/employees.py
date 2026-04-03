@@ -57,12 +57,51 @@ def get_employees(
         else_=100,
     )
 
-    return (
+    employees = (
         db.query(Employee)
         .filter(Employee.is_active == 1)
         .order_by(department_order, Employee.last_name.asc())
         .all()
     )
+
+    employee_ids = [emp.id for emp in employees]
+
+    files = (
+        db.query(FileModel)
+        .filter(
+            FileModel.entity_type == "employee",
+            FileModel.entity_id.in_(employee_ids),
+        )
+        .all()
+        if employee_ids
+        else []
+    )
+
+    files_map = {}
+    for file in files:
+        files_map.setdefault(file.entity_id, []).append(
+            {
+                "document_type": file.document_type,
+                "file_url": file.file_url,
+            }
+        )
+
+    return [
+        {
+            "id": emp.id,
+            "first_name": emp.first_name,
+            "last_name": emp.last_name,
+            "email": emp.email,
+            "position": emp.position,
+            "date_hired": str(emp.date_hired) if emp.date_hired else None,
+            "department": emp.department,
+            "is_active": emp.is_active,
+            "is_available": emp.is_available,
+            "created_by_user_id": emp.created_by_user_id,
+            "files": files_map.get(emp.id, []),
+        }
+        for emp in employees
+    ]
 
 
 # ==============================

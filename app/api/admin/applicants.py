@@ -1,10 +1,12 @@
-from datetime import datetime
+import secrets
+from datetime import datetime, timedelta
 from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
+from app.core.config import Settings
 from app.core.dependencies import get_current_user
 from app.models.applicant_remarks import ApplicantRemark
 from app.models.applicants import Applicant
@@ -12,6 +14,7 @@ from app.models.employees import Employee
 from app.models.files import File as FileModel
 from app.models.user import User
 from app.models.employee_personal import EmployeePersonalDetails
+from app.models.applicant_onboarding import ApplicantOnboarding
 from app.schemas.applicant import (
     ApplicantDetailResponse,
     ApplicantRemarkCreate,
@@ -54,6 +57,12 @@ def get_applicants(db: Session = Depends(get_db)):
 
     result = []
     for applicant in applicants:
+        onboarding = (
+            db.query(ApplicantOnboarding)
+            .filter(ApplicantOnboarding.applicant_id == applicant.id)
+            .first()
+        )
+
         result.append(
             {
                 "id": applicant.id,
@@ -69,6 +78,9 @@ def get_applicants(db: Session = Depends(get_db)):
                 "employee_id": applicant.employee_id,
                 "hired_at": applicant.hired_at,
                 "converted_at": applicant.converted_at,
+
+                "onboarding_is_submitted": bool(onboarding and onboarding.is_submitted),
+                "onboarding_submitted_at": onboarding.submitted_at if onboarding else None,
             }
         )
 
@@ -169,6 +181,48 @@ def add_applicant_remark(
 
     return remark
 
+@router.post("/{applicant_id}/generate-employment-form")
+def generate_employment_form(
+    applicant_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if current_user.role not in ["admin", "superadmin", "hr"]:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    applicant = db.query(Applicant).filter(Applicant.id == applicant_id).first()
+
+    if not applicant:
+        raise HTTPException(status_code=404, detail="Applicant not found")
+
+    if applicant.status.lower() != "interview":
+        raise HTTPException(
+            status_code=400,
+            detail="Employment form can only be generated for interview applicants",
+        )
+
+    if applicant.is_converted_to_employee:
+        raise HTTPException(
+            status_code=400,
+            detail="Applicant has already been converted to employee",
+        )
+
+    token = secrets.token_urlsafe(32)
+
+    applicant.onboarding_token = token
+    applicant.onboarding_token_expires_at = datetime.utcnow() + timedelta(days=7)
+    applicant.onboarding_link_sent_at = datetime.utcnow()
+
+    db.commit()
+    db.refresh(applicant)
+
+    form_url = f"{Settings.FRONTEND_URL.rstrip('/')}/tytan-onboarding-form/{token}"
+
+    return {
+        "message": "Employment form link generated successfully",
+        "form_url": form_url,
+        "expires_at": applicant.onboarding_token_expires_at,
+    }
 
 @router.post("/{applicant_id}/convert-to-employee")
 def convert_to_employee(

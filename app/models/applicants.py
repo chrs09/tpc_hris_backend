@@ -1,5 +1,7 @@
 from sqlalchemy import Column, Integer, String, DateTime, Boolean, ForeignKey
 from datetime import datetime
+
+from sqlalchemy.orm import relationship
 from app.core.database import Base
 
 
@@ -21,5 +23,34 @@ class Applicant(Base):
     employee_id = Column(Integer, ForeignKey("tpc_employees.id"), nullable=True)
     hired_at = Column(DateTime, nullable=True)
     converted_at = Column(DateTime, nullable=True)
-
     created_at = Column(DateTime, default=datetime.utcnow)
+
+    onboarding_token = Column(String(255), nullable=True, unique=True)
+    onboarding_token_expires_at = Column(DateTime, nullable=True)
+    onboarding_link_sent_at = Column(DateTime, nullable=True)
+    onboarding_submitted_at = Column(DateTime, nullable=True)
+
+    onboarding = relationship(
+        "ApplicantOnboarding",
+        back_populates="applicant",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
+
+    education_records = relationship(
+        "ApplicantEducation",
+        back_populates="applicant",
+        cascade="all, delete-orphan",
+    )
+
+    employment_history = relationship(
+        "ApplicantEmploymentHistory",
+        back_populates="applicant",
+        cascade="all, delete-orphan",
+    )
+
+    references = relationship(
+        "ApplicantReference",
+        back_populates="applicant",
+        cascade="all, delete-orphan",
+    )
