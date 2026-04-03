@@ -18,11 +18,7 @@ router = APIRouter(
 
 
 def get_valid_applicant_by_token(db: Session, token: str) -> Applicant:
-    applicant = (
-        db.query(Applicant)
-        .filter(Applicant.onboarding_token == token)
-        .first()
-    )
+    applicant = db.query(Applicant).filter(Applicant.onboarding_token == token).first()
 
     if not applicant:
         raise HTTPException(status_code=404, detail="Invalid onboarding link")

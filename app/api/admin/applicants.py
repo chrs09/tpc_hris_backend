@@ -78,9 +78,10 @@ def get_applicants(db: Session = Depends(get_db)):
                 "employee_id": applicant.employee_id,
                 "hired_at": applicant.hired_at,
                 "converted_at": applicant.converted_at,
-
                 "onboarding_is_submitted": bool(onboarding and onboarding.is_submitted),
-                "onboarding_submitted_at": onboarding.submitted_at if onboarding else None,
+                "onboarding_submitted_at": (
+                    onboarding.submitted_at if onboarding else None
+                ),
             }
         )
 
@@ -181,6 +182,7 @@ def add_applicant_remark(
 
     return remark
 
+
 @router.post("/{applicant_id}/generate-employment-form")
 def generate_employment_form(
     applicant_id: int,
@@ -223,6 +225,7 @@ def generate_employment_form(
         "form_url": form_url,
         "expires_at": applicant.onboarding_token_expires_at,
     }
+
 
 @router.post("/{applicant_id}/convert-to-employee")
 def convert_to_employee(

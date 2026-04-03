@@ -68,6 +68,7 @@ class ApplicantDetailResponse(BaseModel):
     converted_at: Optional[datetime] = None
     remarks: List[ApplicantRemarkResponse] = Field(default_factory=list)
 
+
 class ApplicantEducationPayload(BaseModel):
     level: Optional[str] = None
     institution: Optional[str] = None
@@ -128,5 +129,6 @@ class ApplicantOnboardingPayload(BaseModel):
     education_records: List[ApplicantEducationPayload] = []
     employment_history: List[ApplicantEmploymentPayload] = []
     references: List[ApplicantReferencePayload] = []
+
     class Config:
         from_attributes = True

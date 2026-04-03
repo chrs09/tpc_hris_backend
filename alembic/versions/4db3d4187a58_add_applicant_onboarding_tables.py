@@ -10,7 +10,6 @@ from typing import Sequence, Union
 from alembic import op
 import sqlalchemy as sa
 
-
 # revision identifiers, used by Alembic.
 revision: str = "4db3d4187a58"
 down_revision: Union[str, Sequence[str], None] = "9cae0cba54bc"
@@ -51,7 +50,6 @@ def upgrade() -> None:
         "tpc_applicant_onboarding",
         sa.Column("id", sa.Integer(), primary_key=True, nullable=False),
         sa.Column("applicant_id", sa.Integer(), nullable=False),
-
         # basic
         sa.Column("first_name", sa.String(length=100), nullable=True),
         sa.Column("last_name", sa.String(length=100), nullable=True),
@@ -59,7 +57,6 @@ def upgrade() -> None:
         sa.Column("department", sa.String(length=100), nullable=True),
         sa.Column("position", sa.String(length=150), nullable=True),
         sa.Column("date_hired", sa.Date(), nullable=True),
-
         # personal
         sa.Column("birthday", sa.Date(), nullable=True),
         sa.Column("birthplace", sa.String(length=150), nullable=True),
@@ -73,37 +70,46 @@ def upgrade() -> None:
         sa.Column("contact_number", sa.String(length=50), nullable=True),
         sa.Column("current_address", sa.String(length=255), nullable=True),
         sa.Column("provincial_address", sa.String(length=255), nullable=True),
-
         # family
         sa.Column("spouse_name", sa.String(length=150), nullable=True),
         sa.Column("father_name", sa.String(length=150), nullable=True),
         sa.Column("mother_name", sa.String(length=150), nullable=True),
-
         # emergency
         sa.Column("emergency_contact_name", sa.String(length=150), nullable=True),
         sa.Column("emergency_contact_number", sa.String(length=50), nullable=True),
         sa.Column("emergency_relationship", sa.String(length=100), nullable=True),
-
         # government
         sa.Column("sss", sa.String(length=50), nullable=True),
         sa.Column("philhealth", sa.String(length=50), nullable=True),
         sa.Column("pagibig", sa.String(length=50), nullable=True),
         sa.Column("tin", sa.String(length=50), nullable=True),
-
         # tracking
-        sa.Column("is_submitted", sa.Boolean(), nullable=False, server_default=sa.text("0")),
+        sa.Column(
+            "is_submitted", sa.Boolean(), nullable=False, server_default=sa.text("0")
+        ),
         sa.Column("submitted_at", sa.DateTime(), nullable=True),
         sa.Column("reviewed_at", sa.DateTime(), nullable=True),
-        sa.Column("created_at", sa.DateTime(), nullable=False, server_default=sa.text("CURRENT_TIMESTAMP")),
-        sa.Column("updated_at", sa.DateTime(), nullable=False, server_default=sa.text("CURRENT_TIMESTAMP")),
-
+        sa.Column(
+            "created_at",
+            sa.DateTime(),
+            nullable=False,
+            server_default=sa.text("CURRENT_TIMESTAMP"),
+        ),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(),
+            nullable=False,
+            server_default=sa.text("CURRENT_TIMESTAMP"),
+        ),
         sa.ForeignKeyConstraint(
             ["applicant_id"],
             ["tpc_applicants.id"],
             name="fk_tpc_applicant_onboarding_applicant_id",
             ondelete="CASCADE",
         ),
-        sa.UniqueConstraint("applicant_id", name="uq_tpc_applicant_onboarding_applicant_id"),
+        sa.UniqueConstraint(
+            "applicant_id", name="uq_tpc_applicant_onboarding_applicant_id"
+        ),
     )
 
     op.create_index(
@@ -213,8 +219,13 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_index("ix_tpc_applicant_references_applicant_id", table_name="tpc_applicant_references")
-    op.drop_index("ix_tpc_applicant_references_id", table_name="tpc_applicant_references")
+    op.drop_index(
+        "ix_tpc_applicant_references_applicant_id",
+        table_name="tpc_applicant_references",
+    )
+    op.drop_index(
+        "ix_tpc_applicant_references_id", table_name="tpc_applicant_references"
+    )
     op.drop_table("tpc_applicant_references")
 
     op.drop_index(
@@ -227,14 +238,20 @@ def downgrade() -> None:
     )
     op.drop_table("tpc_applicant_employment_history")
 
-    op.drop_index("ix_tpc_applicant_education_applicant_id", table_name="tpc_applicant_education")
+    op.drop_index(
+        "ix_tpc_applicant_education_applicant_id", table_name="tpc_applicant_education"
+    )
     op.drop_index("ix_tpc_applicant_education_id", table_name="tpc_applicant_education")
     op.drop_table("tpc_applicant_education")
 
-    op.drop_index("ix_tpc_applicant_onboarding_id", table_name="tpc_applicant_onboarding")
+    op.drop_index(
+        "ix_tpc_applicant_onboarding_id", table_name="tpc_applicant_onboarding"
+    )
     op.drop_table("tpc_applicant_onboarding")
 
-    op.drop_constraint("uq_tpc_applicants_onboarding_token", "tpc_applicants", type_="unique")
+    op.drop_constraint(
+        "uq_tpc_applicants_onboarding_token", "tpc_applicants", type_="unique"
+    )
     op.drop_column("tpc_applicants", "onboarding_submitted_at")
     op.drop_column("tpc_applicants", "onboarding_link_sent_at")
     op.drop_column("tpc_applicants", "onboarding_token_expires_at")

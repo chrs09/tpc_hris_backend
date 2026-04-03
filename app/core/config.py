@@ -9,7 +9,7 @@ class Settings:
     APP_NAME = os.getenv("APP_NAME", "FastAPI Application")
     ENV = os.getenv("ENV", "development")
 
-    #FRONTEND
+    # FRONTEND
     FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
 
     # FILE STORAGE
