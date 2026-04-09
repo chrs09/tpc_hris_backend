@@ -4,6 +4,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
+from app.models.applicant_qresponse import ApplicantQResponse
+from app.models.applicant_questions import ApplicantQuestion
 from app.models.applicants import Applicant
 from app.models.applicant_onboarding import ApplicantOnboarding
 from app.models.applicant_education import ApplicantEducation
@@ -130,6 +132,76 @@ def serialize_references(records):
     ]
 
 
+def serialize_questions(records):
+    return [
+        {
+            "id": record.id,
+            "question_key": record.question_key,
+            "question_text": record.question_text,
+            "question_type": record.question_type,
+            "is_required": record.is_required,
+            "sort_order": record.sort_order,
+        }
+        for record in records
+    ]
+
+
+def serialize_question_responses(records, question_map: dict[int, str]):
+    return [
+        {
+            "id": record.id,
+            "applicant_id": record.applicant_id,
+            "question_id": record.question_id,
+            "question_key": question_map.get(record.question_id),
+            "answer_text": record.answer_text,
+        }
+        for record in records
+    ]
+
+
+def normalize_position(value: str | None) -> str:
+    if not value:
+        return ""
+    return " ".join(value.lower().strip().split())
+
+
+def infer_role_from_position(position: str | None) -> str:
+    normalized = normalize_position(position)
+
+    if "helper" in normalized:
+        return "helper"
+
+    if "driver" in normalized:
+        return "driver"
+
+    return "admin"
+
+
+def filter_questions_by_position(questions, position: str | None):
+    role = infer_role_from_position(position)
+
+    if role == "helper":
+        return [
+            question
+            for question in questions
+            if question.question_key.startswith("helper_")
+        ]
+
+    if role == "driver":
+        return [
+            question
+            for question in questions
+            if not question.question_key.startswith("admin_")
+            and not question.question_key.startswith("helper_")
+        ]
+
+    return [
+        question
+        for question in questions
+        if question.question_key.startswith("admin_")
+    ]
+
+
 @router.get("/{token}")
 def get_onboarding_form(
     token: str,
@@ -164,6 +236,29 @@ def get_onboarding_form(
         .all()
     )
 
+    all_questions = (
+        db.query(ApplicantQuestion)
+        .filter(ApplicantQuestion.is_active.is_(True))
+        .order_by(ApplicantQuestion.sort_order.asc(), ApplicantQuestion.id.asc())
+        .all()
+    )
+
+    filtered_questions = filter_questions_by_position(
+        all_questions,
+        applicant.position_applied,
+    )
+
+    question_responses = (
+        db.query(ApplicantQResponse)
+        .filter(ApplicantQResponse.applicant_id == applicant.id)
+        .order_by(ApplicantQResponse.id.asc())
+        .all()
+    )
+
+    question_id_to_key = {
+        question.id: question.question_key for question in all_questions
+    }
+
     return {
         "applicant": {
             "id": applicant.id,
@@ -179,6 +274,11 @@ def get_onboarding_form(
         "education_records": serialize_education(education_records),
         "employment_history": serialize_employment(employment_history),
         "references": serialize_references(references),
+        "questions": serialize_questions(filtered_questions),
+        "question_responses": serialize_question_responses(
+            question_responses,
+            question_id_to_key,
+        ),
     }
 
 
@@ -280,7 +380,34 @@ def save_onboarding_form(
             )
         )
 
+    db.query(ApplicantQResponse).filter(
+        ApplicantQResponse.applicant_id == applicant.id
+    ).delete()
+
+    if payload.question_responses:
+        question_map = {
+            question.question_key: question.id
+            for question in db.query(ApplicantQuestion)
+            .filter(ApplicantQuestion.is_active.is_(True))
+            .all()
+        }
+
+        for response in payload.question_responses:
+            question_id = question_map.get(response.question_key)
+
+            if not question_id:
+                continue
+
+            db.add(
+                ApplicantQResponse(
+                    applicant_id=applicant.id,
+                    question_id=question_id,
+                    answer_text=response.answer_text,
+                )
+            )
+
     db.commit()
+    db.refresh(onboarding)
 
     education_records = (
         db.query(ApplicantEducation)
@@ -303,12 +430,30 @@ def save_onboarding_form(
         .all()
     )
 
+    question_response = (
+        db.query(ApplicantQResponse)
+        .filter(ApplicantQResponse.applicant_id == applicant.id)
+        .order_by(ApplicantQResponse.id.asc())
+        .all()
+    )
+
+    question_id_to_key = {
+        question.id: question.question_key
+        for question in db.query(ApplicantQuestion)
+        .filter(ApplicantQuestion.is_active.is_(True))
+        .all()
+    }
+
     return {
         "message": "Onboarding form saved successfully.",
         "onboarding": serialize_onboarding(onboarding),
         "education_records": serialize_education(education_records),
         "employment_history": serialize_employment(employment_history),
         "references": serialize_references(references),
+        "question_responses": serialize_question_responses(
+            question_response,
+            question_id_to_key,
+        ),
     }
 
 

@@ -11,6 +11,7 @@ from app.models.employee_government import EmployeeGovernmentDetails
 from app.models.employee_personal import EmployeePersonalDetails
 from app.models.employee_education import EmployeeEducation
 from app.models.employee_employment import EmployeeEmploymentHistory
+from app.models.employee_reference import EmployeeReference
 from app.models.employees import Employee
 from app.models.user import User
 from app.core.dependencies import get_current_user
@@ -128,6 +129,8 @@ def get_employee_detail(
         db.query(EmployeePersonalDetails).filter_by(employee_id=employee.id).first()
     )
 
+    reference = db.query(EmployeeReference).filter_by(employee_id=employee.id).first()
+
     family = db.query(EmployeeFamilyDetails).filter_by(employee_id=employee.id).first()
 
     government = (
@@ -161,6 +164,7 @@ def get_employee_detail(
         "personal_details": personal.__dict__ if personal else None,
         "family_details": family.__dict__ if family else None,
         "government_details": government.__dict__ if government else None,
+        "character_reference": reference.__dict__ if reference else None,
         "emergency_contacts": [contact.__dict__ for contact in emergency_contacts],
         "education_records": [
             {
@@ -415,6 +419,11 @@ async def patch_employee(
     spouse: str = Form(None),
     father_name: str = Form(None),
     mother_name: str = Form(None),
+    # REFERENCES
+    reference_name: str = Form(None),
+    reference_contact: str = Form(None),
+    reference_address: str = Form(None),
+    reference_occupation: str = Form(None),
     # GOVERNMENT
     sss: str = Form(None),
     philhealth: str = Form(None),
@@ -507,6 +516,25 @@ async def patch_employee(
     if mother_name is not None:
         family.mother_name = mother_name
 
+    # =========================
+    # REFERENCES (REPLACE)
+    # =========================
+
+    reference = db.query(EmployeeReference).filter_by(employee_id=employee.id).first()
+
+    if not reference:
+        reference = EmployeeReference(employee_id=employee.id)
+        db.add(reference)
+    
+    if reference_name is not None:
+        reference.name = reference_name
+    if reference_contact is not None:
+        reference.contact = reference_contact
+    if reference_address is not None:
+        reference.address = reference_address
+    if reference_occupation is not None:
+        reference.occupation = reference_occupation
+    
     # =========================
     # GOVERNMENT
     # =========================

@@ -11,10 +11,21 @@ from app.core.dependencies import get_current_user
 from app.models.applicant_remarks import ApplicantRemark
 from app.models.applicants import Applicant
 from app.models.employees import Employee
+from app.models.employee_family import EmployeeFamilyDetails
+from app.models.employee_government import EmployeeGovernmentDetails
+from app.models.employee_emergency import EmployeeEmergencyContact
+from app.models.employee_education import EmployeeEducation
+from app.models.employee_employment import EmployeeEmploymentHistory
+from app.models.employee_reference import EmployeeReference
 from app.models.files import File as FileModel
 from app.models.user import User
 from app.models.employee_personal import EmployeePersonalDetails
 from app.models.applicant_onboarding import ApplicantOnboarding
+from app.models.applicant_education import ApplicantEducation
+from app.models.applicant_references import ApplicantReference
+from app.models.applicant_employment_history import ApplicantEmploymentHistory
+from app.models.applicant_questions import ApplicantQuestion
+from app.models.applicant_qresponse import ApplicantQResponse
 from app.schemas.applicant import (
     ApplicantDetailResponse,
     ApplicantRemarkCreate,
@@ -50,6 +61,160 @@ def get_applicant_cv_url(db: Session, applicant_id: int):
     )
     return cv.file_url if cv else None
 
+def serialize_onboarding(onboarding: ApplicantOnboarding | None):
+    if not onboarding:
+        return None
+
+    return {
+        "id": onboarding.id,
+        "applicant_id": onboarding.applicant_id,
+        "first_name": onboarding.first_name,
+        "last_name": onboarding.last_name,
+        "email": onboarding.email,
+        "department": onboarding.department,
+        "position": onboarding.position,
+        "birthday": onboarding.birthday,
+        "birthplace": onboarding.birthplace,
+        "gender": onboarding.gender,
+        "civil_status": onboarding.civil_status,
+        "religion": onboarding.religion,
+        "citizenship": onboarding.citizenship,
+        "height": onboarding.height,
+        "weight": onboarding.weight,
+        "language": onboarding.language,
+        "contact_number": onboarding.contact_number,
+        "current_address": onboarding.current_address,
+        "provincial_address": onboarding.provincial_address,
+        "spouse_name": onboarding.spouse_name,
+        "father_name": onboarding.father_name,
+        "mother_name": onboarding.mother_name,
+        "emergency_contact_name": onboarding.emergency_contact_name,
+        "emergency_contact_number": onboarding.emergency_contact_number,
+        "emergency_relationship": onboarding.emergency_relationship,
+        "sss": onboarding.sss,
+        "philhealth": onboarding.philhealth,
+        "pagibig": onboarding.pagibig,
+        "tin": onboarding.tin,
+        "is_submitted": bool(onboarding.is_submitted),
+        "submitted_at": onboarding.submitted_at,
+        "reviewed_at": onboarding.reviewed_at,
+        "created_at": onboarding.created_at,
+        "updated_at": onboarding.updated_at,
+    }
+
+
+def serialize_education(records):
+    return [
+        {
+            "id": record.id,
+            "applicant_id": record.applicant_id,
+            "level": record.level,
+            "institution": record.institution,
+            "degree": record.degree,
+            "year_from": record.year_from,
+            "year_to": record.year_to,
+            "skills": record.skills,
+        }
+        for record in records
+    ]
+
+
+def serialize_employment(records):
+    return [
+        {
+            "id": record.id,
+            "applicant_id": record.applicant_id,
+            "company_name": record.company_name,
+            "position": record.position,
+            "date_from": record.date_from,
+            "date_to": record.date_to,
+        }
+        for record in records
+    ]
+
+
+def serialize_references(records):
+    return [
+        {
+            "id": record.id,
+            "applicant_id": record.applicant_id,
+            "name": record.name,
+            "occupation": record.occupation,
+            "address": record.address,
+            "contact": record.contact,
+        }
+        for record in records
+    ]
+
+
+def serialize_questions(records):
+    return [
+        {
+            "id": record.id,
+            "question_key": record.question_key,
+            "question_text": record.question_text,
+            "question_type": record.question_type,
+            "is_required": record.is_required,
+            "sort_order": record.sort_order,
+        }
+        for record in records
+    ]
+
+
+def serialize_question_responses(records, question_map: dict[int, str]):
+    return [
+        {
+            "id": record.id,
+            "applicant_id": record.applicant_id,
+            "question_id": record.question_id,
+            "question_key": question_map.get(record.question_id),
+            "answer_text": record.answer_text,
+        }
+        for record in records
+    ]
+
+
+def normalize_position(value: str | None) -> str:
+    if not value:
+        return ""
+    return " ".join(value.lower().strip().split())
+
+
+def infer_role_from_position(position: str | None) -> str:
+    normalized = normalize_position(position)
+
+    if "helper" in normalized:
+        return "helper"
+
+    if "driver" in normalized:
+        return "driver"
+
+    return "admin"
+
+
+def filter_questions_by_position(questions, position: str | None):
+    role = infer_role_from_position(position)
+
+    if role == "helper":
+        return [
+            question
+            for question in questions
+            if question.question_key.startswith("helper_")
+        ]
+
+    if role == "driver":
+        return [
+            question
+            for question in questions
+            if not question.question_key.startswith("admin_")
+            and not question.question_key.startswith("helper_")
+        ]
+
+    return [
+        question
+        for question in questions
+        if question.question_key.startswith("admin_")
+    ]
 
 @router.get("/", response_model=List[ApplicantResponse])
 def get_applicants(db: Session = Depends(get_db)):
@@ -119,6 +284,99 @@ def get_applicant_detail(applicant_id: int, db: Session = Depends(get_db)):
         "remarks": remarks,
     }
 
+@router.get("/{applicant_id}/onboarding")
+def get_applicant_onboarding(
+    applicant_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if current_user.role not in ["admin", "superadmin", "hr"]:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    applicant = db.query(Applicant).filter(Applicant.id == applicant_id).first()
+
+    if not applicant:
+        raise HTTPException(status_code=404, detail="Applicant not found")
+
+    onboarding = (
+        db.query(ApplicantOnboarding)
+        .filter(ApplicantOnboarding.applicant_id == applicant.id)
+        .first()
+    )
+
+    if not onboarding:
+        raise HTTPException(
+            status_code=404,
+            detail="Applicant onboarding form not found",
+        )
+
+    education_records = (
+        db.query(ApplicantEducation)
+        .filter(ApplicantEducation.applicant_id == applicant.id)
+        .order_by(ApplicantEducation.id.asc())
+        .all()
+    )
+
+    employment_history = (
+        db.query(ApplicantEmploymentHistory)
+        .filter(ApplicantEmploymentHistory.applicant_id == applicant.id)
+        .order_by(ApplicantEmploymentHistory.id.asc())
+        .all()
+    )
+
+    references = (
+        db.query(ApplicantReference)
+        .filter(ApplicantReference.applicant_id == applicant.id)
+        .order_by(ApplicantReference.id.asc())
+        .all()
+    )
+
+    all_questions = (
+        db.query(ApplicantQuestion)
+        .filter(ApplicantQuestion.is_active.is_(True))
+        .order_by(ApplicantQuestion.sort_order.asc(), ApplicantQuestion.id.asc())
+        .all()
+    )
+
+    filtered_questions = filter_questions_by_position(
+        all_questions,
+        applicant.position_applied,
+    )
+
+    question_responses = (
+        db.query(ApplicantQResponse)
+        .filter(ApplicantQResponse.applicant_id == applicant.id)
+        .order_by(ApplicantQResponse.id.asc())
+        .all()
+    )
+
+    question_id_to_key = {
+        question.id: question.question_key for question in all_questions
+    }
+
+    return {
+        "applicant": {
+            "id": applicant.id,
+            "first_name": applicant.first_name,
+            "last_name": applicant.last_name,
+            "email": applicant.email,
+            "contact_number": applicant.contact_number,
+            "position_applied": applicant.position_applied,
+            "status": applicant.status,
+            "cv_url": get_applicant_cv_url(db, applicant.id),
+            "onboarding_submitted_at": applicant.onboarding_submitted_at,
+            "onboarding_is_submitted": bool(onboarding.is_submitted),
+        },
+        "onboarding": serialize_onboarding(onboarding),
+        "education_records": serialize_education(education_records),
+        "employment_history": serialize_employment(employment_history),
+        "references": serialize_references(references),
+        "questions": serialize_questions(filtered_questions),
+        "question_responses": serialize_question_responses(
+            question_responses,
+            question_id_to_key,
+        ),
+    }
 
 @router.patch("/{applicant_id}/status")
 def update_applicant_status(
@@ -257,54 +515,192 @@ def convert_to_employee(
     existing_employee = (
         db.query(Employee).filter(Employee.email == applicant.email).first()
     )
-
     if existing_employee:
         raise HTTPException(
             status_code=400,
             detail="An employee with this email already exists",
         )
 
-    department = payload.department.strip()
+    onboarding = (
+        db.query(ApplicantOnboarding)
+        .filter(ApplicantOnboarding.applicant_id == applicant.id)
+        .first()
+    )
+
+    if not onboarding:
+        raise HTTPException(
+            status_code=400,
+            detail="Applicant onboarding form not found",
+        )
+
+    if not onboarding.is_submitted:
+        raise HTTPException(
+            status_code=400,
+            detail="Applicant onboarding form must be submitted before conversion",
+        )
+
+    department = payload.department.strip() if payload.department else ""
     if not department:
         raise HTTPException(status_code=400, detail="Department is required")
 
     position = (
         payload.position.strip()
         if payload.position and payload.position.strip()
-        else applicant.position_applied
+        else (onboarding.position or applicant.position_applied)
     )
 
-    new_employee = Employee(
-        first_name=applicant.first_name,
-        last_name=applicant.last_name,
-        email=applicant.email,
-        # contact_number=applicant.contact_number,
-        position=position,
-        department=department,
-        is_active=1,
-        is_available=1,
-        # employment_status="active",
-        created_by_user_id=current_user.id,
-        date_hired=datetime.utcnow(),
+    if not position:
+        raise HTTPException(status_code=400, detail="Position is required")
+
+    education_records = (
+        db.query(ApplicantEducation)
+        .filter(ApplicantEducation.applicant_id == applicant.id)
+        .order_by(ApplicantEducation.id.asc())
+        .all()
     )
 
-    db.add(new_employee)
-    db.flush()
-
-    personal_details = EmployeePersonalDetails(
-        employee_id=new_employee.id,
-        contact_number=applicant.contact_number,
+    employment_records = (
+        db.query(ApplicantEmploymentHistory)
+        .filter(ApplicantEmploymentHistory.applicant_id == applicant.id)
+        .order_by(ApplicantEmploymentHistory.id.asc())
+        .all()
     )
-    db.add(personal_details)
 
-    applicant.is_converted_to_employee = True
-    applicant.employee_id = new_employee.id
-    applicant.converted_at = datetime.utcnow()
+    employee_references = (
+        db.query(ApplicantReference)
+        .filter(ApplicantReference.applicant_id == applicant.id)
+        .order_by(ApplicantReference.id.asc())
+        .all()
+    )
 
-    db.commit()
-    db.refresh(new_employee)
+    try:
+        # 1. Create base employee
+        new_employee = Employee(
+            first_name=onboarding.first_name or applicant.first_name,
+            last_name=onboarding.last_name or applicant.last_name,
+            email=onboarding.email or applicant.email,
+            position=position,
+            department=department,
+            is_active=1,
+            is_available=1,
+            created_by_user_id=current_user.id,
+            date_hired=datetime.utcnow(),
+        )
+        db.add(new_employee)
+        db.flush()  # needed to get new_employee.id
 
-    return {
-        "message": "Applicant converted to employee successfully",
-        "employee_id": new_employee.id,
-    }
+        # 2. Personal details
+        personal_details = EmployeePersonalDetails(
+            employee_id=new_employee.id,
+            birthday=onboarding.birthday,
+            birthplace=onboarding.birthplace,
+            gender=onboarding.gender,
+            civil_status=onboarding.civil_status,
+            religion=onboarding.religion,
+            citizenship=onboarding.citizenship,
+            height=onboarding.height,
+            weight=onboarding.weight,
+            language=onboarding.language,
+            contact_number=onboarding.contact_number or applicant.contact_number,
+            current_address=onboarding.current_address,
+            provincial_address=onboarding.provincial_address,
+        )
+        db.add(personal_details)
+
+        # 3. Family details
+        family_details = EmployeeFamilyDetails(
+            employee_id=new_employee.id,
+            spouse_name=onboarding.spouse_name,
+            father_name=onboarding.father_name,
+            mother_name=onboarding.mother_name,
+        )
+        db.add(family_details)
+
+        # 4. Government details
+        government_details = EmployeeGovernmentDetails(
+            employee_id=new_employee.id,
+            sss_number=onboarding.sss,
+            philhealth_number=onboarding.philhealth,
+            pagibig_number=onboarding.pagibig,
+            tin_number=onboarding.tin,
+        )
+        db.add(government_details)
+
+        # 5. Emergency contact
+        if (
+            onboarding.emergency_contact_name
+            or onboarding.emergency_contact_number
+            or onboarding.emergency_relationship
+        ):
+            emergency_contact = EmployeeEmergencyContact(
+                employee_id=new_employee.id,
+                contact_name=onboarding.emergency_contact_name,
+                contact_number=onboarding.emergency_contact_number,
+                relationship_type=onboarding.emergency_relationship,
+            )
+            db.add(emergency_contact)
+
+        # 6. Education records
+        for record in education_records:
+            db.add(
+                EmployeeEducation(
+                    employee_id=new_employee.id,
+                    level=record.level,
+                    institution=record.institution,
+                    degree=record.degree,
+                    year_from=record.year_from,
+                    year_to=record.year_to,
+                    skills=record.skills,
+                )
+            )
+
+        # 7. Employment history
+        for record in employment_records:
+            db.add(
+                EmployeeEmploymentHistory(
+                    employee_id=new_employee.id,
+                    company_name=record.company_name,
+                    position=record.position,
+                    date_from=record.date_from,
+                    date_to=record.date_to,
+                )
+            )
+
+        # 8. References
+        for record in employee_references:
+            db.add(
+                EmployeeReference(
+                    employee_id=new_employee.id,
+                    name=record.name,
+                    contact=record.contact,
+                    address=record.address,
+                    occupation=record.occupation,
+                )
+            )
+        # 9. Mark applicant as converted
+        applicant.is_converted_to_employee = True
+        applicant.employee_id = new_employee.id
+        applicant.converted_at = datetime.utcnow()
+
+        db.commit()
+        db.refresh(new_employee)
+
+        return {
+            "message": "Applicant converted to employee successfully",
+            "employee_id": new_employee.id,
+            "employee": {
+                "id": new_employee.id,
+                "first_name": new_employee.first_name,
+                "last_name": new_employee.last_name,
+                "email": new_employee.email,
+                "department": new_employee.department,
+                "position": new_employee.position,
+            },
+        }
+
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to convert applicant to employee: {str(e)}",
+        )

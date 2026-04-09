@@ -1,7 +1,7 @@
 from datetime import date
 from typing import List, Optional
 
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field
 
 
 class ApplicantEducationPayload(BaseModel):
@@ -25,6 +25,11 @@ class ApplicantReferencePayload(BaseModel):
     occupation: Optional[str] = None
     address: Optional[str] = None
     contact: Optional[str] = None
+
+
+class ApplicantQuestionResponsePayload(BaseModel):
+    question_key: str
+    answer_text: Optional[str] = None
 
 
 class ApplicantOnboardingPayload(BaseModel):
@@ -60,6 +65,7 @@ class ApplicantOnboardingPayload(BaseModel):
     pagibig: Optional[str] = None
     tin: Optional[str] = None
 
-    education_records: List[ApplicantEducationPayload] = []
-    employment_history: List[ApplicantEmploymentPayload] = []
-    references: List[ApplicantReferencePayload] = []
+    education_records: List[ApplicantEducationPayload] = Field(default_factory=list)
+    employment_history: List[ApplicantEmploymentPayload] = Field(default_factory=list)
+    references: List[ApplicantReferencePayload] = Field(default_factory=list)
+    question_responses: List[ApplicantQuestionResponsePayload] = Field(default_factory=list)
