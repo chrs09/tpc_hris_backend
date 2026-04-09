@@ -196,9 +196,7 @@ def filter_questions_by_position(questions, position: str | None):
         ]
 
     return [
-        question
-        for question in questions
-        if question.question_key.startswith("admin_")
+        question for question in questions if question.question_key.startswith("admin_")
     ]
 
 

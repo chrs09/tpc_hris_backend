@@ -68,4 +68,6 @@ class ApplicantOnboardingPayload(BaseModel):
     education_records: List[ApplicantEducationPayload] = Field(default_factory=list)
     employment_history: List[ApplicantEmploymentPayload] = Field(default_factory=list)
     references: List[ApplicantReferencePayload] = Field(default_factory=list)
-    question_responses: List[ApplicantQuestionResponsePayload] = Field(default_factory=list)
+    question_responses: List[ApplicantQuestionResponsePayload] = Field(
+        default_factory=list
+    )

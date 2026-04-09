@@ -29,5 +29,9 @@ class ApplicantQResponse(Base):
         onupdate=datetime.utcnow,
     )
 
-    applicant_id = Column(Integer, ForeignKey("tpc_applicants.id"), nullable=False, index=True)
-    question_id = Column(Integer, ForeignKey("tpc_applicant_questions.id"), nullable=False, index=True)
+    applicant_id = Column(
+        Integer, ForeignKey("tpc_applicants.id"), nullable=False, index=True
+    )
+    question_id = Column(
+        Integer, ForeignKey("tpc_applicant_questions.id"), nullable=False, index=True
+    )

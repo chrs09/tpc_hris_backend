@@ -525,7 +525,7 @@ async def patch_employee(
     if not reference:
         reference = EmployeeReference(employee_id=employee.id)
         db.add(reference)
-    
+
     if reference_name is not None:
         reference.name = reference_name
     if reference_contact is not None:
@@ -534,7 +534,7 @@ async def patch_employee(
         reference.address = reference_address
     if reference_occupation is not None:
         reference.occupation = reference_occupation
-    
+
     # =========================
     # GOVERNMENT
     # =========================

@@ -61,6 +61,7 @@ def get_applicant_cv_url(db: Session, applicant_id: int):
     )
     return cv.file_url if cv else None
 
+
 def serialize_onboarding(onboarding: ApplicantOnboarding | None):
     if not onboarding:
         return None
@@ -211,10 +212,9 @@ def filter_questions_by_position(questions, position: str | None):
         ]
 
     return [
-        question
-        for question in questions
-        if question.question_key.startswith("admin_")
+        question for question in questions if question.question_key.startswith("admin_")
     ]
+
 
 @router.get("/", response_model=List[ApplicantResponse])
 def get_applicants(db: Session = Depends(get_db)):
@@ -283,6 +283,7 @@ def get_applicant_detail(applicant_id: int, db: Session = Depends(get_db)):
         "converted_at": applicant.converted_at,
         "remarks": remarks,
     }
+
 
 @router.get("/{applicant_id}/onboarding")
 def get_applicant_onboarding(
@@ -377,6 +378,7 @@ def get_applicant_onboarding(
             question_id_to_key,
         ),
     }
+
 
 @router.patch("/{applicant_id}/status")
 def update_applicant_status(
