@@ -39,9 +39,10 @@ class ApplicantRemarkResponse(BaseModel):
     id: int
     applicant_id: int
     status: Optional[str] = None
-    remark: str
-    created_by_user_id: Optional[int] = None
+    remark: Optional[str] = None
     created_at: datetime
+    created_by_user_id: int
+    image_url: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -66,6 +67,8 @@ class ApplicantDetailResponse(BaseModel):
     employee_id: Optional[int] = None
     hired_at: Optional[datetime] = None
     converted_at: Optional[datetime] = None
+    onboarding_is_submitted: bool = False
+    onboarding_submitted_at: Optional[datetime] = None
     remarks: List[ApplicantRemarkResponse] = Field(default_factory=list)
 
 

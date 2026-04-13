@@ -1,10 +1,11 @@
 import secrets
 from datetime import datetime, timedelta
-from typing import List
+from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Form, File, UploadFile
 from sqlalchemy.orm import Session
 
+from app.services.file_service import FileService
 from app.core.database import get_db
 from app.core.config import Settings
 from app.core.dependencies import get_current_user
@@ -101,6 +102,9 @@ def serialize_onboarding(onboarding: ApplicantOnboarding | None):
         "reviewed_at": onboarding.reviewed_at,
         "created_at": onboarding.created_at,
         "updated_at": onboarding.updated_at,
+        "current_salary": float(onboarding.current_salary) if onboarding.current_salary else None,
+        "expected_salary": float(onboarding.expected_salary) if onboarding.expected_salary else None,
+        "salary_type": onboarding.salary_type,
     }
 
 
@@ -216,6 +220,30 @@ def filter_questions_by_position(questions, position: str | None):
     ]
 
 
+def get_remark_image_url(db: Session, remark_id: int):
+    image = (
+        db.query(FileModel)
+        .filter(
+            FileModel.entity_type == "applicant_remark",
+            FileModel.entity_id == remark_id,
+            FileModel.document_type == "REMARK_IMAGE",
+        )
+        .order_by(FileModel.created_at.desc())
+        .first()
+    )
+    return image.file_url if image else None
+
+def serialize_remark(db: Session, remark: ApplicantRemark):
+    return {
+        "id": remark.id,
+        "applicant_id": remark.applicant_id,
+        "status": remark.status,
+        "remark": remark.remark,
+        "created_at": remark.created_at,
+        "created_by_user_id": remark.created_by_user_id,
+        "image_url": get_remark_image_url(db, remark.id),
+    }
+
 @router.get("/", response_model=List[ApplicantResponse])
 def get_applicants(db: Session = Depends(get_db)):
     applicants = db.query(Applicant).order_by(Applicant.created_at.desc()).all()
@@ -267,6 +295,14 @@ def get_applicant_detail(applicant_id: int, db: Session = Depends(get_db)):
         .all()
     )
 
+    onboarding = (
+        db.query(ApplicantOnboarding)
+        .filter(ApplicantOnboarding.applicant_id == applicant.id)
+        .first()
+    )
+
+    serialized_remarks = [serialize_remark(db, remark) for remark in remarks]
+
     return {
         "id": applicant.id,
         "first_name": applicant.first_name,
@@ -281,9 +317,12 @@ def get_applicant_detail(applicant_id: int, db: Session = Depends(get_db)):
         "employee_id": applicant.employee_id,
         "hired_at": applicant.hired_at,
         "converted_at": applicant.converted_at,
-        "remarks": remarks,
+        "onboarding_is_submitted": bool(onboarding and onboarding.is_submitted),
+        "onboarding_submitted_at": (
+            onboarding.submitted_at if onboarding else None
+        ),
+        "remarks": serialized_remarks,
     }
-
 
 @router.get("/{applicant_id}/onboarding")
 def get_applicant_onboarding(
@@ -417,7 +456,9 @@ def update_applicant_status(
 @router.post("/{applicant_id}/remarks", response_model=ApplicantRemarkResponse)
 def add_applicant_remark(
     applicant_id: int,
-    payload: ApplicantRemarkCreate,
+    remark: Optional[str] = Form(None),
+    status: Optional[str] = Form(None),
+    image: Optional[UploadFile] = File(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -426,22 +467,44 @@ def add_applicant_remark(
     if not applicant:
         raise HTTPException(status_code=404, detail="Applicant not found")
 
-    if not payload.remark.strip():
-        raise HTTPException(status_code=400, detail="Remark cannot be empty")
+    cleaned_remark = remark.strip() if remark else ""
 
-    remark = ApplicantRemark(
+    if not cleaned_remark and not image:
+        raise HTTPException(
+            status_code=400,
+            detail="Remark or image is required",
+        )
+
+    if image and (not image.content_type or not image.content_type.startswith("image/")):
+        raise HTTPException(status_code=400, detail="Only image files are allowed")
+
+    new_remark = ApplicantRemark(
         applicant_id=applicant_id,
-        status=payload.status or applicant.status,
-        remark=payload.remark.strip(),
+        status=status or applicant.status,
+        remark=cleaned_remark if cleaned_remark else None,
         created_by_user_id=current_user.id,
     )
 
-    db.add(remark)
+    db.add(new_remark)
     db.commit()
-    db.refresh(remark)
+    db.refresh(new_remark)
 
-    return remark
+    if image:
+        file_service = FileService()
+        file_url = file_service.upload(image, f"applicant_remarks/{new_remark.id}")
 
+        db.add(
+            FileModel(
+                entity_type="applicant_remark",
+                entity_id=new_remark.id,
+                document_type="REMARK_IMAGE",
+                file_url=file_url,
+                uploaded_by=current_user.id,
+            )
+        )
+        db.commit()
+
+    return serialize_remark(db, new_remark)
 
 @router.post("/{applicant_id}/generate-employment-form")
 def generate_employment_form(

@@ -1,4 +1,5 @@
 from datetime import datetime
+from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
@@ -46,6 +47,26 @@ def get_valid_applicant_by_token(db: Session, token: str) -> Applicant:
     return applicant
 
 
+def parse_salary(value):
+    if value is None:
+        return None
+
+    if isinstance(value, (int, float, Decimal)):
+        return Decimal(str(value))
+
+    cleaned = str(value).replace(",", "").strip()
+
+    if cleaned == "":
+        return None
+
+    try:
+        return Decimal(cleaned)
+    except (InvalidOperation, ValueError):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid salary value: {value}",
+        )
+
 def serialize_onboarding(onboarding: ApplicantOnboarding | None):
     if not onboarding:
         return None
@@ -76,6 +97,13 @@ def serialize_onboarding(onboarding: ApplicantOnboarding | None):
         "emergency_contact_name": onboarding.emergency_contact_name,
         "emergency_contact_number": onboarding.emergency_contact_number,
         "emergency_relationship": onboarding.emergency_relationship,
+        "current_salary": (
+            str(onboarding.current_salary) if onboarding.current_salary is not None else None
+        ),
+        "expected_salary": (
+            str(onboarding.expected_salary) if onboarding.expected_salary is not None else None
+        ),
+        "salary_type": onboarding.salary_type,
         "sss": onboarding.sss,
         "philhealth": onboarding.philhealth,
         "pagibig": onboarding.pagibig,
@@ -326,6 +354,10 @@ def save_onboarding_form(
     onboarding.emergency_contact_number = payload.emergency_contact_number
     onboarding.emergency_relationship = payload.emergency_relationship
 
+    onboarding.current_salary = parse_salary(payload.current_salary)
+    onboarding.expected_salary = parse_salary(payload.expected_salary)
+    onboarding.salary_type = payload.salary_type
+    
     onboarding.sss = payload.sss
     onboarding.philhealth = payload.philhealth
     onboarding.pagibig = payload.pagibig

@@ -60,6 +60,10 @@ class ApplicantOnboardingPayload(BaseModel):
     emergency_contact_number: Optional[str] = None
     emergency_relationship: Optional[str] = None
 
+    current_salary: Optional[str] = None
+    expected_salary: Optional[str] = None
+    salary_type: Optional[str] = None
+
     sss: Optional[str] = None
     philhealth: Optional[str] = None
     pagibig: Optional[str] = None

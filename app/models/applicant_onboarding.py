@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Date, DateTime, ForeignKey
+from sqlalchemy import Column, Integer, String, Date, DateTime, ForeignKey, Numeric
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from app.core.database import Base
@@ -43,6 +43,11 @@ class ApplicantOnboarding(Base):
     emergency_contact_name = Column(String(150), nullable=True)
     emergency_contact_number = Column(String(50), nullable=True)
     emergency_relationship = Column(String(100), nullable=True)
+
+    # salary
+    current_salary = Column(Numeric(12, 2), nullable=True)
+    expected_salary = Column(Numeric(12, 2), nullable=True)
+    salary_type = Column(String(50), nullable=True)
 
     # government
     sss = Column(String(50), nullable=True)

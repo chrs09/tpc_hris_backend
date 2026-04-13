@@ -11,6 +11,6 @@ class ApplicantRemark(Base):
     status = Column(
         String(50), nullable=True
     )  # optional snapshot of status during remark
-    remark = Column(Text, nullable=False)
+    remark = Column(Text, nullable=True)
     created_by_user_id = Column(Integer, ForeignKey("tpc_users.id"), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
