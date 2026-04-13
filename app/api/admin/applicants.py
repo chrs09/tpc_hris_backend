@@ -29,7 +29,6 @@ from app.models.applicant_questions import ApplicantQuestion
 from app.models.applicant_qresponse import ApplicantQResponse
 from app.schemas.applicant import (
     ApplicantDetailResponse,
-    ApplicantRemarkCreate,
     ApplicantRemarkResponse,
     ApplicantResponse,
     ApplicantStatusUpdate,
@@ -102,8 +101,12 @@ def serialize_onboarding(onboarding: ApplicantOnboarding | None):
         "reviewed_at": onboarding.reviewed_at,
         "created_at": onboarding.created_at,
         "updated_at": onboarding.updated_at,
-        "current_salary": float(onboarding.current_salary) if onboarding.current_salary else None,
-        "expected_salary": float(onboarding.expected_salary) if onboarding.expected_salary else None,
+        "current_salary": (
+            float(onboarding.current_salary) if onboarding.current_salary else None
+        ),
+        "expected_salary": (
+            float(onboarding.expected_salary) if onboarding.expected_salary else None
+        ),
         "salary_type": onboarding.salary_type,
     }
 
@@ -233,6 +236,7 @@ def get_remark_image_url(db: Session, remark_id: int):
     )
     return image.file_url if image else None
 
+
 def serialize_remark(db: Session, remark: ApplicantRemark):
     return {
         "id": remark.id,
@@ -243,6 +247,7 @@ def serialize_remark(db: Session, remark: ApplicantRemark):
         "created_by_user_id": remark.created_by_user_id,
         "image_url": get_remark_image_url(db, remark.id),
     }
+
 
 @router.get("/", response_model=List[ApplicantResponse])
 def get_applicants(db: Session = Depends(get_db)):
@@ -318,11 +323,10 @@ def get_applicant_detail(applicant_id: int, db: Session = Depends(get_db)):
         "hired_at": applicant.hired_at,
         "converted_at": applicant.converted_at,
         "onboarding_is_submitted": bool(onboarding and onboarding.is_submitted),
-        "onboarding_submitted_at": (
-            onboarding.submitted_at if onboarding else None
-        ),
+        "onboarding_submitted_at": (onboarding.submitted_at if onboarding else None),
         "remarks": serialized_remarks,
     }
+
 
 @router.get("/{applicant_id}/onboarding")
 def get_applicant_onboarding(
@@ -475,7 +479,9 @@ def add_applicant_remark(
             detail="Remark or image is required",
         )
 
-    if image and (not image.content_type or not image.content_type.startswith("image/")):
+    if image and (
+        not image.content_type or not image.content_type.startswith("image/")
+    ):
         raise HTTPException(status_code=400, detail="Only image files are allowed")
 
     new_remark = ApplicantRemark(
@@ -505,6 +511,7 @@ def add_applicant_remark(
         db.commit()
 
     return serialize_remark(db, new_remark)
+
 
 @router.post("/{applicant_id}/generate-employment-form")
 def generate_employment_form(

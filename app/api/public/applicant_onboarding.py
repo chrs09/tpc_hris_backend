@@ -1,5 +1,5 @@
 from datetime import datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
@@ -67,6 +67,7 @@ def parse_salary(value):
             detail=f"Invalid salary value: {value}",
         )
 
+
 def serialize_onboarding(onboarding: ApplicantOnboarding | None):
     if not onboarding:
         return None
@@ -98,10 +99,14 @@ def serialize_onboarding(onboarding: ApplicantOnboarding | None):
         "emergency_contact_number": onboarding.emergency_contact_number,
         "emergency_relationship": onboarding.emergency_relationship,
         "current_salary": (
-            str(onboarding.current_salary) if onboarding.current_salary is not None else None
+            str(onboarding.current_salary)
+            if onboarding.current_salary is not None
+            else None
         ),
         "expected_salary": (
-            str(onboarding.expected_salary) if onboarding.expected_salary is not None else None
+            str(onboarding.expected_salary)
+            if onboarding.expected_salary is not None
+            else None
         ),
         "salary_type": onboarding.salary_type,
         "sss": onboarding.sss,
@@ -357,7 +362,7 @@ def save_onboarding_form(
     onboarding.current_salary = parse_salary(payload.current_salary)
     onboarding.expected_salary = parse_salary(payload.expected_salary)
     onboarding.salary_type = payload.salary_type
-    
+
     onboarding.sss = payload.sss
     onboarding.philhealth = payload.philhealth
     onboarding.pagibig = payload.pagibig
