@@ -55,6 +55,11 @@ class User(Base):
         back_populates="created_by_user",
     )
 
+    updated_employees = relationship(
+        "Employee",
+        foreign_keys="Employee.updated_by_user_id",
+        back_populates="updated_by_user",
+    )
     # 3️⃣ One-to-many: user created many attendance records
     attendance_created_records = relationship(
         "AttendanceRecord",

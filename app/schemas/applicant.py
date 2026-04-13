@@ -41,7 +41,7 @@ class ApplicantRemarkResponse(BaseModel):
     status: Optional[str] = None
     remark: Optional[str] = None
     created_at: datetime
-    created_by_user_id: int
+    created_by_user_id: Optional[int] = None
     image_url: Optional[str] = None
 
     class Config:

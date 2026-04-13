@@ -1,4 +1,5 @@
-from sqlalchemy import Column, Integer, String, Date, ForeignKey
+from datetime import datetime
+from sqlalchemy import Column, DateTime, Integer, String, Date, ForeignKey
 from sqlalchemy.orm import relationship
 from app.core.database import Base
 from app.models.user import User
@@ -15,9 +16,11 @@ class Employee(Base):
     date_hired = Column(Date, nullable=False)
     department = Column(String(100), nullable=False)
     is_active = Column(Integer, nullable=False, default=1)
-    is_available = Column(Integer, nullable=False, default=True)
+    is_available = Column(Integer, nullable=False, default=1)
 
     created_by_user_id = Column(Integer, ForeignKey("tpc_users.id"), nullable=False)
+    updated_by_user_id = Column(Integer, ForeignKey("tpc_users.id"), nullable=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     # 1️⃣ One-to-one: employee may have login
     user = relationship(
@@ -30,6 +33,10 @@ class Employee(Base):
     # 2️⃣ Many employees created by one user
     created_by_user = relationship(
         "User", foreign_keys=[created_by_user_id], back_populates="created_employees"
+    )
+
+    updated_by_user = relationship(
+        "User", foreign_keys=[updated_by_user_id], back_populates="updated_employees"
     )
 
     # 3️⃣ Attendance records

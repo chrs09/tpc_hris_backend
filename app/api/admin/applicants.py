@@ -1,9 +1,11 @@
 import secrets
 from datetime import datetime, timedelta
-from typing import List, Optional
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Form, File, UploadFile
 from sqlalchemy.orm import Session
+
+from app.utils.response import api_response
 
 from app.services.file_service import FileService
 from app.core.database import get_db
@@ -28,9 +30,7 @@ from app.models.applicant_employment_history import ApplicantEmploymentHistory
 from app.models.applicant_questions import ApplicantQuestion
 from app.models.applicant_qresponse import ApplicantQResponse
 from app.schemas.applicant import (
-    ApplicantDetailResponse,
     ApplicantRemarkResponse,
-    ApplicantResponse,
     ApplicantStatusUpdate,
     ConvertApplicantRequest,
 )
@@ -249,7 +249,7 @@ def serialize_remark(db: Session, remark: ApplicantRemark):
     }
 
 
-@router.get("/", response_model=List[ApplicantResponse])
+@router.get("/")
 def get_applicants(db: Session = Depends(get_db)):
     applicants = db.query(Applicant).order_by(Applicant.created_at.desc()).all()
 
@@ -283,10 +283,10 @@ def get_applicants(db: Session = Depends(get_db)):
             }
         )
 
-    return result
+    return api_response(result)
 
 
-@router.get("/{applicant_id}", response_model=ApplicantDetailResponse)
+@router.get("/{applicant_id}")
 def get_applicant_detail(applicant_id: int, db: Session = Depends(get_db)):
     applicant = db.query(Applicant).filter(Applicant.id == applicant_id).first()
 
@@ -308,7 +308,7 @@ def get_applicant_detail(applicant_id: int, db: Session = Depends(get_db)):
 
     serialized_remarks = [serialize_remark(db, remark) for remark in remarks]
 
-    return {
+    response = {
         "id": applicant.id,
         "first_name": applicant.first_name,
         "last_name": applicant.last_name,
@@ -326,6 +326,8 @@ def get_applicant_detail(applicant_id: int, db: Session = Depends(get_db)):
         "onboarding_submitted_at": (onboarding.submitted_at if onboarding else None),
         "remarks": serialized_remarks,
     }
+
+    return api_response(response)
 
 
 @router.get("/{applicant_id}/onboarding")

@@ -2,9 +2,13 @@ import json
 from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile, File
 from datetime import datetime
 from typing import List
+from fastapi.params import Query
 from sqlalchemy import case
 from sqlalchemy.orm import Session
 from app.core.database import get_db
+
+from app.utils.response import api_response
+
 from app.models.employee_emergency import EmployeeEmergencyContact
 from app.models.employee_family import EmployeeFamilyDetails
 from app.models.employee_government import EmployeeGovernmentDetails
@@ -42,6 +46,9 @@ def safe_json_loads(value: str, field_name: str):
 # ==============================
 @router.get("/")
 def get_employees(
+    is_active: int = Query(
+        1, description="Filter by active status: 1 for active, 0 for inactive"
+    ),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -60,7 +67,7 @@ def get_employees(
 
     employees = (
         db.query(Employee)
-        .filter(Employee.is_active == 1)
+        .filter(Employee.is_active == is_active)
         .order_by(department_order, Employee.last_name.asc())
         .all()
     )
@@ -87,7 +94,7 @@ def get_employees(
             }
         )
 
-    return [
+    response = [
         {
             "id": emp.id,
             "first_name": emp.first_name,
@@ -104,6 +111,8 @@ def get_employees(
         for emp in employees
     ]
 
+    return api_response(response)
+
 
 # ==============================
 # Employee Detail
@@ -114,17 +123,11 @@ def get_employee_detail(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    # =========================
-    # BASE EMPLOYEE
-    # =========================
     employee = db.query(Employee).filter(Employee.id == employee_id).first()
 
     if not employee:
         raise HTTPException(status_code=404, detail="Employee not found")
 
-    # =========================
-    # RELATED TABLES
-    # =========================
     personal = (
         db.query(EmployeePersonalDetails).filter_by(employee_id=employee.id).first()
     )
@@ -149,23 +152,95 @@ def get_employee_detail(
         db.query(EmployeeEmploymentHistory).filter_by(employee_id=employee.id).all()
     )
 
-    # ✅ UNIFIED FILES (IMPORTANT)
     files = (
         db.query(FileModel)
-        .filter(FileModel.entity_type == "employee", FileModel.entity_id == employee.id)
+        .filter(
+            FileModel.entity_type == "employee",
+            FileModel.entity_id == employee.id,
+        )
         .all()
     )
 
-    # =========================
-    # BUILD RESPONSE
-    # =========================
-    return {
-        **employee.__dict__,
-        "personal_details": personal.__dict__ if personal else None,
-        "family_details": family.__dict__ if family else None,
-        "government_details": government.__dict__ if government else None,
-        "character_reference": reference.__dict__ if reference else None,
-        "emergency_contacts": [contact.__dict__ for contact in emergency_contacts],
+    response = {
+        "id": employee.id,
+        "first_name": employee.first_name,
+        "last_name": employee.last_name,
+        "email": employee.email,
+        "position": employee.position,
+        "date_hired": employee.date_hired,
+        "department": employee.department,
+        "is_active": employee.is_active,
+        "is_available": employee.is_available,
+        "created_by_user_id": employee.created_by_user_id,
+        "created_by_name": (
+            employee.created_by_user.username if employee.created_by_user else None
+        ),
+        "updated_by_user_id": employee.updated_by_user_id,
+        "updated_by_name": (
+            employee.updated_by_user.username if employee.updated_by_user else None
+        ),
+        "updated_at": employee.updated_at,
+        "personal_details": (
+            {
+                "employee_id": personal.employee_id,
+                "birthday": personal.birthday,
+                "birthplace": personal.birthplace if personal else None,
+                "civil_status": personal.civil_status if personal else None,
+                "gender": personal.gender if personal else None,
+                "religion": personal.religion if personal else None,
+                "citizenship": personal.citizenship if personal else None,
+                "height": personal.height if personal else None,
+                "weight": personal.weight if personal else None,
+                "language": personal.language if personal else None,
+                "contact_number": personal.contact_number if personal else None,
+                "current_address": personal.current_address if personal else None,
+                "provincial_address": personal.provincial_address if personal else None,
+            }
+            if personal
+            else None
+        ),
+        "family_details": (
+            {
+                "employee_id": family.employee_id,
+                "spouse_name": family.spouse_name,
+                "father_name": family.father_name,
+                "mother_name": family.mother_name,
+            }
+            if family
+            else None
+        ),
+        "government_details": (
+            {
+                "employee_id": government.employee_id,
+                "sss_number": government.sss_number,
+                "philhealth_number": government.philhealth_number,
+                "pagibig_number": government.pagibig_number,
+                "tin_number": government.tin_number,
+            }
+            if government
+            else None
+        ),
+        "character_reference": (
+            {
+                "employee_id": reference.employee_id,
+                "name": reference.name,
+                "occupation": reference.occupation,
+                "contact": reference.contact,
+                "address": reference.address,
+            }
+            if reference
+            else None
+        ),
+        "emergency_contacts": [
+            {
+                "id": contact.id,
+                "employee_id": contact.employee_id,
+                "contact_name": contact.contact_name,
+                "contact_number": contact.contact_number,
+                "relationship_type": contact.relationship_type,
+            }
+            for contact in emergency_contacts
+        ],
         "education_records": [
             {
                 "id": edu.id,
@@ -183,15 +258,21 @@ def get_employee_detail(
                 "id": job.id,
                 "company_name": job.company_name,
                 "position": job.position,
-                "date_from": str(job.date_from) if job.date_from else None,
-                "date_to": str(job.date_to) if job.date_to else None,
+                "date_from": job.date_from,
+                "date_to": job.date_to,
             }
             for job in employment_history
         ],
         "files": [
-            {"document_type": f.document_type, "file_url": f.file_url} for f in files
+            {
+                "document_type": f.document_type,
+                "file_url": f.file_url,
+            }
+            for f in files
         ],
     }
+
+    return api_response(response)
 
 
 # ==============================
@@ -383,7 +464,7 @@ async def create_employee(
 
     db.commit()
 
-    return {"message": "Employee created successfully"}
+    return api_response({"message": "Employee created successfully"})
 
 
 # ==============================
@@ -436,8 +517,6 @@ async def patch_employee(
     # ARRAY FIELDS
     education_records: str = Form(None),
     employment_history: str = Form(None),
-    # FILE
-    # resume: UploadFile = File(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -463,6 +542,11 @@ async def patch_employee(
         employee.date_hired = datetime.strptime(date_hired, "%Y-%m-%d").date()
     if is_active is not None:
         employee.is_active = is_active
+    # =========================
+    # UPDATE LOG
+    # =========================
+    employee.updated_by_user_id = current_user.id
+    employee.updated_at = datetime.utcnow()
 
     # =========================
     # PERSONAL (UPSERT)
@@ -670,7 +754,7 @@ async def patch_employee(
 
     db.commit()
 
-    return {"message": "Employee updated successfully"}
+    return api_response({"message": "Employee updated successfully"})
 
 
 # ==============================
@@ -693,7 +777,7 @@ def delete_employee(
     employee.is_active = 0
     db.commit()
 
-    return {"message": "Employee deactivated"}
+    return api_response({"message": "Employee deactivated"})
 
 
 # CV PARSER
@@ -704,4 +788,4 @@ async def parse_cv_endpoint(file: UploadFile = File(...)):
 
     parsed_data = parse_cv(file.file)
 
-    return parsed_data
+    return api_response(parsed_data)
