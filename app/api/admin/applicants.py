@@ -61,6 +61,7 @@ def get_applicant_cv_url(db: Session, applicant_id: int):
     )
     return cv.file_url if cv else None
 
+
 def get_applicant_selfie_url(db: Session, applicant_id: int):
     selfie = (
         db.query(FileModel)

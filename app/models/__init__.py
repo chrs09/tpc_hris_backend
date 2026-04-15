@@ -24,7 +24,9 @@ from .employee_document import EmployeeDocument as EmployeeDocument
 from .applicants import Applicant as Applicant
 from .applicant_remarks import ApplicantRemark as ApplicantRemark
 from .applicant_education import ApplicantEducation as ApplicantEducation
-from .applicant_employment_history import ApplicantEmploymentHistory as ApplicantEmploymentHistory
+from .applicant_employment_history import (
+    ApplicantEmploymentHistory as ApplicantEmploymentHistory,
+)
 from .applicant_references import ApplicantReference as ApplicantReference
 from .applicant_onboarding import ApplicantOnboarding as ApplicantOnboarding
 from .applicant_questions import ApplicantQuestion as ApplicantQuestion

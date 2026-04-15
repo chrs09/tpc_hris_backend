@@ -12,19 +12,14 @@ def get_applicant_questions(
     role: str | None = Query(default=None),
     db: Session = Depends(get_db),
 ):
-    query = db.query(ApplicantQuestion).filter(
-        ApplicantQuestion.is_active.is_(True)
-    )
+    query = db.query(ApplicantQuestion).filter(ApplicantQuestion.is_active.is_(True))
 
     if role:
-        query = query.filter(
-            ApplicantQuestion.target_role.in_([role.lower(), "all"])
-        )
+        query = query.filter(ApplicantQuestion.target_role.in_([role.lower(), "all"]))
 
-    questions = (
-        query.order_by(ApplicantQuestion.sort_order.asc(), ApplicantQuestion.id.asc())
-        .all()
-    )
+    questions = query.order_by(
+        ApplicantQuestion.sort_order.asc(), ApplicantQuestion.id.asc()
+    ).all()
 
     return [
         {

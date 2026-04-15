@@ -144,9 +144,7 @@ def update_applicant_question(
     current_user=Depends(get_current_user),
 ):
     question = (
-        db.query(ApplicantQuestion)
-        .filter(ApplicantQuestion.id == question_id)
-        .first()
+        db.query(ApplicantQuestion).filter(ApplicantQuestion.id == question_id).first()
     )
 
     if not question:
