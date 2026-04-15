@@ -1,6 +1,5 @@
 from datetime import date
 from typing import List, Optional
-
 from pydantic import BaseModel, EmailStr, Field
 
 
@@ -18,11 +17,14 @@ class ApplicantEmploymentPayload(BaseModel):
     position: Optional[str] = None
     date_from: Optional[date] = None
     date_to: Optional[date] = None
+    reason_for_leaving: Optional[str] = None
+    salary_history: Optional[str] = None
+    salary_type: Optional[str] = None
 
 
 class ApplicantReferencePayload(BaseModel):
     name: Optional[str] = None
-    occupation: Optional[str] = None
+    position: Optional[str] = None
     address: Optional[str] = None
     contact: Optional[str] = None
 

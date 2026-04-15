@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Date, ForeignKey
+from sqlalchemy import Column, Integer, String, Date, ForeignKey, Numeric
 from sqlalchemy.orm import relationship
 from app.core.database import Base
 
@@ -13,5 +13,9 @@ class ApplicantEmploymentHistory(Base):
     position = Column(String(150), nullable=True)
     date_from = Column(Date, nullable=True)
     date_to = Column(Date, nullable=True)
+
+    reason_for_leaving = Column(String(255), nullable=True)
+    salary_history = Column(Numeric(12, 2), nullable=True)
+    salary_type = Column(String(50), nullable=True)
 
     applicant = relationship("Applicant", back_populates="employment_history")

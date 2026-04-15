@@ -146,6 +146,13 @@ def serialize_employment(records):
             "position": record.position,
             "date_from": record.date_from,
             "date_to": record.date_to,
+            "reason_for_leaving": record.reason_for_leaving,
+            "salary_history": (
+                str(record.salary_history)
+                if record.salary_history is not None
+                else None
+            ),
+            "salary_type": record.salary_type,
         }
         for record in records
     ]
@@ -157,7 +164,7 @@ def serialize_references(records):
             "id": record.id,
             "applicant_id": record.applicant_id,
             "name": record.name,
-            "occupation": record.occupation,
+            "position": record.position,
             "address": record.address,
             "contact": record.contact,
         }
@@ -397,6 +404,9 @@ def save_onboarding_form(
                 position=record.position,
                 date_from=record.date_from,
                 date_to=record.date_to,
+                reason_for_leaving=record.reason_for_leaving,
+                salary_history=parse_salary(record.salary_history),
+                salary_type=record.salary_type,
             )
         )
 
@@ -409,7 +419,7 @@ def save_onboarding_form(
             ApplicantReference(
                 applicant_id=applicant.id,
                 name=record.name,
-                occupation=record.occupation,
+                position=record.position,
                 address=record.address,
                 contact=record.contact,
             )

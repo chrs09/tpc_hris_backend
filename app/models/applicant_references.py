@@ -10,7 +10,7 @@ class ApplicantReference(Base):
     applicant_id = Column(Integer, ForeignKey("tpc_applicants.id"), nullable=False)
 
     name = Column(String(150), nullable=True)
-    occupation = Column(String(150), nullable=True)
+    position = Column(String(150), nullable=True)
     address = Column(String(255), nullable=True)
     contact = Column(String(100), nullable=True)
 
