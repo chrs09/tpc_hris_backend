@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -8,11 +8,21 @@ router = APIRouter(prefix="/api/public", tags=["Public Applicant Questions"])
 
 
 @router.get("/applicant-questions")
-def get_applicant_questions(db: Session = Depends(get_db)):
+def get_applicant_questions(
+    role: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    query = db.query(ApplicantQuestion).filter(
+        ApplicantQuestion.is_active.is_(True)
+    )
+
+    if role:
+        query = query.filter(
+            ApplicantQuestion.target_role.in_([role.lower(), "all"])
+        )
+
     questions = (
-        db.query(ApplicantQuestion)
-        .filter(ApplicantQuestion.is_active.is_(True))
-        .order_by(ApplicantQuestion.sort_order.asc(), ApplicantQuestion.id.asc())
+        query.order_by(ApplicantQuestion.sort_order.asc(), ApplicantQuestion.id.asc())
         .all()
     )
 
@@ -24,7 +34,7 @@ def get_applicant_questions(db: Session = Depends(get_db)):
             "question_type": question.question_type,
             "is_required": question.is_required,
             "sort_order": question.sort_order,
-            "is_active": question.is_active,
+            "target_role": question.target_role,
         }
         for question in questions
     ]

@@ -61,6 +61,18 @@ def get_applicant_cv_url(db: Session, applicant_id: int):
     )
     return cv.file_url if cv else None
 
+def get_applicant_selfie_url(db: Session, applicant_id: int):
+    selfie = (
+        db.query(FileModel)
+        .filter(
+            FileModel.entity_type == "applicant",
+            FileModel.entity_id == applicant_id,
+            FileModel.document_type == "SELFIE_PHOTO",
+        )
+        .first()
+    )
+    return selfie.file_url if selfie else None
+
 
 def serialize_onboarding(onboarding: ApplicantOnboarding | None):
     if not onboarding:
@@ -272,6 +284,7 @@ def get_applicants(db: Session = Depends(get_db)):
                 "status": applicant.status,
                 "created_at": applicant.created_at,
                 "cv_url": get_applicant_cv_url(db, applicant.id),
+                "selfie_photo_url": get_applicant_selfie_url(db, applicant.id),
                 "is_converted_to_employee": applicant.is_converted_to_employee,
                 "employee_id": applicant.employee_id,
                 "hired_at": applicant.hired_at,

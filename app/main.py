@@ -11,6 +11,7 @@ from app.api.admin.applicants import router as admin_applicants_router
 from app.api.public.public_applicant import router as public_applicant_router
 from app.api.public.applicant_onboarding import router as applicant_onboarding_router
 from app.api.public.applicant_questions import router as applicant_questions_router
+from app.api.admin.applicant_questions import router as admin_applicant_questions_router
 
 app = FastAPI(
     title=settings.APP_NAME,
@@ -51,3 +52,4 @@ app.include_router(public_applicant_router)
 app.include_router(admin_applicants_router)
 app.include_router(applicant_onboarding_router)
 app.include_router(applicant_questions_router)
+app.include_router(admin_applicant_questions_router)

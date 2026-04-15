@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, UploadFile, File, Form, HTTPException
 from sqlalchemy.orm import Session
+
 from app.core.database import get_db
 from app.models.applicants import Applicant
 from app.models.files import File as FileModel
@@ -15,7 +16,8 @@ def apply(
     email: str = Form(...),
     contact_number: str = Form(...),
     position_applied: str = Form(...),
-    cv: UploadFile = File(...),  # only CV required
+    cv: UploadFile = File(...),
+    selfie_photo: UploadFile = File(...),  # new required selfie photo
     db: Session = Depends(get_db),
 ):
     try:
@@ -32,40 +34,73 @@ def apply(
         )
 
         db.add(applicant)
-        db.flush()  # 🔥 IMPORTANT: get applicant.id before commit
+        db.flush()  # get applicant.id before commit
 
         # =========================
-        # 2. SAVE FILE USING YOUR SYSTEM
+        # 2. VALIDATE FILES
+        # =========================
+        if selfie_photo and (
+            not selfie_photo.content_type
+            or not selfie_photo.content_type.startswith("image/")
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="Selfie photo must be an image file",
+            )
+
+        # =========================
+        # 3. SAVE FILES
         # =========================
         file_service = FileService()
 
-        file_url = file_service.upload(
-            cv, f"applicants/{applicant.id}"  # ✅ your structure
+        cv_url = file_service.upload(
+            cv,
+            f"applicants/{applicant.id}/cv",
+        )
+
+        selfie_photo_url = file_service.upload(
+            selfie_photo,
+            f"applicants/{applicant.id}/selfie",
         )
 
         # =========================
-        # 3. STORE FILE METADATA
+        # 4. STORE FILE METADATA
         # =========================
         db.add(
             FileModel(
-                entity_type="applicant",  # 🔥 KEY DIFFERENCE
+                entity_type="applicant",
                 entity_id=applicant.id,
                 document_type="CV",
-                file_url=file_url,
-                uploaded_by=None,  # public user
+                file_url=cv_url,
+                uploaded_by=None,
+            )
+        )
+
+        db.add(
+            FileModel(
+                entity_type="applicant",
+                entity_id=applicant.id,
+                document_type="SELFIE_PHOTO",
+                file_url=selfie_photo_url,
+                uploaded_by=None,
             )
         )
 
         # =========================
-        # 4. COMMIT
+        # 5. COMMIT
         # =========================
         db.commit()
 
         return {
             "message": "Application submitted successfully",
             "applicant_id": applicant.id,
+            "cv_url": cv_url,
+            "selfie_photo_url": selfie_photo_url,
         }
 
+    except HTTPException:
+        db.rollback()
+        raise
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
