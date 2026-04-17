@@ -22,6 +22,7 @@ from app.core.dependencies import get_current_user
 from app.services.cv_parser import parse_cv
 from app.models.files import File as FileModel
 from app.services.file_service import FileService
+from app.models.employee_inactive import EmployeeInactiveRecord
 
 router = APIRouter(prefix="/employees", tags=["Employees"])
 
@@ -160,6 +161,12 @@ def get_employee_detail(
         )
         .all()
     )
+    latest_inactive_record = (
+        db.query(EmployeeInactiveRecord)
+        .filter(EmployeeInactiveRecord.employee_id == employee.id)
+        .order_by(EmployeeInactiveRecord.created_at.desc())
+        .first()
+    )
 
     response = {
         "id": employee.id,
@@ -270,6 +277,20 @@ def get_employee_detail(
             }
             for f in files
         ],
+        "inactive_record": (
+            {
+                "id": latest_inactive_record.id,
+                "inactive_reason": latest_inactive_record.inactive_reason,
+                "inactive_date": latest_inactive_record.inactive_date,
+                "inactive_remarks": latest_inactive_record.inactive_remarks,
+                "created_at": latest_inactive_record.created_at,
+                "created_by_user_id": latest_inactive_record.created_by_user_id,
+                "reactivated_at": latest_inactive_record.reactivated_at,
+                "reactivated_by_user_id": latest_inactive_record.reactivated_by_user_id,
+            }
+            if latest_inactive_record
+            else None
+        ),
     }
 
     return api_response(response)
@@ -483,6 +504,10 @@ async def patch_employee(
     department: str = Form(None),
     date_hired: str = Form(None),
     is_active: int = Form(None),
+    # INACTIVE DETAILS
+    inactive_reason: str = Form(None),
+    inactive_date: str = Form(None),
+    inactive_remarks: str = Form(None),
     # PERSONAL
     birthday: str = Form(None),
     birthplace: str = Form(None),
@@ -525,6 +550,8 @@ async def patch_employee(
     if not employee:
         raise HTTPException(status_code=404, detail="Employee not found")
 
+    previous_is_active = employee.is_active
+
     # =========================
     # BASIC
     # =========================
@@ -540,8 +567,54 @@ async def patch_employee(
         employee.department = department
     if date_hired:
         employee.date_hired = datetime.strptime(date_hired, "%Y-%m-%d").date()
+
     if is_active is not None:
         employee.is_active = is_active
+
+    # =========================
+    # INACTIVE / REACTIVATE LOGIC
+    # =========================
+    if is_active is not None:
+        # active -> inactive
+        if previous_is_active == 1 and is_active == 0:
+            if not inactive_reason:
+                raise HTTPException(
+                    status_code=400,
+                    detail="inactive_reason is required when setting employee inactive",
+                )
+
+            if not inactive_date:
+                raise HTTPException(
+                    status_code=400,
+                    detail="inactive_date is required when setting employee inactive",
+                )
+
+            db.add(
+                EmployeeInactiveRecord(
+                    employee_id=employee.id,
+                    inactive_reason=inactive_reason,
+                    inactive_date=parse_date(inactive_date),
+                    inactive_remarks=inactive_remarks,
+                    created_by_user_id=current_user.id,
+                )
+            )
+
+        # inactive -> active
+        elif previous_is_active == 0 and is_active == 1:
+            latest_inactive = (
+                db.query(EmployeeInactiveRecord)
+                .filter(
+                    EmployeeInactiveRecord.employee_id == employee.id,
+                    EmployeeInactiveRecord.reactivated_at.is_(None),
+                )
+                .order_by(EmployeeInactiveRecord.created_at.desc())
+                .first()
+            )
+
+            if latest_inactive:
+                latest_inactive.reactivated_at = datetime.utcnow()
+                latest_inactive.reactivated_by_user_id = current_user.id
+
     # =========================
     # UPDATE LOG
     # =========================
@@ -601,9 +674,8 @@ async def patch_employee(
         family.mother_name = mother_name
 
     # =========================
-    # REFERENCES (REPLACE)
+    # REFERENCES
     # =========================
-
     reference = db.query(EmployeeReference).filter_by(employee_id=employee.id).first()
 
     if not reference:
@@ -653,7 +725,9 @@ async def patch_employee(
                 )
             )
 
-    # EDUCATION - replace all if provided
+    # =========================
+    # EDUCATION (REPLACE)
+    # =========================
     if education_records is not None:
         parsed_education = safe_json_loads(education_records, "education_records")
 
@@ -684,7 +758,9 @@ async def patch_employee(
                 )
             )
 
-    # EMPLOYMENT HISTORY - replace all if provided
+    # =========================
+    # EMPLOYMENT HISTORY (REPLACE)
+    # =========================
     if employment_history is not None:
         parsed_employment = safe_json_loads(employment_history, "employment_history")
 
@@ -712,23 +788,40 @@ async def patch_employee(
             )
 
     # =========================
-    # FILE (UPSERT via FileService)
+    # FILE UPSERT
     # =========================
     file_service = FileService()
 
-    if files and document_types:
+    ALLOWED_DOCUMENT_TYPES = {
+        "PROFILE_IMAGE",
+        "CV",
+        "CONTRACT",
+        "NBI_CLEARANCE",
+        "BRGY_CLEARANCE",
+        "COMPANY_ID",
+        "ACCOUNT_NUMBER",
+        "ACCOUNTABILITY",
+        "ID_FILE",
+        "HEALTHCARD",
+        "XRAY",
+        "NC3",
+    }
 
+    if files and document_types:
         if len(files) != len(document_types):
             raise HTTPException(
                 status_code=400, detail="Files and document types mismatch"
             )
 
         for file, doc_type in zip(files, document_types):
+            if doc_type not in ALLOWED_DOCUMENT_TYPES:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Unsupported document type: {doc_type}",
+                )
 
-            # upload file
             file_url = file_service.upload(file, f"employees/{employee.id}")
 
-            # check existing (UPSERT)
             existing = (
                 db.query(FileModel)
                 .filter_by(

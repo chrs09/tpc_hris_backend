@@ -93,3 +93,9 @@ class Employee(Base):
     documents = relationship(
         "EmployeeDocument", back_populates="employee", cascade="all, delete-orphan"
     )
+
+    inactive_records = relationship(
+        "EmployeeInactiveRecord",
+        back_populates="employee",
+        cascade="all, delete-orphan",
+    )
