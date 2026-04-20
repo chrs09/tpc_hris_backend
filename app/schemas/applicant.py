@@ -90,7 +90,7 @@ class ApplicantEmploymentPayload(BaseModel):
 
 class ApplicantReferencePayload(BaseModel):
     name: Optional[str] = None
-    occupation: Optional[str] = None
+    position: Optional[str] = None
     address: Optional[str] = None
     contact: Optional[str] = None
 

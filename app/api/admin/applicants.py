@@ -149,6 +149,9 @@ def serialize_employment(records):
             "position": record.position,
             "date_from": record.date_from,
             "date_to": record.date_to,
+            "reason_for_leaving": record.reason_for_leaving,
+            "salary_history": float(record.salary_history) if record.salary_history else None,
+            "salary_type": record.salary_type,
         }
         for record in records
     ]
@@ -160,7 +163,7 @@ def serialize_references(records):
             "id": record.id,
             "applicant_id": record.applicant_id,
             "name": record.name,
-            "occupation": record.occupation,
+            "position": record.position,
             "address": record.address,
             "contact": record.contact,
         }
@@ -672,7 +675,7 @@ def convert_to_employee(
             is_active=1,
             is_available=1,
             created_by_user_id=current_user.id,
-            date_hired=datetime.utcnow(),
+            date_hired=onboarding.date_hired or datetime.utcnow().date()
         )
         db.add(new_employee)
         db.flush()  # needed to get new_employee.id
@@ -751,6 +754,9 @@ def convert_to_employee(
                     position=record.position,
                     date_from=record.date_from,
                     date_to=record.date_to,
+                    reason_for_leaving=record.reason_for_leaving,
+                    salary_history=record.salary_history,
+                    salary_type=record.salary_type,
                 )
             )
 
@@ -762,7 +768,7 @@ def convert_to_employee(
                     name=record.name,
                     contact=record.contact,
                     address=record.address,
-                    occupation=record.occupation,
+                    position=record.position,
                 )
             )
         # 9. Mark applicant as converted

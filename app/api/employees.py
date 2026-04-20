@@ -231,7 +231,7 @@ def get_employee_detail(
             {
                 "employee_id": reference.employee_id,
                 "name": reference.name,
-                "occupation": reference.occupation,
+                "position": reference.position,
                 "contact": reference.contact,
                 "address": reference.address,
             }
@@ -529,7 +529,7 @@ async def patch_employee(
     reference_name: str = Form(None),
     reference_contact: str = Form(None),
     reference_address: str = Form(None),
-    reference_occupation: str = Form(None),
+    reference_position: str = Form(None),
     # GOVERNMENT
     sss: str = Form(None),
     philhealth: str = Form(None),
@@ -688,8 +688,8 @@ async def patch_employee(
         reference.contact = reference_contact
     if reference_address is not None:
         reference.address = reference_address
-    if reference_occupation is not None:
-        reference.occupation = reference_occupation
+    if reference_position is not None:
+        reference.position = reference_position
 
     # =========================
     # GOVERNMENT
