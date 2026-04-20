@@ -18,5 +18,5 @@ class EmployeeEmploymentHistory(Base):
     reason_for_leaving = Column(String(255), nullable=True)
     salary_history = Column(Numeric(12, 2), nullable=True)
     salary_type = Column(String(50), nullable=True)
-    
+
     employee = relationship("Employee", back_populates="employment_history")

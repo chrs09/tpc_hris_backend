@@ -150,7 +150,9 @@ def serialize_employment(records):
             "date_from": record.date_from,
             "date_to": record.date_to,
             "reason_for_leaving": record.reason_for_leaving,
-            "salary_history": float(record.salary_history) if record.salary_history else None,
+            "salary_history": (
+                float(record.salary_history) if record.salary_history else None
+            ),
             "salary_type": record.salary_type,
         }
         for record in records
@@ -675,7 +677,7 @@ def convert_to_employee(
             is_active=1,
             is_available=1,
             created_by_user_id=current_user.id,
-            date_hired=onboarding.date_hired or datetime.utcnow().date()
+            date_hired=onboarding.date_hired or datetime.utcnow().date(),
         )
         db.add(new_employee)
         db.flush()  # needed to get new_employee.id
