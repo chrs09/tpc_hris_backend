@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from app.core.config import settings
 import os
+
 from app.api import health, auth, employees, attendance, dashboard, reminder, users
 from app.api.driver import trips
 from app.api.admin import trips as admin_trips
@@ -19,19 +20,28 @@ app = FastAPI(
     version="1.0.0",
 )
 
-origins = [
+# Explicit origins you know you want to allow
+allowed_origins = [
+    # Local web development
     "http://localhost:3000",
     "http://localhost:5173",
-    "http://127.0.0.1:8000",
-    "http://192.168.1.6:5173",
-    "http://192.168.1.148:5173",
-    "http://192.168.1.148:8000",
-    "http://192.168.1.4:8000",
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:5173",
+
+    # Your live frontend origin
+    "http://18.142.183.226",
 ]
+
 app.add_middleware(
     CORSMiddleware,
-    # allow_origins=["*"],
-    allow_origins=origins,
+    allow_origins=allowed_origins,
+
+    # Allow changing local network IPs and ports for development
+    # Examples:
+    # http://192.168.1.6:5173
+    # http://192.168.1.148:3000
+    # http://10.0.0.5:8081
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1|192\.168\.\d+\.\d+|10\.\d+\.\d+\.\d+|172\.(1[6-9]|2\d|3[0-1])\.\d+\.\d+)(:\d+)?$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -44,15 +54,15 @@ app.include_router(attendance.router, prefix="/api")
 app.include_router(dashboard.router, prefix="/api")
 app.include_router(reminder.router, prefix="/api")
 app.include_router(users.router, prefix="/api")
-# app.include_router(trip_stops.router, prefix="/api")
 app.include_router(trips.router, prefix="/api")
 app.include_router(admin_trips.router, prefix="/api")
 app.include_router(stores.router, prefix="/api")
-if settings.FILE_STORAGE == "local":
-    os.makedirs("uploads", exist_ok=True)
-    app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 app.include_router(public_applicant_router)
 app.include_router(admin_applicants_router)
 app.include_router(applicant_onboarding_router)
 app.include_router(applicant_questions_router)
 app.include_router(admin_applicant_questions_router)
+
+if settings.FILE_STORAGE == "local":
+    os.makedirs("uploads", exist_ok=True)
+    app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
