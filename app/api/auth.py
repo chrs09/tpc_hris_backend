@@ -37,7 +37,7 @@ def login(credentials: UserLogin, db: Session = Depends(get_db)):
             "sub": user.username,
             "role": user.role,
             "user_id": user.id,
-            "exp": datetime.utcnow() + timedelta(minutes=60),
+            "exp": datetime.utcnow() + timedelta(hours=12),
         }
     )
 
