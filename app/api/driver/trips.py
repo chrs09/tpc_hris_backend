@@ -1,6 +1,7 @@
 # app/api/driver/trips.py
 
 import json
+import traceback
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from sqlalchemy.orm import Session
 from datetime import datetime, timedelta
@@ -17,6 +18,8 @@ from app.models.trip_helper import TripHelper
 from app.models.employees import Employee
 from app.models.files import File as FileModel
 from app.services.file_service import FileService
+from app.models.gps_log import GPSLog
+from app.models.trip_models import GPSActionType
 from app.services.gps_service import calculate_distance_meters
 from app.services.notification_service import create_notification
 
@@ -39,6 +42,12 @@ class CheckInRequest(BaseModel):
 
 class AddHelperRequest(BaseModel):
     helper_ids: List[int]
+
+class TrackLocationRequest(BaseModel):
+    lat: float
+    long: float
+    accuracy: float | None = None
+    speed: float | None = None
 
 
 # =========================
@@ -103,19 +112,40 @@ def get_available_helpers(
 # =========================
 @router.get("/active")
 def get_active_trip(
-    db: Session = Depends(get_db), current_user=Depends(get_current_user)
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
 ):
-
+    # =========================
+    # 1️⃣ Get Active Trip
+    # =========================
     trip = (
         db.query(Trip)
-        .filter(Trip.driver_id == current_user.id, Trip.status == TripStatus.ACTIVE)
+        .filter(
+            Trip.driver_id == current_user.id,
+            Trip.status == TripStatus.ACTIVE,
+        )
         .first()
     )
 
     if not trip:
-        return {"active_trip": None}
+        return {
+            "active_trip": None,
+            "latest_stop": None,
+            "has_open_stop": False,
+        }
 
-    # Get latest stop
+    # =========================
+    # 2️⃣ Get Origin Store
+    # =========================
+    origin_store = (
+        db.query(Store)
+        .filter(Store.id == trip.origin_store_id)
+        .first()
+    )
+
+    # =========================
+    # 3️⃣ Get Latest Stop
+    # =========================
     latest_stop = (
         db.query(TripStop)
         .filter(TripStop.trip_id == trip.id)
@@ -123,14 +153,74 @@ def get_active_trip(
         .first()
     )
 
-    open_stop = None
-    if latest_stop and latest_stop.status == StopStatus.CHECKED_IN:
-        open_stop = latest_stop
+    has_open_stop = (
+        True if latest_stop and latest_stop.status == StopStatus.CHECKED_IN else False
+    )
 
+    # =========================
+    # 4️⃣ Build Latest Stop Data
+    # =========================
+    latest_stop_data = None
+
+    if latest_stop:
+        stop_store = None
+
+        if latest_stop.store_id:
+            stop_store = (
+                db.query(Store)
+                .filter(Store.id == latest_stop.store_id)
+                .first()
+            )
+
+        latest_stop_data = {
+            "id": latest_stop.id,
+            "trip_id": latest_stop.trip_id,
+            "store_id": latest_stop.store_id,
+            "store_name": stop_store.name if stop_store else "Unknown Location",
+
+            "status": latest_stop.status.value
+            if hasattr(latest_stop.status, "value")
+            else latest_stop.status,
+
+            "check_in_time": latest_stop.check_in_time,
+            "check_out_time": latest_stop.check_out_time,
+
+            "lat_in": latest_stop.lat_in,
+            "long_in": latest_stop.long_in,
+            "lat_out": latest_stop.lat_out,
+            "long_out": latest_stop.long_out,
+
+            "requires_review": latest_stop.requires_review,
+            "created_at": latest_stop.created_at,
+        }
+
+    # =========================
+    # 5️⃣ Build Active Trip Data
+    # =========================
+    active_trip_data = {
+        "id": trip.id,
+        "driver_id": trip.driver_id,
+        "ticket_no": trip.ticket_no,
+
+        "status": trip.status.value
+        if hasattr(trip.status, "value")
+        else trip.status,
+
+        "origin_store_id": trip.origin_store_id,
+        "origin_name": origin_store.name if origin_store else "N/A",
+
+        "start_time": trip.start_time,
+        "end_time": trip.end_time,
+        "created_at": trip.created_at,
+    }
+
+    # =========================
+    # 6️⃣ Final Response
+    # =========================
     return {
-        "active_trip": trip,
-        "latest_stop": latest_stop,
-        "has_open_stop": True if open_stop else False,
+        "active_trip": active_trip_data,
+        "latest_stop": latest_stop_data,
+        "has_open_stop": has_open_stop,
     }
 
 
@@ -455,6 +545,48 @@ def check_out(
     db.commit()
 
     return {"message": "Checked out successfully."}
+
+# =========================
+# TRACK TRIP LOCATION
+# =========================
+@router.post("/{trip_id}/track")
+def track_trip_location(
+    trip_id: int,
+    payload: LocationRequest,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    # Validate trip
+    trip = (
+        db.query(Trip)
+        .filter(
+            Trip.id == trip_id,
+            Trip.driver_id == current_user.id,
+            Trip.status == TripStatus.ACTIVE,
+        )
+        .first()
+    )
+
+    if not trip:
+        raise HTTPException(status_code=404, detail="Active trip not found.")
+
+    gps_log = GPSLog(
+        trip_id=trip.id,
+        trip_stop_id=None,
+        action_type=GPSActionType.TRACK,
+        actual_lat=payload.lat,
+        actual_long=payload.long,
+        accuracy=None,
+        speed=None,
+        created_at=datetime.utcnow(),
+    )
+
+    db.add(gps_log)
+    db.commit()
+
+    print(f"[TRACK] Trip {trip.id} → {payload.lat}, {payload.long}")
+
+    return {"message": "Tracking saved"}
 
 
 # =========================
