@@ -9,6 +9,7 @@ from pydantic import BaseModel
 from typing import List
 
 from app.core.database import get_db
+from app.utils.response import api_response
 from app.schemas.trip import LocationRequest
 from app.core.dependencies import get_current_user
 from app.models.trips import Trip, TripStatus
@@ -838,11 +839,6 @@ def driver_trip_summary(
 @router.get("/my-trips")
 def get_my_trips(db: Session = Depends(get_db), current_user=Depends(get_current_user)):
 
-    def to_ph(dt):
-        if not dt:
-            return None
-        return (dt + timedelta(hours=8)).strftime("%b %d, %Y, %I:%M %p")
-
     trips = (
         db.query(Trip)
         .filter(Trip.driver_id == current_user.id)
@@ -857,10 +853,48 @@ def get_my_trips(db: Session = Depends(get_db), current_user=Depends(get_current
             {
                 "id": trip.id,
                 "ticket_no": trip.ticket_no,
-                "status": trip.status.value,
-                "start_time": to_ph(trip.start_time),
-                "end_time": to_ph(trip.end_time),
+                "status": trip.status.value
+                if hasattr(trip.status, "value")
+                else trip.status,
+                "start_time": trip.start_time,
+                "end_time": trip.end_time,
             }
         )
 
-    return results
+    return api_response(results)
+
+# =========================
+# DRIVER PROFILE
+# =========================
+@router.get("/profile")
+def get_driver_profile(
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    # 1️⃣ Get employee record
+    employee = (
+        db.query(Employee)
+        .filter(Employee.id == current_user.employee_id)
+        .first()
+    )
+
+    if not employee:
+        raise HTTPException(status_code=404, detail="Employee profile not found.")
+
+    # 2️⃣ Build full name
+    full_name = f"{employee.first_name} {employee.last_name}"
+
+    # 3️⃣ Return combined data
+    return {
+        "user_id": current_user.id,
+        "username": current_user.username,
+        "role": current_user.role,
+
+        "employee_id": employee.id,
+        "full_name": full_name,
+        "first_name": employee.first_name,
+        "last_name": employee.last_name,
+        "department": employee.department,
+        "position": employee.position,
+        "email": employee.email,
+    }
