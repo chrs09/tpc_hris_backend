@@ -553,7 +553,7 @@ def check_out(
 @router.post("/{trip_id}/track")
 def track_trip_location(
     trip_id: int,
-    payload: LocationRequest,
+    payload: TrackLocationRequest,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
@@ -577,8 +577,8 @@ def track_trip_location(
         action_type=GPSActionType.TRACK,
         actual_lat=payload.lat,
         actual_long=payload.long,
-        accuracy=None,
-        speed=None,
+        accuracy=payload.accuracy,
+        speed=payload.speed,
         created_at=datetime.utcnow(),
     )
 
