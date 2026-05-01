@@ -581,11 +581,7 @@ def track_trip_location(
         actual_long=payload.long,
         accuracy=payload.accuracy,
         speed=payload.speed,
-<<<<<<< HEAD
-        created_at=datetime.utcnow(),
-=======
         created_at=payload.created_at or datetime.utcnow(),
->>>>>>> develop
     )
 
     db.add(gps_log)
