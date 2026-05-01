@@ -2,6 +2,7 @@
 
 import json
 import traceback
+import logging
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from sqlalchemy.orm import Session
 from datetime import datetime, timedelta
@@ -26,8 +27,8 @@ from app.services.notification_service import create_notification
 
 router = APIRouter(prefix="/driver/trips", tags=["Driver Trips"])
 
-HUB_NAMES = {"Yard", "Plant", "Consolacion"}
-
+HUB_NAMES = {"Yard", "Plant", "Consolacion", "Test Hub"}
+logger = logging.getLogger("driver.trips")
 
 class StartTripRequest(BaseModel):
     lat: float
@@ -49,6 +50,7 @@ class TrackLocationRequest(BaseModel):
     long: float
     accuracy: float | None = None
     speed: float | None = None
+    created_at: datetime | None = None
 
 
 # =========================
@@ -579,13 +581,25 @@ def track_trip_location(
         actual_long=payload.long,
         accuracy=payload.accuracy,
         speed=payload.speed,
+<<<<<<< HEAD
         created_at=datetime.utcnow(),
+=======
+        created_at=payload.created_at or datetime.utcnow(),
+>>>>>>> develop
     )
 
     db.add(gps_log)
     db.commit()
 
-    print(f"[TRACK] Trip {trip.id} → {payload.lat}, {payload.long}")
+    logger.info(
+        "[TRACK] trip_id=%s lat=%s long=%s accuracy=%s speed=%s created_at=%s",
+        trip.id,
+        payload.lat,
+        payload.long,
+        payload.accuracy,
+        payload.speed,
+        payload.created_at,
+    )
 
     return {"message": "Tracking saved"}
 
