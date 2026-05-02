@@ -675,6 +675,22 @@ def complete_trip(
     trip.status = TripStatus.PENDING_APPROVAL
     trip.end_time = datetime.utcnow()
 
+    completion_time = datetime.utcnow()
+
+    trip.status = TripStatus.PENDING_APPROVAL
+    trip.end_time = completion_time
+
+    completion_log = GPSLog(
+        trip_id=trip.id,
+        trip_stop_id=None,
+        action_type=GPSActionType.TRACK,
+        actual_lat=payload.lat,
+        actual_long=payload.long,
+        created_at=completion_time,
+    )
+
+    db.add(completion_log)
+
     for trip_helper in trip.trip_helpers:
         trip_helper.helper.is_available = 1
 
