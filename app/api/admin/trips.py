@@ -196,7 +196,7 @@ def review_trip(
     gps_logs = (
         db.query(GPSLog)
         .filter(GPSLog.trip_id == trip_id)
-        .order_by(GPSLog.created_at)
+        .order_by(GPSLog.created_at.asc())
         .all()
     )
 
