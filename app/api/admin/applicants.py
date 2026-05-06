@@ -283,7 +283,9 @@ def get_applicants(db: Session = Depends(get_db)):
             {
                 "id": applicant.id,
                 "first_name": applicant.first_name,
+                "middle_name": applicant.middle_name,
                 "last_name": applicant.last_name,
+                "suffix": applicant.suffix,
                 "email": applicant.email,
                 "contact_number": applicant.contact_number,
                 "position_applied": applicant.position_applied,
@@ -330,7 +332,9 @@ def get_applicant_detail(applicant_id: int, db: Session = Depends(get_db)):
     response = {
         "id": applicant.id,
         "first_name": applicant.first_name,
+        "middle_name": applicant.middle_name,
         "last_name": applicant.last_name,
+        "suffix": applicant.suffix,
         "email": applicant.email,
         "contact_number": applicant.contact_number,
         "position_applied": applicant.position_applied,

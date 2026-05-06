@@ -4,6 +4,8 @@ from datetime import date
 
 class EmployeeCreate(BaseModel):
     first_name: str
+    middle_name: str
+    suffix: str
     last_name: str
     email: EmailStr
     position: str
@@ -14,6 +16,8 @@ class EmployeeCreate(BaseModel):
 
 class EmployeeUpdate(BaseModel):
     first_name: str
+    middle_name: str
+    suffix: str
     last_name: str
     email: EmailStr
     position: str
@@ -25,6 +29,8 @@ class EmployeeUpdate(BaseModel):
 class EmployeeResponse(BaseModel):
     id: int
     first_name: str
+    middle_name: str
+    suffix: str
     last_name: str
     email: EmailStr
     position: str

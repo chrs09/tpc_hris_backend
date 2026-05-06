@@ -11,7 +11,9 @@ class Applicant(Base):
     id = Column(Integer, primary_key=True, index=True)
 
     first_name = Column(String(100))
+    middle_name = Column(String(100))
     last_name = Column(String(100))
+    suffix = Column(String(50))
     email = Column(String(150))
     contact_number = Column(String(30))
     position_applied = Column(String(150))

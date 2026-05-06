@@ -16,6 +16,8 @@ def apply(
     email: str = Form(...),
     contact_number: str = Form(...),
     position_applied: str = Form(...),
+    middle_name: str = Form(None),
+    suffix: str = Form(None),
     cv: UploadFile = File(...),
     selfie_photo: UploadFile = File(...),  # new required selfie photo
     db: Session = Depends(get_db),
@@ -26,7 +28,9 @@ def apply(
         # =========================
         applicant = Applicant(
             first_name=first_name,
+            middle_name=middle_name,
             last_name=last_name,
+            suffix=suffix,
             email=email,
             contact_number=contact_number,
             position_applied=position_applied,

@@ -10,7 +10,9 @@ class Employee(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     first_name = Column(String(50), nullable=False)
+    middle_name = Column(String(50), nullable=True)
     last_name = Column(String(50), nullable=False)
+    suffix = Column(String(20), nullable=True)
     email = Column(String(100), unique=True, nullable=False)
     position = Column(String(100), nullable=False)
     date_hired = Column(Date, nullable=False)
@@ -97,5 +99,12 @@ class Employee(Base):
     inactive_records = relationship(
         "EmployeeInactiveRecord",
         back_populates="employee",
+        cascade="all, delete-orphan",
+    )
+
+    bank_details = relationship(
+        "EmployeeBank",
+        back_populates="employee",
+        uselist=False,
         cascade="all, delete-orphan",
     )

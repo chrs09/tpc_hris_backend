@@ -19,6 +19,7 @@ from .employee_employment import EmployeeEmploymentHistory as EmployeeEmployment
 from .employee_reference import EmployeeReference as EmployeeReference
 from .employee_government import EmployeeGovernmentDetails as EmployeeGovernmentDetails
 from .employee_document import EmployeeDocument as EmployeeDocument
+from .employee_bank import EmployeeBank as EmployeeBank
 
 # Applicant related models
 from .applicants import Applicant as Applicant

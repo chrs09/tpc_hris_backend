@@ -1,7 +1,6 @@
 # app/api/driver/trips.py
 
 import json
-import traceback
 import logging
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from sqlalchemy.orm import Session
@@ -30,6 +29,7 @@ router = APIRouter(prefix="/driver/trips", tags=["Driver Trips"])
 HUB_NAMES = {"Yard", "Plant", "Consolacion", "Test Hub"}
 logger = logging.getLogger("driver.trips")
 
+
 class StartTripRequest(BaseModel):
     lat: float
     long: float
@@ -44,6 +44,7 @@ class CheckInRequest(BaseModel):
 
 class AddHelperRequest(BaseModel):
     helper_ids: List[int]
+
 
 class TrackLocationRequest(BaseModel):
     lat: float
@@ -140,11 +141,7 @@ def get_active_trip(
     # =========================
     # 2️⃣ Get Origin Store
     # =========================
-    origin_store = (
-        db.query(Store)
-        .filter(Store.id == trip.origin_store_id)
-        .first()
-    )
+    origin_store = db.query(Store).filter(Store.id == trip.origin_store_id).first()
 
     # =========================
     # 3️⃣ Get Latest Stop
@@ -170,9 +167,7 @@ def get_active_trip(
 
         if latest_stop.store_id:
             stop_store = (
-                db.query(Store)
-                .filter(Store.id == latest_stop.store_id)
-                .first()
+                db.query(Store).filter(Store.id == latest_stop.store_id).first()
             )
 
         latest_stop_data = {
@@ -180,19 +175,17 @@ def get_active_trip(
             "trip_id": latest_stop.trip_id,
             "store_id": latest_stop.store_id,
             "store_name": stop_store.name if stop_store else "Unknown Location",
-
-            "status": latest_stop.status.value
-            if hasattr(latest_stop.status, "value")
-            else latest_stop.status,
-
+            "status": (
+                latest_stop.status.value
+                if hasattr(latest_stop.status, "value")
+                else latest_stop.status
+            ),
             "check_in_time": latest_stop.check_in_time,
             "check_out_time": latest_stop.check_out_time,
-
             "lat_in": latest_stop.lat_in,
             "long_in": latest_stop.long_in,
             "lat_out": latest_stop.lat_out,
             "long_out": latest_stop.long_out,
-
             "requires_review": latest_stop.requires_review,
             "created_at": latest_stop.created_at,
         }
@@ -204,14 +197,9 @@ def get_active_trip(
         "id": trip.id,
         "driver_id": trip.driver_id,
         "ticket_no": trip.ticket_no,
-
-        "status": trip.status.value
-        if hasattr(trip.status, "value")
-        else trip.status,
-
+        "status": trip.status.value if hasattr(trip.status, "value") else trip.status,
         "origin_store_id": trip.origin_store_id,
         "origin_name": origin_store.name if origin_store else "N/A",
-
         "start_time": trip.start_time,
         "end_time": trip.end_time,
         "created_at": trip.created_at,
@@ -549,6 +537,7 @@ def check_out(
 
     return {"message": "Checked out successfully."}
 
+
 # =========================
 # TRACK TRIP LOCATION
 # =========================
@@ -879,15 +868,16 @@ def get_my_trips(db: Session = Depends(get_db), current_user=Depends(get_current
             {
                 "id": trip.id,
                 "ticket_no": trip.ticket_no,
-                "status": trip.status.value
-                if hasattr(trip.status, "value")
-                else trip.status,
+                "status": (
+                    trip.status.value if hasattr(trip.status, "value") else trip.status
+                ),
                 "start_time": trip.start_time,
                 "end_time": trip.end_time,
             }
         )
 
     return api_response(results)
+
 
 # =========================
 # DRIVER PROFILE
@@ -899,9 +889,7 @@ def get_driver_profile(
 ):
     # 1️⃣ Get employee record
     employee = (
-        db.query(Employee)
-        .filter(Employee.id == current_user.employee_id)
-        .first()
+        db.query(Employee).filter(Employee.id == current_user.employee_id).first()
     )
 
     if not employee:
@@ -915,7 +903,6 @@ def get_driver_profile(
         "user_id": current_user.id,
         "username": current_user.username,
         "role": current_user.role,
-
         "employee_id": employee.id,
         "full_name": full_name,
         "first_name": employee.first_name,

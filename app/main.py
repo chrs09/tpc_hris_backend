@@ -18,7 +18,6 @@ from app.api.public.applicant_onboarding import router as applicant_onboarding_r
 from app.api.public.applicant_questions import router as applicant_questions_router
 from app.api.admin.applicant_questions import router as admin_applicant_questions_router
 
-
 logging.basicConfig(
     level=logging.INFO,
     format="%(levelname)s:%(name)s:%(message)s",

@@ -203,9 +203,15 @@ def review_trip(
     gps_logs_data = [
         {
             "id": log.id,
-            "action_type": log.action_type.value if hasattr(log.action_type, "value") else log.action_type,
+            "action_type": (
+                log.action_type.value
+                if hasattr(log.action_type, "value")
+                else log.action_type
+            ),
             "actual_lat": float(log.actual_lat) if log.actual_lat is not None else None,
-            "actual_long": float(log.actual_long) if log.actual_long is not None else None,
+            "actual_long": (
+                float(log.actual_long) if log.actual_long is not None else None
+            ),
             "accuracy": log.accuracy,
             "speed": log.speed,
             "created_at": log.created_at.isoformat() if log.created_at else None,
@@ -220,10 +226,7 @@ def review_trip(
         return (dt + timedelta(hours=8)).strftime("%b %d, %Y, %I:%M %p")
 
     # SORT STOPS BY CHECK-IN TIME (important for route drawing)
-    sorted_stops = sorted(
-        trip.stops,
-        key=lambda x: x.check_in_time or datetime.min
-    )
+    sorted_stops = sorted(trip.stops, key=lambda x: x.check_in_time or datetime.min)
 
     stops_data = []
 

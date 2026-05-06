@@ -16,6 +16,7 @@ from app.models.employee_personal import EmployeePersonalDetails
 from app.models.employee_education import EmployeeEducation
 from app.models.employee_employment import EmployeeEmploymentHistory
 from app.models.employee_reference import EmployeeReference
+from app.models.employee_bank import EmployeeBank
 from app.models.employees import Employee
 from app.models.user import User
 from app.core.dependencies import get_current_user
@@ -99,7 +100,9 @@ def get_employees(
         {
             "id": emp.id,
             "first_name": emp.first_name,
+            "middle_name": emp.middle_name,
             "last_name": emp.last_name,
+            "suffix": emp.suffix,
             "email": emp.email,
             "position": emp.position,
             "date_hired": str(emp.date_hired) if emp.date_hired else None,
@@ -140,6 +143,7 @@ def get_employee_detail(
     government = (
         db.query(EmployeeGovernmentDetails).filter_by(employee_id=employee.id).first()
     )
+    bank = db.query(EmployeeBank).filter_by(employee_id=employee.id).first()
 
     emergency_contacts = (
         db.query(EmployeeEmergencyContact).filter_by(employee_id=employee.id).all()
@@ -171,7 +175,9 @@ def get_employee_detail(
     response = {
         "id": employee.id,
         "first_name": employee.first_name,
+        "middle_name": employee.middle_name,
         "last_name": employee.last_name,
+        "suffix": employee.suffix,
         "email": employee.email,
         "position": employee.position,
         "date_hired": employee.date_hired,
@@ -225,6 +231,16 @@ def get_employee_detail(
                 "tin_number": government.tin_number,
             }
             if government
+            else None
+        ),
+        "bank_details": (
+            {
+                "employee_id": bank.employee_id,
+                "bank_type": bank.bank_type,
+                "account_name": bank.account_name,
+                "account_number": bank.account_number,
+            }
+            if bank
             else None
         ),
         "character_reference": (
@@ -498,7 +514,9 @@ async def patch_employee(
     document_types: List[str] = Form(None),
     # BASIC
     first_name: str = Form(None),
+    middle_name: str = Form(None),
     last_name: str = Form(None),
+    suffix: str = Form(None),
     email: str = Form(None),
     position: str = Form(None),
     department: str = Form(None),
@@ -535,6 +553,10 @@ async def patch_employee(
     philhealth: str = Form(None),
     pagibig: str = Form(None),
     tin: str = Form(None),
+    # BANK DETAILS
+    bank_type: str = Form(None),
+    account_name: str = Form(None),
+    account_number: str = Form(None),
     # EMERGENCY
     emergency_contact_name: str = Form(None),
     emergency_contact_number: str = Form(None),
@@ -557,8 +579,12 @@ async def patch_employee(
     # =========================
     if first_name is not None:
         employee.first_name = first_name
+    if middle_name is not None:
+        employee.middle_name = middle_name
     if last_name is not None:
         employee.last_name = last_name
+    if suffix is not None:
+        employee.suffix = suffix
     if email is not None:
         employee.email = email
     if position is not None:
@@ -710,6 +736,22 @@ async def patch_employee(
         gov.tin_number = tin
 
     # =========================
+    # BANK DETAILS
+    # =========================
+    bank = db.query(EmployeeBank).filter_by(employee_id=employee.id).first()
+
+    if not bank:
+        bank = EmployeeBank(employee_id=employee.id)
+        db.add(bank)
+
+    if bank_type is not None:
+        bank.bank_type = bank_type
+    if account_name is not None:
+        bank.account_name = account_name
+    if account_number is not None:
+        bank.account_number = account_number
+
+    # =========================
     # EMERGENCY (REPLACE)
     # =========================
     if emergency_contact_name is not None:
@@ -804,6 +846,9 @@ async def patch_employee(
         "ID_FILE",
         "HEALTHCARD",
         "XRAY",
+        "SSS",
+        "PAGIBIG",
+        "PHILHEALTH",
         "NC3",
     }
 
