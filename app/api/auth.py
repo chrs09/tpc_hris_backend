@@ -45,8 +45,8 @@ def login(credentials: UserLogin, db: Session = Depends(get_db)):
     if role_value in ["admin", "superadmin"]:
         expires_at = datetime.utcnow() + timedelta(hours=4)
     elif role_value == "driver":
-        # expires_at = datetime.utcnow() + timedelta(hours=36)
-        expires_at = datetime.utcnow() + timedelta(minutes=1)
+        expires_at = datetime.utcnow() + timedelta(hours=36)
+        # expires_at = datetime.utcnow() + timedelta(minutes=1)
     else:
         expires_at = datetime.utcnow() + timedelta(hours=12)
 
