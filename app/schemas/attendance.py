@@ -32,6 +32,7 @@ class AttendanceResponse(BaseModel):
     check_in_time: datetime
     status: str
     created_by_user_id: int
+    completed_trips: int = 0  # default to 0 for response
 
     class Config:
         model_config = {"from_attributes": True}  # Pydantic v2

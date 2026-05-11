@@ -243,7 +243,7 @@ def get_employee_detail(
             if bank
             else None
         ),
-        "character_reference": (
+        "character_references": (
             {
                 "employee_id": reference.employee_id,
                 "name": reference.name,
@@ -346,15 +346,13 @@ async def create_employee(
     # ARRAY FIELDS
     education_records: str = Form("[]"),
     employment_history: str = Form("[]"),
-    # FILES
-    # profile_image: UploadFile = File(None),
-    # resume: UploadFile = File(None),
+    character_references: str = Form("[]"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-
     parsed_education = safe_json_loads(education_records, "education_records")
     parsed_employment = safe_json_loads(employment_history, "employment_history")
+    parsed_references = safe_json_loads(character_references, "character_references")
 
     employee = Employee(
         first_name=first_name,
@@ -412,6 +410,28 @@ async def create_employee(
             )
         )
 
+    # CHARACTER REFERENCES
+    for ref in parsed_references[:3]:
+        if not any(
+            [
+                ref.get("name"),
+                ref.get("position"),
+                ref.get("contact"),
+                ref.get("address"),
+            ]
+        ):
+            continue
+
+        db.add(
+            EmployeeReference(
+                employee_id=employee.id,
+                name=ref.get("name"),
+                position=ref.get("position"),
+                contact=ref.get("contact"),
+                address=ref.get("address"),
+            )
+        )
+
     # EDUCATION
     for edu in parsed_education:
         if not any(
@@ -464,18 +484,15 @@ async def create_employee(
     file_service = FileService()
 
     if files and document_types:
-
         if len(files) != len(document_types):
             raise HTTPException(
-                status_code=400, detail="Files and document types mismatch"
+                status_code=400,
+                detail="Files and document types mismatch",
             )
 
         for file, doc_type in zip(files, document_types):
-
-            # upload file
             file_url = file_service.upload(file, f"employees/{employee.id}")
 
-            # check existing (UPSERT)
             existing = (
                 db.query(FileModel)
                 .filter_by(
@@ -543,7 +560,7 @@ async def patch_employee(
     spouse: str = Form(None),
     father_name: str = Form(None),
     mother_name: str = Form(None),
-    # REFERENCES
+    # OLD SINGLE REFERENCE FIELDS - optional backward compatibility
     reference_name: str = Form(None),
     reference_contact: str = Form(None),
     reference_address: str = Form(None),
@@ -564,6 +581,7 @@ async def patch_employee(
     # ARRAY FIELDS
     education_records: str = Form(None),
     employment_history: str = Form(None),
+    character_references: str = Form(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -574,9 +592,7 @@ async def patch_employee(
 
     previous_is_active = employee.is_active
 
-    # =========================
     # BASIC
-    # =========================
     if first_name is not None:
         employee.first_name = first_name
     if middle_name is not None:
@@ -592,16 +608,13 @@ async def patch_employee(
     if department is not None:
         employee.department = department
     if date_hired:
-        employee.date_hired = datetime.strptime(date_hired, "%Y-%m-%d").date()
+        employee.date_hired = parse_date(date_hired)
 
     if is_active is not None:
         employee.is_active = is_active
 
-    # =========================
     # INACTIVE / REACTIVATE LOGIC
-    # =========================
     if is_active is not None:
-        # active -> inactive
         if previous_is_active == 1 and is_active == 0:
             if not inactive_reason:
                 raise HTTPException(
@@ -625,7 +638,6 @@ async def patch_employee(
                 )
             )
 
-        # inactive -> active
         elif previous_is_active == 0 and is_active == 1:
             latest_inactive = (
                 db.query(EmployeeInactiveRecord)
@@ -641,15 +653,10 @@ async def patch_employee(
                 latest_inactive.reactivated_at = datetime.utcnow()
                 latest_inactive.reactivated_by_user_id = current_user.id
 
-    # =========================
-    # UPDATE LOG
-    # =========================
     employee.updated_by_user_id = current_user.id
     employee.updated_at = datetime.utcnow()
 
-    # =========================
-    # PERSONAL (UPSERT)
-    # =========================
+    # PERSONAL UPSERT
     personal = (
         db.query(EmployeePersonalDetails).filter_by(employee_id=employee.id).first()
     )
@@ -659,7 +666,7 @@ async def patch_employee(
         db.add(personal)
 
     if birthday:
-        personal.birthday = datetime.strptime(birthday, "%Y-%m-%d").date()
+        personal.birthday = parse_date(birthday)
     if birthplace is not None:
         personal.birthplace = birthplace
     if civil_status is not None:
@@ -683,9 +690,7 @@ async def patch_employee(
     if provincial_address is not None:
         personal.provincial_address = provincial_address
 
-    # =========================
-    # FAMILY
-    # =========================
+    # FAMILY UPSERT
     family = db.query(EmployeeFamilyDetails).filter_by(employee_id=employee.id).first()
 
     if not family:
@@ -699,27 +704,67 @@ async def patch_employee(
     if mother_name is not None:
         family.mother_name = mother_name
 
-    # =========================
-    # REFERENCES
-    # =========================
-    reference = db.query(EmployeeReference).filter_by(employee_id=employee.id).first()
+    # CHARACTER REFERENCES REPLACE
+    if character_references is not None:
+        parsed_references = safe_json_loads(
+            character_references,
+            "character_references",
+        )
 
-    if not reference:
-        reference = EmployeeReference(employee_id=employee.id)
-        db.add(reference)
+        db.query(EmployeeReference).filter_by(employee_id=employee.id).delete()
 
-    if reference_name is not None:
-        reference.name = reference_name
-    if reference_contact is not None:
-        reference.contact = reference_contact
-    if reference_address is not None:
-        reference.address = reference_address
-    if reference_position is not None:
-        reference.position = reference_position
+        for ref in parsed_references[:3]:
+            if not any(
+                [
+                    ref.get("name"),
+                    ref.get("position"),
+                    ref.get("contact"),
+                    ref.get("address"),
+                ]
+            ):
+                continue
 
-    # =========================
-    # GOVERNMENT
-    # =========================
+            db.add(
+                EmployeeReference(
+                    employee_id=employee.id,
+                    name=ref.get("name"),
+                    position=ref.get("position"),
+                    contact=ref.get("contact"),
+                    address=ref.get("address"),
+                )
+            )
+
+    # OPTIONAL BACKWARD COMPATIBILITY FOR OLD SINGLE REFERENCE FIELDS
+    elif any(
+        field is not None
+        for field in [
+            reference_name,
+            reference_contact,
+            reference_address,
+            reference_position,
+        ]
+    ):
+        db.query(EmployeeReference).filter_by(employee_id=employee.id).delete()
+
+        if any(
+            [
+                reference_name,
+                reference_contact,
+                reference_address,
+                reference_position,
+            ]
+        ):
+            db.add(
+                EmployeeReference(
+                    employee_id=employee.id,
+                    name=reference_name,
+                    position=reference_position,
+                    contact=reference_contact,
+                    address=reference_address,
+                )
+            )
+
+    # GOVERNMENT UPSERT
     gov = db.query(EmployeeGovernmentDetails).filter_by(employee_id=employee.id).first()
 
     if not gov:
@@ -735,9 +780,7 @@ async def patch_employee(
     if tin is not None:
         gov.tin_number = tin
 
-    # =========================
-    # BANK DETAILS
-    # =========================
+    # BANK UPSERT
     bank = db.query(EmployeeBank).filter_by(employee_id=employee.id).first()
 
     if not bank:
@@ -751,9 +794,7 @@ async def patch_employee(
     if account_number is not None:
         bank.account_number = account_number
 
-    # =========================
-    # EMERGENCY (REPLACE)
-    # =========================
+    # EMERGENCY REPLACE
     if emergency_contact_name is not None:
         db.query(EmployeeEmergencyContact).filter_by(employee_id=employee.id).delete()
 
@@ -767,9 +808,7 @@ async def patch_employee(
                 )
             )
 
-    # =========================
-    # EDUCATION (REPLACE)
-    # =========================
+    # EDUCATION REPLACE
     if education_records is not None:
         parsed_education = safe_json_loads(education_records, "education_records")
 
@@ -800,9 +839,7 @@ async def patch_employee(
                 )
             )
 
-    # =========================
-    # EMPLOYMENT HISTORY (REPLACE)
-    # =========================
+    # EMPLOYMENT HISTORY REPLACE
     if employment_history is not None:
         parsed_employment = safe_json_loads(employment_history, "employment_history")
 
@@ -829,9 +866,7 @@ async def patch_employee(
                 )
             )
 
-    # =========================
     # FILE UPSERT
-    # =========================
     file_service = FileService()
 
     ALLOWED_DOCUMENT_TYPES = {
@@ -855,7 +890,8 @@ async def patch_employee(
     if files and document_types:
         if len(files) != len(document_types):
             raise HTTPException(
-                status_code=400, detail="Files and document types mismatch"
+                status_code=400,
+                detail="Files and document types mismatch",
             )
 
         for file, doc_type in zip(files, document_types):
