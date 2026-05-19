@@ -8,7 +8,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.core.config import settings
-from app.api import health, auth, employees, attendance, dashboard, reminder, users
+from app.api import health, auth, employees, attendance, dashboard, reminder, users, map
 from app.api.driver import trips
 from app.api.admin import trips as admin_trips
 from app.api.admin import stores
@@ -79,6 +79,7 @@ app.add_middleware(
 )
 
 
+app.include_router(map.router, prefix="/api")
 app.include_router(health.router, prefix="/api")
 app.include_router(auth.router, prefix="/api")
 app.include_router(employees.router, prefix="/api")

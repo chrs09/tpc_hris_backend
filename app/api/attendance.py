@@ -1,10 +1,20 @@
+import pytz
 from datetime import datetime, date
-from typing import List
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    UploadFile,
+    File,
+    Form,
+)
 from sqlalchemy import func
 from sqlalchemy.orm import Session
+
+from app.utils.response import api_response
+from app.utils.timezone import convert_datetime_to_ph
 
 from app.core.database import get_db
 from app.core.dependencies import get_current_user
@@ -13,6 +23,8 @@ from app.models.employees import Employee
 from app.models.user import User
 from app.models.trips import Trip
 from app.models.trip_helper import TripHelper
+from app.models.files import File as FileModel
+from app.services.file_service import FileService
 from app.schemas.attendance import (
     AttendanceCreate,
     AttendanceResponse,
@@ -21,6 +33,21 @@ from app.schemas.attendance import (
 )
 
 router = APIRouter(prefix="/attendance", tags=["Attendance"])
+
+PH_TZ = pytz.timezone("Asia/Manila")
+UTC = pytz.utc
+
+
+def format_attendance_time_only(value):
+    if not value:
+        return None
+
+    if value.tzinfo is None:
+        value = UTC.localize(value)
+
+    ph_time = value.astimezone(PH_TZ)
+
+    return ph_time.strftime("%I:%M %p")
 
 
 # -------------------------------
@@ -50,13 +77,147 @@ def create_attendance_record(
         status=status,
         attendance_date=attendance_date,
         check_in_time=datetime.utcnow(),
+        attendance_method="MANUAL",
         created_by_user_id=user_id,
     )
 
     db.add(record)
     return record
 
+# -------------------------------
+# Selfie Time In
+# -------------------------------
+# attendance.py
 
+@router.post("/time-in-selfie", response_model=AttendanceResponse)
+def time_in_selfie(
+    latitude: float = Form(...),
+    longitude: float = Form(...),
+    address: str = Form(...),
+    photo: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    # =========================
+    # ROLE CHECK
+    # =========================
+    if current_user.role not in ["admin", "superadmin", "motorpool"]:
+        raise HTTPException(
+            status_code=403,
+            detail="Not authorized",
+        )
+
+    # =========================
+    # GET EMPLOYEE FROM USER
+    # =========================
+    employee_id = current_user.employee_id
+
+    if not employee_id:
+        raise HTTPException(
+            status_code=400,
+            detail="User account is not linked to an employee.",
+        )
+
+    # =========================
+    # VALIDATE IMAGE
+    # =========================
+    if (
+        not photo.content_type
+        or not photo.content_type.startswith("image/")
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Photo must be an image file",
+        )
+
+    # =========================
+    # CHECK EMPLOYEE
+    # =========================
+    employee = (
+        db.query(Employee)
+        .filter(Employee.id == employee_id)
+        .first()
+    )
+
+    if not employee:
+        raise HTTPException(
+            status_code=404,
+            detail="Employee not found",
+        )
+
+    now = datetime.utcnow()
+    today = now.date()
+
+    # =========================
+    # CHECK EXISTING
+    # =========================
+    existing = (
+        db.query(AttendanceRecord)
+        .filter(
+            AttendanceRecord.employee_id == employee_id,
+            AttendanceRecord.attendance_date == today,
+        )
+        .first()
+    )
+
+    if existing and existing.check_in_time:
+        raise HTTPException(
+            status_code=400,
+            detail="Employee already timed in today",
+        )
+
+    # =========================
+    # CREATE / UPDATE RECORD
+    # =========================
+    record = existing or AttendanceRecord(
+        employee_id=employee_id,
+        attendance_date=today,
+        status="Present",
+        attendance_method="SELFIE",
+        created_by_user_id=current_user.id,
+    )
+
+    record.check_in_time = now
+
+    record.time_in_latitude = latitude
+    record.time_in_longitude = longitude
+    record.time_in_address = address
+
+    if not existing:
+        db.add(record)
+        db.flush()
+
+    # =========================
+    # UPLOAD PHOTO
+    # =========================
+    file_service = FileService()
+
+    photo_url = file_service.upload(
+        photo,
+        f"attendance/{record.id}/time-in",
+    )
+
+    # =========================
+    # STORE FILE METADATA
+    # =========================
+    db.add(
+        FileModel(
+            entity_type="attendance",
+            entity_id=record.id,
+            document_type="ATTENDANCE_TIME_IN",
+            file_url=photo_url,
+            uploaded_by=current_user.id,
+        )
+    )
+
+    db.commit()
+    db.refresh(record)
+
+    # computed response fields
+    record.time_in_photo_url = photo_url
+    record.time_out_photo_url = None
+
+    return record
 # -------------------------------
 # Helper: Auto-create attendance from trips
 # -------------------------------
@@ -137,7 +298,48 @@ def sync_trip_attendance_records(db: Session, user_id: int):
     if created_count > 0:
         db.commit()
 
+# attendance today
+@router.get("/today")
+def get_my_attendance_today(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if not current_user.employee_id:
+        raise HTTPException(
+            status_code=400,
+            detail="User account is not linked to an employee.",
+        )
 
+    today = datetime.utcnow().date()
+
+    record = (
+        db.query(AttendanceRecord)
+        .filter(
+            AttendanceRecord.employee_id == current_user.employee_id,
+            AttendanceRecord.attendance_date == today,
+        )
+        .first()
+    )
+
+    if not record:
+        return {
+            "has_record": False,
+            "check_in_time": None,
+            "check_out_time": None,
+            "status": None,
+        }
+
+    return {
+        "has_record": True,
+        "id": record.id,
+        "attendance_date": str(record.attendance_date),
+        "check_in_time": format_attendance_time_only(record.check_in_time),
+        "check_out_time": format_attendance_time_only(record.check_out_time),
+        "status": record.status,
+        "time_in_latitude": record.time_in_latitude,
+        "time_in_longitude": record.time_in_longitude,
+        "time_in_address": record.time_in_address,
+    }
 # -------------------------------
 # Single attendance
 # -------------------------------
@@ -244,7 +446,7 @@ def bulk_mixed_attendance(
 # -------------------------------
 # Get attendance records
 # -------------------------------
-@router.get("/list", response_model=List[AttendanceResponse])
+@router.get("/list")
 def get_attendance_records(
     skip: int = 0,
     limit: int = 5000,
@@ -268,6 +470,9 @@ def get_attendance_records(
         "APPROVED",
         "approved",
     ]
+
+    response = []
+
 
     for record in records:
 
@@ -301,13 +506,70 @@ def get_attendance_records(
             )
             .scalar()
         )
+        # ---------------------------------------
+        # TIME IN PHOTO
+        # ---------------------------------------
+        time_in_photo = (
+            db.query(FileModel)
+            .filter(
+                FileModel.entity_type == "attendance",
+                FileModel.entity_id == record.id,
+                FileModel.document_type == "ATTENDANCE_TIME_IN",
+            )
+            .first()
+        )
+
+        # ---------------------------------------
+        # TIME OUT PHOTO
+        # ---------------------------------------
+        time_out_photo = (
+            db.query(FileModel)
+            .filter(
+                FileModel.entity_type == "attendance",
+                FileModel.entity_id == record.id,
+                FileModel.document_type == "ATTENDANCE_TIME_OUT",
+            )
+            .first()
+        )
+
+        record.time_in_photo_url = (
+            time_in_photo.file_url if time_in_photo else None
+        )
+
+        record.time_out_photo_url = (
+            time_out_photo.file_url if time_out_photo else None
+        )
 
         # ---------------------------------------
         # TOTAL TRIPS
         # ---------------------------------------
         record.completed_trips = (driver_trip_count or 0) + (helper_trip_count or 0)
 
-    return records
+        response.append(
+            {
+                "id": record.id,
+                "employee_id": record.employee_id,
+                "attendance_date": (
+                    str(record.attendance_date) if record.attendance_date else None
+                ),
+                "check_in_time": format_attendance_time_only(record.check_in_time),
+                "check_out_time": format_attendance_time_only(record.check_out_time),
+                "time_in_latitude": record.time_in_latitude,
+                "time_in_longitude": record.time_in_longitude,
+                "time_in_address": record.time_in_address,
+                "time_out_latitude": record.time_out_latitude,
+                "time_out_longitude": record.time_out_longitude,
+                "time_out_address": record.time_out_address,
+                "time_in_photo_url": record.time_in_photo_url,
+                "time_out_photo_url": record.time_out_photo_url,
+                "attendance_method": record.attendance_method,
+                "status": record.status,
+                "created_by_user_id": record.created_by_user_id,
+                "completed_trips": record.completed_trips,
+            }
+        )
+
+    return response
 
 
 # -------------------------------
@@ -360,3 +622,235 @@ def update_attendance(
     db.refresh(record)
 
     return record
+
+
+# mechanic endpoints or other non-user attendance management can be added here in the future
+# -------------------------------
+# Kiosk Attendance Status
+# -------------------------------
+@router.get("/kiosk/status/{employee_id}")
+def get_kiosk_attendance_status(
+    employee_id: int,
+    db: Session = Depends(get_db),
+):
+    print("===================================")
+    print("EMPLOYEE ID RECEIVED:", employee_id)
+    print("TYPE:", type(employee_id))
+    print("===================================")
+
+    employee = (
+        db.query(Employee)
+        .filter(
+            Employee.id == employee_id,
+            Employee.is_active == True,
+        )
+        .first()
+    )
+
+    print("EMPLOYEE RESULT:", employee)
+
+    if not employee:
+        raise HTTPException(
+            status_code=404,
+            detail="Employee not found or inactive.",
+        )
+
+    today = datetime.now(ZoneInfo("Asia/Manila")).date()
+
+    record = (
+        db.query(AttendanceRecord)
+        .filter(
+            AttendanceRecord.employee_id == employee_id,
+            AttendanceRecord.attendance_date == today,
+        )
+        .first()
+    )
+
+    employee_name = " ".join(
+        filter(
+            None,
+            [
+                employee.first_name,
+                getattr(employee, "middle_name", None),
+                employee.last_name,
+                getattr(employee, "suffix", None),
+            ],
+        )
+    )
+
+    if not record:
+        return {
+            "employee_id": employee.id,
+            "employee_name": employee_name,
+            "has_record": False,
+            "has_timed_in": False,
+            "has_timed_out": False,
+            "time_in": None,
+            "time_out": None,
+            "next_action": "time_in",
+            "message": "Ready for time in.",
+        }
+
+    has_timed_in = record.check_in_time is not None
+    has_timed_out = record.check_out_time is not None
+
+    if has_timed_in and not has_timed_out:
+        next_action = "time_out"
+        message = "Employee already timed in. Ready for time out."
+    elif has_timed_in and has_timed_out:
+        next_action = "completed"
+        message = "Attendance already completed for today."
+    else:
+        next_action = "time_in"
+        message = "Ready for time in."
+
+    return {
+        "employee_id": employee.id,
+        "employee_name": employee_name,
+        "has_record": True,
+        "has_timed_in": has_timed_in,
+        "has_timed_out": has_timed_out,
+        "time_in": format_attendance_time_only(record.check_in_time),
+        "time_out": format_attendance_time_only(record.check_out_time),
+        "next_action": next_action,
+        "message": message,
+    }
+
+
+# -------------------------------
+# Kiosk Selfie Attendance
+# -------------------------------
+@router.post("/kiosk/selfie")
+def kiosk_selfie_attendance(
+    employee_id: int = Form(...),
+    action: str = Form(...),
+    latitude: float = Form(...),
+    longitude: float = Form(...),
+    address: str = Form(...),
+    photo: UploadFile = File(...),
+    db: Session = Depends(get_db),
+):
+    if action not in ["time_in", "time_out"]:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid action. Use time_in or time_out.",
+        )
+
+    if not photo.content_type or not photo.content_type.startswith("image/"):
+        raise HTTPException(
+            status_code=400,
+            detail="Photo must be an image file.",
+        )
+
+    employee = (
+        db.query(Employee)
+        .filter(
+            Employee.id == employee_id,
+            Employee.is_active == True,
+        )
+        .first()
+    )
+
+    if not employee:
+        raise HTTPException(
+            status_code=404,
+            detail="Employee not found or inactive.",
+        )
+
+    now = datetime.utcnow()
+    today = datetime.now(ZoneInfo("Asia/Manila")).date()
+
+    record = (
+        db.query(AttendanceRecord)
+        .filter(
+            AttendanceRecord.employee_id == employee_id,
+            AttendanceRecord.attendance_date == today,
+        )
+        .first()
+    )
+
+    if action == "time_in":
+        if record and record.check_in_time:
+            raise HTTPException(
+                status_code=400,
+                detail="Employee already timed in today.",
+            )
+
+        if not record:
+            record = AttendanceRecord(
+                employee_id=employee_id,
+                attendance_date=today,
+                status="Present",
+                attendance_method="KIOSK_SELFIE",
+                created_by_user_id=None,
+            )
+            db.add(record)
+            db.flush()
+
+        record.check_in_time = now
+        record.time_in_latitude = latitude
+        record.time_in_longitude = longitude
+        record.time_in_address = address
+
+        document_type = "ATTENDANCE_TIME_IN"
+        upload_folder = f"attendance/{record.id}/time-in"
+
+    else:
+        if not record or not record.check_in_time:
+            raise HTTPException(
+                status_code=400,
+                detail="Employee has not timed in yet.",
+            )
+
+        if record.check_out_time:
+            raise HTTPException(
+                status_code=400,
+                detail="Employee already timed out today.",
+            )
+
+        record.check_out_time = now
+        record.time_out_latitude = latitude
+        record.time_out_longitude = longitude
+        record.time_out_address = address
+
+        document_type = "ATTENDANCE_TIME_OUT"
+        upload_folder = f"attendance/{record.id}/time-out"
+
+    file_service = FileService()
+
+    photo_url = file_service.upload(
+        photo,
+        upload_folder,
+    )
+
+    db.add(
+        FileModel(
+            entity_type="attendance",
+            entity_id=record.id,
+            document_type=document_type,
+            file_url=photo_url,
+            uploaded_by=None,
+        )
+    )
+
+    db.commit()
+    db.refresh(record)
+
+    return {
+        "message": (
+            "Time in successful."
+            if action == "time_in"
+            else "Time out successful."
+        ),
+        "attendance_id": record.id,
+        "employee_id": record.employee_id,
+        "attendance_date": str(record.attendance_date),
+        "check_in_time": format_attendance_time_only(record.check_in_time),
+        "check_out_time": format_attendance_time_only(record.check_out_time),
+        "photo_url": photo_url,
+        "next_action": (
+            "time_out"
+            if action == "time_in"
+            else "completed"
+        ),
+    }

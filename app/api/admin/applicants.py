@@ -624,16 +624,17 @@ def convert_to_employee(
         .first()
     )
 
-    if not onboarding:
+    if (
+        not onboarding
+        or not onboarding.is_submitted
+        or not applicant.onboarding_submitted_at
+    ):
         raise HTTPException(
             status_code=400,
-            detail="Applicant onboarding form not found",
-        )
-
-    if not onboarding.is_submitted:
-        raise HTTPException(
-            status_code=400,
-            detail="Applicant onboarding form must be submitted before conversion",
+            detail=(
+                "Applicant did not fill the onboarding form yet. "
+                "Move the applicant to Interview status and generate the onboarding form first."
+            ),
         )
 
     department = payload.department.strip() if payload.department else ""
