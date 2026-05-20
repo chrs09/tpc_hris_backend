@@ -1,4 +1,7 @@
+import logging
+import math
 import pytz
+
 from datetime import datetime, date
 from zoneinfo import ZoneInfo
 
@@ -12,9 +15,6 @@ from fastapi import (
 )
 from sqlalchemy import func
 from sqlalchemy.orm import Session
-
-from app.utils.response import api_response
-from app.utils.timezone import convert_datetime_to_ph
 
 from app.core.database import get_db
 from app.core.dependencies import get_current_user
@@ -34,8 +34,35 @@ from app.schemas.attendance import (
 
 router = APIRouter(prefix="/attendance", tags=["Attendance"])
 
+logger = logging.getLogger("attendance")
+
 PH_TZ = pytz.timezone("Asia/Manila")
 UTC = pytz.utc
+
+KIOSK_ALLOWED_LATITUDE = 10.345240
+KIOSK_ALLOWED_LONGITUDE = 124.936819
+KIOSK_ALLOWED_RADIUS_METERS = 150
+
+
+def calculate_distance_meters(lat1, lon1, lat2, lon2):
+    radius = 6371000
+
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+
+    delta_phi = math.radians(lat2 - lat1)
+    delta_lambda = math.radians(lon2 - lon1)
+
+    a = (
+        math.sin(delta_phi / 2) ** 2
+        + math.cos(phi1)
+        * math.cos(phi2)
+        * math.sin(delta_lambda / 2) ** 2
+    )
+
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+    return radius * c
 
 
 def format_attendance_time_only(value):
@@ -50,14 +77,11 @@ def format_attendance_time_only(value):
     return ph_time.strftime("%I:%M %p")
 
 
-# -------------------------------
-# Helper: Create attendance record
-# -------------------------------
 def create_attendance_record(
     db: Session,
     employee_id: int,
     status: str,
-    user_id: int,
+    user_id: int | None,
     attendance_date: date,
 ):
     existing = (
@@ -84,10 +108,6 @@ def create_attendance_record(
     db.add(record)
     return record
 
-# -------------------------------
-# Selfie Time In
-# -------------------------------
-# attendance.py
 
 @router.post("/time-in-selfie", response_model=AttendanceResponse)
 def time_in_selfie(
@@ -98,18 +118,9 @@ def time_in_selfie(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    # =========================
-    # ROLE CHECK
-    # =========================
     if current_user.role not in ["admin", "superadmin", "motorpool"]:
-        raise HTTPException(
-            status_code=403,
-            detail="Not authorized",
-        )
+        raise HTTPException(status_code=403, detail="Not authorized")
 
-    # =========================
-    # GET EMPLOYEE FROM USER
-    # =========================
     employee_id = current_user.employee_id
 
     if not employee_id:
@@ -118,39 +129,17 @@ def time_in_selfie(
             detail="User account is not linked to an employee.",
         )
 
-    # =========================
-    # VALIDATE IMAGE
-    # =========================
-    if (
-        not photo.content_type
-        or not photo.content_type.startswith("image/")
-    ):
-        raise HTTPException(
-            status_code=400,
-            detail="Photo must be an image file",
-        )
+    if not photo.content_type or not photo.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="Photo must be an image file")
 
-    # =========================
-    # CHECK EMPLOYEE
-    # =========================
-    employee = (
-        db.query(Employee)
-        .filter(Employee.id == employee_id)
-        .first()
-    )
+    employee = db.query(Employee).filter(Employee.id == employee_id).first()
 
     if not employee:
-        raise HTTPException(
-            status_code=404,
-            detail="Employee not found",
-        )
+        raise HTTPException(status_code=404, detail="Employee not found")
 
     now = datetime.utcnow()
-    today = now.date()
+    today = datetime.now(ZoneInfo("Asia/Manila")).date()
 
-    # =========================
-    # CHECK EXISTING
-    # =========================
     existing = (
         db.query(AttendanceRecord)
         .filter(
@@ -166,9 +155,6 @@ def time_in_selfie(
             detail="Employee already timed in today",
         )
 
-    # =========================
-    # CREATE / UPDATE RECORD
-    # =========================
     record = existing or AttendanceRecord(
         employee_id=employee_id,
         attendance_date=today,
@@ -178,7 +164,6 @@ def time_in_selfie(
     )
 
     record.check_in_time = now
-
     record.time_in_latitude = latitude
     record.time_in_longitude = longitude
     record.time_in_address = address
@@ -187,19 +172,9 @@ def time_in_selfie(
         db.add(record)
         db.flush()
 
-    # =========================
-    # UPLOAD PHOTO
-    # =========================
     file_service = FileService()
+    photo_url = file_service.upload(photo, f"attendance/{record.id}/time-in")
 
-    photo_url = file_service.upload(
-        photo,
-        f"attendance/{record.id}/time-in",
-    )
-
-    # =========================
-    # STORE FILE METADATA
-    # =========================
     db.add(
         FileModel(
             entity_type="attendance",
@@ -213,14 +188,12 @@ def time_in_selfie(
     db.commit()
     db.refresh(record)
 
-    # computed response fields
     record.time_in_photo_url = photo_url
     record.time_out_photo_url = None
 
     return record
-# -------------------------------
-# Helper: Auto-create attendance from trips
-# -------------------------------
+
+
 def sync_trip_attendance_records(db: Session, user_id: int):
     valid_statuses = ["COMPLETED", "completed", "APPROVED", "approved"]
 
@@ -239,9 +212,6 @@ def sync_trip_attendance_records(db: Session, user_id: int):
     for trip in trips:
         trip_date = trip.start_time.date()
 
-        # -----------------------------
-        # 1. Create DRIVER attendance
-        # -----------------------------
         driver_user = db.query(User).filter(User.id == trip.driver_id).first()
 
         if driver_user and driver_user.employee_id:
@@ -266,9 +236,6 @@ def sync_trip_attendance_records(db: Session, user_id: int):
                 )
                 created_count += 1
 
-        # -----------------------------
-        # 2. Create HELPER attendance
-        # -----------------------------
         trip_helpers = db.query(TripHelper).filter(TripHelper.trip_id == trip.id).all()
 
         for trip_helper in trip_helpers:
@@ -298,7 +265,7 @@ def sync_trip_attendance_records(db: Session, user_id: int):
     if created_count > 0:
         db.commit()
 
-# attendance today
+
 @router.get("/today")
 def get_my_attendance_today(
     db: Session = Depends(get_db),
@@ -310,7 +277,7 @@ def get_my_attendance_today(
             detail="User account is not linked to an employee.",
         )
 
-    today = datetime.utcnow().date()
+    today = datetime.now(ZoneInfo("Asia/Manila")).date()
 
     record = (
         db.query(AttendanceRecord)
@@ -340,9 +307,8 @@ def get_my_attendance_today(
         "time_in_longitude": record.time_in_longitude,
         "time_in_address": record.time_in_address,
     }
-# -------------------------------
-# Single attendance
-# -------------------------------
+
+
 @router.post("/", response_model=AttendanceResponse)
 def mark_attendance(
     attendance_in: AttendanceCreate,
@@ -382,9 +348,6 @@ def mark_attendance(
     return record
 
 
-# -------------------------------
-# Bulk mixed attendance
-# -------------------------------
 @router.post("/bulk-mixed/")
 def bulk_mixed_attendance(
     attendance_in: BulkAttendanceMixed,
@@ -443,9 +406,6 @@ def bulk_mixed_attendance(
     }
 
 
-# -------------------------------
-# Get attendance records
-# -------------------------------
 @router.get("/list")
 def get_attendance_records(
     skip: int = 0,
@@ -453,7 +413,6 @@ def get_attendance_records(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    # Auto-create missing attendance rows from approved/completed trips
     sync_trip_attendance_records(db, current_user.id)
 
     records = (
@@ -464,23 +423,11 @@ def get_attendance_records(
         .all()
     )
 
-    valid_statuses = [
-        "COMPLETED",
-        "completed",
-        "APPROVED",
-        "approved",
-    ]
+    valid_statuses = ["COMPLETED", "completed", "APPROVED", "approved"]
 
     response = []
 
-
     for record in records:
-
-        # ---------------------------------------
-        # DRIVER TRIPS
-        # Trip.driver_id -> User.id
-        # User.employee_id -> Employee.id
-        # ---------------------------------------
         driver_trip_count = (
             db.query(func.count(Trip.id))
             .join(User, User.id == Trip.driver_id)
@@ -492,10 +439,6 @@ def get_attendance_records(
             .scalar()
         )
 
-        # ---------------------------------------
-        # HELPER TRIPS
-        # TripHelper.helper_id -> Employee.id
-        # ---------------------------------------
         helper_trip_count = (
             db.query(func.count(Trip.id))
             .join(TripHelper, TripHelper.trip_id == Trip.id)
@@ -506,9 +449,7 @@ def get_attendance_records(
             )
             .scalar()
         )
-        # ---------------------------------------
-        # TIME IN PHOTO
-        # ---------------------------------------
+
         time_in_photo = (
             db.query(FileModel)
             .filter(
@@ -519,9 +460,6 @@ def get_attendance_records(
             .first()
         )
 
-        # ---------------------------------------
-        # TIME OUT PHOTO
-        # ---------------------------------------
         time_out_photo = (
             db.query(FileModel)
             .filter(
@@ -532,26 +470,13 @@ def get_attendance_records(
             .first()
         )
 
-        record.time_in_photo_url = (
-            time_in_photo.file_url if time_in_photo else None
-        )
-
-        record.time_out_photo_url = (
-            time_out_photo.file_url if time_out_photo else None
-        )
-
-        # ---------------------------------------
-        # TOTAL TRIPS
-        # ---------------------------------------
-        record.completed_trips = (driver_trip_count or 0) + (helper_trip_count or 0)
-
         response.append(
             {
                 "id": record.id,
                 "employee_id": record.employee_id,
-                "attendance_date": (
-                    str(record.attendance_date) if record.attendance_date else None
-                ),
+                "attendance_date": str(record.attendance_date)
+                if record.attendance_date
+                else None,
                 "check_in_time": format_attendance_time_only(record.check_in_time),
                 "check_out_time": format_attendance_time_only(record.check_out_time),
                 "time_in_latitude": record.time_in_latitude,
@@ -560,21 +485,18 @@ def get_attendance_records(
                 "time_out_latitude": record.time_out_latitude,
                 "time_out_longitude": record.time_out_longitude,
                 "time_out_address": record.time_out_address,
-                "time_in_photo_url": record.time_in_photo_url,
-                "time_out_photo_url": record.time_out_photo_url,
+                "time_in_photo_url": time_in_photo.file_url if time_in_photo else None,
+                "time_out_photo_url": time_out_photo.file_url if time_out_photo else None,
                 "attendance_method": record.attendance_method,
                 "status": record.status,
                 "created_by_user_id": record.created_by_user_id,
-                "completed_trips": record.completed_trips,
+                "completed_trips": (driver_trip_count or 0) + (helper_trip_count or 0),
             }
         )
 
     return response
 
 
-# -------------------------------
-# Update attendance record
-# -------------------------------
 @router.patch("/update", response_model=AttendanceResponse)
 def update_attendance(
     attendance_in: AttendanceUpdate,
@@ -605,10 +527,7 @@ def update_attendance(
     )
 
     if not record:
-        raise HTTPException(
-            status_code=404,
-            detail="Attendance record not found",
-        )
+        raise HTTPException(status_code=404, detail="Attendance record not found")
 
     if record.status == attendance_in.status:
         raise HTTPException(
@@ -624,30 +543,21 @@ def update_attendance(
     return record
 
 
-# mechanic endpoints or other non-user attendance management can be added here in the future
-# -------------------------------
-# Kiosk Attendance Status
-# -------------------------------
 @router.get("/kiosk/status/{employee_id}")
 def get_kiosk_attendance_status(
     employee_id: int,
     db: Session = Depends(get_db),
 ):
-    print("===================================")
-    print("EMPLOYEE ID RECEIVED:", employee_id)
-    print("TYPE:", type(employee_id))
-    print("===================================")
+    logger.info("KIOSK STATUS ENDPOINT HIT")
+    logger.info(f"EMPLOYEE ID RECEIVED: {employee_id}")
 
     employee = (
         db.query(Employee)
-        .filter(
-            Employee.id == employee_id,
-            Employee.is_active == True,
-        )
+        .filter(Employee.id == employee_id, Employee.is_active == 1)
         .first()
     )
 
-    print("EMPLOYEE RESULT:", employee)
+    logger.info(f"EMPLOYEE RESULT: {employee}")
 
     if not employee:
         raise HTTPException(
@@ -665,6 +575,8 @@ def get_kiosk_attendance_status(
         )
         .first()
     )
+
+    logger.info(f"ATTENDANCE RECORD: {record}")
 
     employee_name = " ".join(
         filter(
@@ -717,9 +629,6 @@ def get_kiosk_attendance_status(
     }
 
 
-# -------------------------------
-# Kiosk Selfie Attendance
-# -------------------------------
 @router.post("/kiosk/selfie")
 def kiosk_selfie_attendance(
     employee_id: int = Form(...),
@@ -730,6 +639,15 @@ def kiosk_selfie_attendance(
     photo: UploadFile = File(...),
     db: Session = Depends(get_db),
 ):
+    logger.info("KIOSK SELFIE ENDPOINT HIT")
+    logger.info(f"EMPLOYEE ID: {employee_id}")
+    logger.info(f"ACTION: {action}")
+    logger.info(f"LATITUDE: {latitude}")
+    logger.info(f"LONGITUDE: {longitude}")
+    logger.info(f"ADDRESS: {address}")
+    logger.info(f"PHOTO NAME: {photo.filename}")
+    logger.info(f"PHOTO TYPE: {photo.content_type}")
+
     if action not in ["time_in", "time_out"]:
         raise HTTPException(
             status_code=400,
@@ -737,24 +655,39 @@ def kiosk_selfie_attendance(
         )
 
     if not photo.content_type or not photo.content_type.startswith("image/"):
-        raise HTTPException(
-            status_code=400,
-            detail="Photo must be an image file.",
-        )
+        raise HTTPException(status_code=400, detail="Photo must be an image file.")
 
     employee = (
         db.query(Employee)
-        .filter(
-            Employee.id == employee_id,
-            Employee.is_active == True,
-        )
+        .filter(Employee.id == employee_id, Employee.is_active == 1)
         .first()
     )
+
+    logger.info(f"EMPLOYEE RESULT: {employee}")
 
     if not employee:
         raise HTTPException(
             status_code=404,
             detail="Employee not found or inactive.",
+        )
+
+    distance_meters = calculate_distance_meters(
+        latitude,
+        longitude,
+        KIOSK_ALLOWED_LATITUDE,
+        KIOSK_ALLOWED_LONGITUDE,
+    )
+
+    logger.info(f"DISTANCE METERS: {distance_meters}")
+
+    if distance_meters > KIOSK_ALLOWED_RADIUS_METERS:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"Attendance rejected. You are {round(distance_meters, 2)} meters "
+                f"away from the allowed attendance location. "
+                f"Allowed radius is {KIOSK_ALLOWED_RADIUS_METERS} meters."
+            ),
         )
 
     now = datetime.utcnow()
@@ -768,6 +701,8 @@ def kiosk_selfie_attendance(
         )
         .first()
     )
+
+    logger.info(f"EXISTING ATTENDANCE: {record}")
 
     if action == "time_in":
         if record and record.check_in_time:
@@ -791,6 +726,7 @@ def kiosk_selfie_attendance(
         record.time_in_latitude = latitude
         record.time_in_longitude = longitude
         record.time_in_address = address
+        record.attendance_method = "KIOSK_SELFIE"
 
         document_type = "ATTENDANCE_TIME_IN"
         upload_folder = f"attendance/{record.id}/time-in"
@@ -812,16 +748,15 @@ def kiosk_selfie_attendance(
         record.time_out_latitude = latitude
         record.time_out_longitude = longitude
         record.time_out_address = address
+        record.attendance_method = "KIOSK_SELFIE"
 
         document_type = "ATTENDANCE_TIME_OUT"
         upload_folder = f"attendance/{record.id}/time-out"
 
     file_service = FileService()
+    photo_url = file_service.upload(photo, upload_folder)
 
-    photo_url = file_service.upload(
-        photo,
-        upload_folder,
-    )
+    logger.info(f"PHOTO URL: {photo_url}")
 
     db.add(
         FileModel(
@@ -836,21 +771,17 @@ def kiosk_selfie_attendance(
     db.commit()
     db.refresh(record)
 
+    logger.info("KIOSK ATTENDANCE SUCCESS")
+
     return {
-        "message": (
-            "Time in successful."
-            if action == "time_in"
-            else "Time out successful."
-        ),
+        "message": "Time in successful." if action == "time_in" else "Time out successful.",
         "attendance_id": record.id,
         "employee_id": record.employee_id,
         "attendance_date": str(record.attendance_date),
         "check_in_time": format_attendance_time_only(record.check_in_time),
         "check_out_time": format_attendance_time_only(record.check_out_time),
         "photo_url": photo_url,
-        "next_action": (
-            "time_out"
-            if action == "time_in"
-            else "completed"
-        ),
+        "next_action": "time_out" if action == "time_in" else "completed",
+        "distance_meters": round(distance_meters, 2),
+        "allowed_radius_meters": KIOSK_ALLOWED_RADIUS_METERS,
     }
