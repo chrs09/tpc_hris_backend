@@ -12,7 +12,7 @@ from app.core.database import get_db
 from app.core.dependencies import get_current_user
 from app.core.security import create_access_token, hash_password, verify_password
 from app.models.user import User
-from app.models.employees import Employee
+# from app.models.employees import Employee
 from app.schemas.user import UserLogin, UserResponse
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
@@ -127,11 +127,7 @@ def refresh_access_token(
     except JWTError:
         raise HTTPException(status_code=401, detail="Refresh token expired or invalid")
 
-    user = (
-        db.query(User)
-        .filter(func.lower(User.username) == username.lower())
-        .first()
-    )
+    user = db.query(User).filter(func.lower(User.username) == username.lower()).first()
 
     if not user:
         raise HTTPException(status_code=401, detail="User not found")

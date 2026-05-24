@@ -6,6 +6,7 @@ from sqlalchemy import (
     String,
     Date,
     Float,
+    Text,
 )
 from sqlalchemy.orm import relationship
 from app.core.database import Base
@@ -36,6 +37,14 @@ class AttendanceRecord(Base):
     time_out_latitude = Column(Float, nullable=True)
     time_out_longitude = Column(Float, nullable=True)
     time_out_address = Column(String(500), nullable=True)
+
+    face_match_score = Column(Float, nullable=True)
+    face_review_status = Column(String(50), nullable=True)
+    face_review_reason = Column(Text, nullable=True)
+    face_checked_at = Column(DateTime, nullable=True)
+
+    reviewed_by_user_id = Column(Integer, ForeignKey("tpc_users.id"), nullable=True)
+    reviewed_at = Column(DateTime, nullable=True)
 
     status = Column(
         String(20),

@@ -21,9 +21,7 @@ def get_static_map(
         "markers": f"{lat},{lng},red-pushpin",
     }
 
-    headers = {
-        "User-Agent": "TPC-HRIS-Attendance/1.0 (chrisianapuhin@gmail.com)"
-    }
+    headers = {"User-Agent": "TPC-HRIS-Attendance/1.0 (chrisianapuhin@gmail.com)"}
 
     try:
         response = requests.get(

@@ -25,6 +25,7 @@ from app.models.trips import Trip
 from app.models.trip_helper import TripHelper
 from app.models.files import File as FileModel
 from app.services.file_service import FileService
+from app.services.face_recognition_service import FaceRecognitionService
 from app.schemas.attendance import (
     AttendanceCreate,
     AttendanceResponse,
@@ -39,9 +40,25 @@ logger = logging.getLogger("attendance")
 PH_TZ = pytz.timezone("Asia/Manila")
 UTC = pytz.utc
 
-KIOSK_ALLOWED_LATITUDE = 10.345240
-KIOSK_ALLOWED_LONGITUDE = 123.936819
-KIOSK_ALLOWED_RADIUS_METERS = 150
+# Kiosk location - Tytan Corporation Yard
+# KIOSK_ALLOWED_LATITUDE = 10.345240
+# KIOSK_ALLOWED_LONGITUDE = 123.936819
+# KIOSK_ALLOWED_RADIUS_METERS = 150
+
+ATTENDANCE_ALLOWED_LOCATIONS = [
+    {
+        "name": "TPC Yard",
+        "latitude": 10.345240,
+        "longitude": 123.936819,
+        "radius_meters": 150,
+    },
+    {
+        "name": "Test Location",
+        "latitude": 10.359618,
+        "longitude": 123.973413,
+        "radius_meters": 150,
+    },
+]
 
 
 def calculate_distance_meters(lat1, lon1, lat2, lon2):
@@ -55,14 +72,45 @@ def calculate_distance_meters(lat1, lon1, lat2, lon2):
 
     a = (
         math.sin(delta_phi / 2) ** 2
-        + math.cos(phi1)
-        * math.cos(phi2)
-        * math.sin(delta_lambda / 2) ** 2
+        + math.cos(phi1) * math.cos(phi2) * math.sin(delta_lambda / 2) ** 2
     )
 
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
     return radius * c
+
+
+def find_nearest_allowed_attendance_location(
+    latitude: float,
+    longitude: float,
+):
+    nearest_location = None
+    nearest_distance = None
+
+    for location in ATTENDANCE_ALLOWED_LOCATIONS:
+        distance = calculate_distance_meters(
+            latitude,
+            longitude,
+            location["latitude"],
+            location["longitude"],
+        )
+
+        if nearest_distance is None or distance < nearest_distance:
+            nearest_distance = distance
+            nearest_location = location
+
+    if not nearest_location:
+        return None, None, False
+
+    allowed_radius = nearest_location["radius_meters"]
+
+    is_allowed = nearest_distance <= allowed_radius
+
+    return (
+        nearest_location,
+        nearest_distance,
+        is_allowed,
+    )
 
 
 def format_attendance_time_only(value):
@@ -428,6 +476,36 @@ def get_attendance_records(
     response = []
 
     for record in records:
+        employee = db.query(Employee).filter(Employee.id == record.employee_id).first()
+
+        employee_name = "Unknown Employee"
+        employee_department = None
+
+        if employee:
+            employee_name = " ".join(
+                filter(
+                    None,
+                    [
+                        employee.first_name,
+                        getattr(employee, "middle_name", None),
+                        employee.last_name,
+                        getattr(employee, "suffix", None),
+                    ],
+                )
+            )
+
+            employee_department = employee.department
+
+        profile_photo = (
+            db.query(FileModel)
+            .filter(
+                FileModel.entity_type == "employee",
+                FileModel.entity_id == record.employee_id,
+                FileModel.document_type == "PROFILE_IMAGE",
+            )
+            .first()
+        )
+
         driver_trip_count = (
             db.query(func.count(Trip.id))
             .join(User, User.id == Trip.driver_id)
@@ -474,9 +552,13 @@ def get_attendance_records(
             {
                 "id": record.id,
                 "employee_id": record.employee_id,
-                "attendance_date": str(record.attendance_date)
-                if record.attendance_date
-                else None,
+                "employee_name": employee_name,
+                "employee_department": employee_department,
+                "department": employee_department,
+                "profile_photo_url": profile_photo.file_url if profile_photo else None,
+                "attendance_date": (
+                    str(record.attendance_date) if record.attendance_date else None
+                ),
                 "check_in_time": format_attendance_time_only(record.check_in_time),
                 "check_out_time": format_attendance_time_only(record.check_out_time),
                 "time_in_latitude": record.time_in_latitude,
@@ -486,7 +568,15 @@ def get_attendance_records(
                 "time_out_longitude": record.time_out_longitude,
                 "time_out_address": record.time_out_address,
                 "time_in_photo_url": time_in_photo.file_url if time_in_photo else None,
-                "time_out_photo_url": time_out_photo.file_url if time_out_photo else None,
+                "time_out_photo_url": (
+                    time_out_photo.file_url if time_out_photo else None
+                ),
+                "face_match_score": record.face_match_score,
+                "face_review_status": record.face_review_status,
+                "face_review_reason": record.face_review_reason,
+                "face_checked_at": record.face_checked_at,
+                "reviewed_by_user_id": record.reviewed_by_user_id,
+                "reviewed_at": record.reviewed_at,
                 "attendance_method": record.attendance_method,
                 "status": record.status,
                 "created_by_user_id": record.created_by_user_id,
@@ -671,22 +761,28 @@ def kiosk_selfie_attendance(
             detail="Employee not found or inactive.",
         )
 
-    distance_meters = calculate_distance_meters(
-        latitude,
-        longitude,
-        KIOSK_ALLOWED_LATITUDE,
-        KIOSK_ALLOWED_LONGITUDE,
+    nearest_location, distance_meters, is_allowed_location = (
+        find_nearest_allowed_attendance_location(
+            latitude,
+            longitude,
+        )
     )
 
-    logger.info(f"DISTANCE METERS: {distance_meters}")
+    logger.info(
+        f"LOCATION CHECK | "
+        f"NEAREST={nearest_location['name']} | "
+        f"DISTANCE={round(distance_meters, 2)}"
+    )
 
-    if distance_meters > KIOSK_ALLOWED_RADIUS_METERS:
+    if not is_allowed_location:
         raise HTTPException(
             status_code=403,
             detail=(
-                f"Attendance rejected. You are {round(distance_meters, 2)} meters "
-                f"away from the allowed attendance location. "
-                f"Allowed radius is {KIOSK_ALLOWED_RADIUS_METERS} meters."
+                f"Attendance rejected. "
+                f"You are {round(distance_meters, 2)} meters away from "
+                f"{nearest_location['name']}. "
+                f"Allowed radius is "
+                f"{nearest_location['radius_meters']} meters."
             ),
         )
 
@@ -756,6 +852,29 @@ def kiosk_selfie_attendance(
     file_service = FileService()
     photo_url = file_service.upload(photo, upload_folder)
 
+    if action == "time_in":
+        profile_photo = (
+            db.query(FileModel)
+            .filter(
+                FileModel.entity_type == "employee",
+                FileModel.entity_id == employee_id,
+                FileModel.document_type == "PROFILE_IMAGE",
+            )
+            .first()
+        )
+
+        face_service = FaceRecognitionService()
+
+        face_result = face_service.compare_faces(
+            profile_photo_url=profile_photo.file_url if profile_photo else None,
+            attendance_photo_url=photo_url,
+        )
+
+        record.face_match_score = face_result["score"]
+        record.face_review_status = face_result["status"]
+        record.face_review_reason = face_result["reason"]
+        record.face_checked_at = face_result["checked_at"]
+
     logger.info(f"PHOTO URL: {photo_url}")
 
     db.add(
@@ -774,7 +893,9 @@ def kiosk_selfie_attendance(
     logger.info("KIOSK ATTENDANCE SUCCESS")
 
     return {
-        "message": "Time in successful." if action == "time_in" else "Time out successful.",
+        "message": (
+            "Time in successful." if action == "time_in" else "Time out successful."
+        ),
         "attendance_id": record.id,
         "employee_id": record.employee_id,
         "attendance_date": str(record.attendance_date),
@@ -783,5 +904,58 @@ def kiosk_selfie_attendance(
         "photo_url": photo_url,
         "next_action": "time_out" if action == "time_in" else "completed",
         "distance_meters": round(distance_meters, 2),
-        "allowed_radius_meters": KIOSK_ALLOWED_RADIUS_METERS,
+        "allowed_radius_meters": nearest_location["radius_meters"],
+        "nearest_allowed_location": nearest_location["name"],
+        "face_match_score": record.face_match_score,
+        "face_review_status": record.face_review_status,
+        "face_review_reason": record.face_review_reason,
+    }
+
+
+# approve and reject endpoint for face review will be created separately
+@router.post("/{attendance_id}/approve")
+def approve_attendance(
+    attendance_id: int,
+    db: Session = Depends(get_db),
+):
+    attendance = (
+        db.query(AttendanceRecord).filter(AttendanceRecord.id == attendance_id).first()
+    )
+
+    if not attendance:
+        raise HTTPException(status_code=404, detail="Attendance record not found.")
+
+    attendance.face_review_status = "APPROVED"
+
+    db.commit()
+    db.refresh(attendance)
+
+    return {
+        "message": "Attendance approved.",
+        "attendance_id": attendance.id,
+        "status": attendance.face_review_status,
+    }
+
+
+@router.post("/{attendance_id}/reject")
+def reject_attendance(
+    attendance_id: int,
+    db: Session = Depends(get_db),
+):
+    attendance = (
+        db.query(AttendanceRecord).filter(AttendanceRecord.id == attendance_id).first()
+    )
+
+    if not attendance:
+        raise HTTPException(status_code=404, detail="Attendance record not found.")
+
+    attendance.face_review_status = "REJECTED"
+
+    db.commit()
+    db.refresh(attendance)
+
+    return {
+        "message": "Attendance rejected.",
+        "attendance_id": attendance.id,
+        "status": attendance.face_review_status,
     }

@@ -560,7 +560,7 @@ async def patch_employee(
     spouse: str = Form(None),
     father_name: str = Form(None),
     mother_name: str = Form(None),
-    # OLD SINGLE REFERENCE FIELDS - optional backward compatibility
+    # OLD SINGLE REFERENCE FIELDS
     reference_name: str = Form(None),
     reference_contact: str = Form(None),
     reference_address: str = Form(None),
@@ -570,7 +570,7 @@ async def patch_employee(
     philhealth: str = Form(None),
     pagibig: str = Form(None),
     tin: str = Form(None),
-    # BANK DETAILS
+    # BANK
     bank_type: str = Form(None),
     account_name: str = Form(None),
     account_number: str = Form(None),
@@ -592,7 +592,9 @@ async def patch_employee(
 
     previous_is_active = employee.is_active
 
-    # BASIC
+    # ==============================
+    # BASIC INFO
+    # ==============================
     if first_name is not None:
         employee.first_name = first_name
     if middle_name is not None:
@@ -613,7 +615,9 @@ async def patch_employee(
     if is_active is not None:
         employee.is_active = is_active
 
+    # ==============================
     # INACTIVE / REACTIVATE LOGIC
+    # ==============================
     if is_active is not None:
         if previous_is_active == 1 and is_active == 0:
             if not inactive_reason:
@@ -656,7 +660,9 @@ async def patch_employee(
     employee.updated_by_user_id = current_user.id
     employee.updated_at = datetime.utcnow()
 
+    # ==============================
     # PERSONAL UPSERT
+    # ==============================
     personal = (
         db.query(EmployeePersonalDetails).filter_by(employee_id=employee.id).first()
     )
@@ -690,7 +696,9 @@ async def patch_employee(
     if provincial_address is not None:
         personal.provincial_address = provincial_address
 
+    # ==============================
     # FAMILY UPSERT
+    # ==============================
     family = db.query(EmployeeFamilyDetails).filter_by(employee_id=employee.id).first()
 
     if not family:
@@ -704,16 +712,38 @@ async def patch_employee(
     if mother_name is not None:
         family.mother_name = mother_name
 
+    # ==============================
     # CHARACTER REFERENCES REPLACE
+    # Accepts:
+    # []                    valid empty
+    # {}                    valid empty
+    # [{...}]               valid list
+    # {"name": "..."}       valid single object
+    # ==============================
     if character_references is not None:
         parsed_references = safe_json_loads(
             character_references,
             "character_references",
         )
 
+        if isinstance(parsed_references, dict):
+            if not any(parsed_references.values()):
+                parsed_references = []
+            else:
+                parsed_references = [parsed_references]
+
+        if not isinstance(parsed_references, list):
+            raise HTTPException(
+                status_code=400,
+                detail="character_references must be a list or object",
+            )
+
         db.query(EmployeeReference).filter_by(employee_id=employee.id).delete()
 
         for ref in parsed_references[:3]:
+            if not isinstance(ref, dict):
+                continue
+
             if not any(
                 [
                     ref.get("name"),
@@ -734,7 +764,9 @@ async def patch_employee(
                 )
             )
 
-    # OPTIONAL BACKWARD COMPATIBILITY FOR OLD SINGLE REFERENCE FIELDS
+    # ==============================
+    # OLD SINGLE REFERENCE FIELDS
+    # ==============================
     elif any(
         field is not None
         for field in [
@@ -764,7 +796,9 @@ async def patch_employee(
                 )
             )
 
+    # ==============================
     # GOVERNMENT UPSERT
+    # ==============================
     gov = db.query(EmployeeGovernmentDetails).filter_by(employee_id=employee.id).first()
 
     if not gov:
@@ -780,7 +814,9 @@ async def patch_employee(
     if tin is not None:
         gov.tin_number = tin
 
+    # ==============================
     # BANK UPSERT
+    # ==============================
     bank = db.query(EmployeeBank).filter_by(employee_id=employee.id).first()
 
     if not bank:
@@ -794,7 +830,9 @@ async def patch_employee(
     if account_number is not None:
         bank.account_number = account_number
 
+    # ==============================
     # EMERGENCY REPLACE
+    # ==============================
     if emergency_contact_name is not None:
         db.query(EmployeeEmergencyContact).filter_by(employee_id=employee.id).delete()
 
@@ -808,13 +846,29 @@ async def patch_employee(
                 )
             )
 
+    # ==============================
     # EDUCATION REPLACE
+    # ==============================
     if education_records is not None:
         parsed_education = safe_json_loads(education_records, "education_records")
+
+        if isinstance(parsed_education, dict):
+            parsed_education = (
+                [parsed_education] if any(parsed_education.values()) else []
+            )
+
+        if not isinstance(parsed_education, list):
+            raise HTTPException(
+                status_code=400,
+                detail="education_records must be a list",
+            )
 
         db.query(EmployeeEducation).filter_by(employee_id=employee.id).delete()
 
         for edu in parsed_education:
+            if not isinstance(edu, dict):
+                continue
+
             if not any(
                 [
                     edu.get("level"),
@@ -839,13 +893,29 @@ async def patch_employee(
                 )
             )
 
+    # ==============================
     # EMPLOYMENT HISTORY REPLACE
+    # ==============================
     if employment_history is not None:
         parsed_employment = safe_json_loads(employment_history, "employment_history")
+
+        if isinstance(parsed_employment, dict):
+            parsed_employment = (
+                [parsed_employment] if any(parsed_employment.values()) else []
+            )
+
+        if not isinstance(parsed_employment, list):
+            raise HTTPException(
+                status_code=400,
+                detail="employment_history must be a list",
+            )
 
         db.query(EmployeeEmploymentHistory).filter_by(employee_id=employee.id).delete()
 
         for job in parsed_employment:
+            if not isinstance(job, dict):
+                continue
+
             if not any(
                 [
                     job.get("company_name"),
@@ -866,7 +936,9 @@ async def patch_employee(
                 )
             )
 
+    # ==============================
     # FILE UPSERT
+    # ==============================
     file_service = FileService()
 
     ALLOWED_DOCUMENT_TYPES = {
@@ -915,6 +987,7 @@ async def patch_employee(
 
             if existing:
                 existing.file_url = file_url
+                existing.uploaded_by = current_user.id
             else:
                 db.add(
                     FileModel(
