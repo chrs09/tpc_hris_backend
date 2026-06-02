@@ -9,6 +9,8 @@ from fastapi.staticfiles import StaticFiles
 
 from app.core.config import settings
 from app.api import health, auth, employees, attendance, dashboard, reminder, users, map
+from app.api.payroll import overtime_approval
+from app.api import schedule_template as schedule_template_router
 from app.api.driver import trips
 from app.api.admin import trips as admin_trips
 from app.api.admin import stores
@@ -87,7 +89,8 @@ app.include_router(attendance.router, prefix="/api")
 app.include_router(dashboard.router, prefix="/api")
 app.include_router(reminder.router, prefix="/api")
 app.include_router(users.router, prefix="/api")
-
+app.include_router(overtime_approval.router, prefix="/api")
+app.include_router(schedule_template_router.router, prefix="/api")
 app.include_router(trips.router, prefix="/api")
 
 app.include_router(admin_trips.router, prefix="/api")

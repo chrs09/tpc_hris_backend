@@ -19,6 +19,7 @@ from app.models.employee_reference import EmployeeReference
 from app.models.employee_bank import EmployeeBank
 from app.models.employees import Employee
 from app.models.user import User
+from app.models.schedule_template import ScheduleTemplate
 from app.core.dependencies import get_current_user
 from app.services.cv_parser import parse_cv
 from app.models.files import File as FileModel
@@ -26,6 +27,26 @@ from app.services.file_service import FileService
 from app.models.employee_inactive import EmployeeInactiveRecord
 
 router = APIRouter(prefix="/employees", tags=["Employees"])
+
+def validate_schedule_template(
+    db,
+    schedule_template_id,
+):
+    schedule = (
+        db.query(ScheduleTemplate)
+        .filter(
+            ScheduleTemplate.id == schedule_template_id
+        )
+        .first()
+    )
+
+    if not schedule:
+        raise HTTPException(
+            status_code=404,
+            detail="Schedule template not found",
+        )
+
+    return schedule
 
 
 def parse_date(value: str):
@@ -107,6 +128,18 @@ def get_employees(
             "position": emp.position,
             "date_hired": str(emp.date_hired) if emp.date_hired else None,
             "department": emp.department,
+            "daily_rate": float(emp.daily_rate) if emp.daily_rate else None,
+            "employment_type": emp.employment_type,
+            "payroll_type": emp.payroll_type,
+            "schedule_template_id": emp.schedule_template_id,
+            "schedule_template": (
+                {
+                    "id": emp.schedule_template.id,
+                    "name": emp.schedule_template.name,
+                }
+                if emp.schedule_template
+                else None
+            ),
             "is_active": emp.is_active,
             "is_available": emp.is_available,
             "created_by_user_id": emp.created_by_user_id,
@@ -184,6 +217,18 @@ def get_employee_detail(
         "department": employee.department,
         "is_active": employee.is_active,
         "is_available": employee.is_available,
+        "daily_rate": float(employee.daily_rate) if employee.daily_rate else None,
+        "employment_type": employee.employment_type,
+        "payroll_type": employee.payroll_type,
+        "schedule_template_id": employee.schedule_template_id,
+        "schedule_template": (
+            {
+                "id": employee.schedule_template.id,
+                "name": employee.schedule_template.name,
+            }
+            if employee.schedule_template
+            else None
+        ),
         "created_by_user_id": employee.created_by_user_id,
         "created_by_name": (
             employee.created_by_user.username if employee.created_by_user else None
@@ -321,11 +366,17 @@ async def create_employee(
     document_types: List[str] = Form(None),
     # BASIC
     first_name: str = Form(...),
+    middle_name: str = Form(None),
+    suffix: str = Form(None),
     last_name: str = Form(...),
     email: str = Form(...),
     position: str = Form(...),
     department: str = Form(...),
     date_hired: str = Form(...),
+    daily_rate: float = Form(None),
+    employment_type: str = Form(None),
+    payroll_type: str = Form(None),
+    schedule_template_id: int = Form(None),
     # PERSONAL
     birthday: str = Form(None),
     birthplace: str = Form(None),
@@ -354,8 +405,35 @@ async def create_employee(
     parsed_employment = safe_json_loads(employment_history, "employment_history")
     parsed_references = safe_json_loads(character_references, "character_references")
 
+
+    if schedule_template_id is not None:
+        validate_schedule_template(
+            db,
+            schedule_template_id,
+        )
+
+        # if not schedule:
+        #     raise HTTPException(
+        #         status_code=404,
+        #         detail="Schedule template not found",
+        #     )
+        
+    existing_email = (
+        db.query(Employee)
+        .filter(Employee.email == email)
+        .first()
+    )
+
+    if existing_email:
+        raise HTTPException(
+            status_code=400,
+            detail="Employee email already exists",
+        )
+    
     employee = Employee(
         first_name=first_name,
+        middle_name=middle_name,
+        suffix=suffix,
         last_name=last_name,
         email=email,
         position=position,
@@ -363,6 +441,10 @@ async def create_employee(
         date_hired=parse_date(date_hired),
         created_by_user_id=current_user.id,
         is_active=1,
+        daily_rate=daily_rate,
+        employment_type=employment_type,
+        payroll_type=payroll_type,
+        schedule_template_id=schedule_template_id,
     )
 
     db.add(employee)
@@ -539,6 +621,10 @@ async def patch_employee(
     department: str = Form(None),
     date_hired: str = Form(None),
     is_active: int = Form(None),
+    daily_rate: float = Form(None),
+    employment_type: str = Form(None),
+    payroll_type: str = Form(None),
+    schedule_template_id: int = Form(None),
     # INACTIVE DETAILS
     inactive_reason: str = Form(None),
     inactive_date: str = Form(None),
@@ -604,11 +690,43 @@ async def patch_employee(
     if suffix is not None:
         employee.suffix = suffix
     if email is not None:
+        existing_email = (
+            db.query(Employee)
+            .filter(
+                Employee.email == email,
+                Employee.id != employee.id,
+            )
+            .first()
+        )
+
+        if existing_email:
+            raise HTTPException(
+                status_code=400,
+                detail="Employee email already exists",
+            )
+
         employee.email = email
     if position is not None:
         employee.position = position
     if department is not None:
         employee.department = department
+    if daily_rate is not None:
+        employee.daily_rate = daily_rate
+
+    if employment_type is not None:
+        employee.employment_type = employment_type
+
+    if payroll_type is not None:
+        employee.payroll_type = payroll_type
+
+    if schedule_template_id is not None:
+        validate_schedule_template(
+            db,
+            schedule_template_id,
+        )
+
+        employee.schedule_template_id = schedule_template_id
+
     if date_hired:
         employee.date_hired = parse_date(date_hired)
 

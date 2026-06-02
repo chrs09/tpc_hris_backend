@@ -33,3 +33,6 @@ from .applicant_onboarding import ApplicantOnboarding as ApplicantOnboarding
 from .applicant_questions import ApplicantQuestion as ApplicantQuestion
 from .applicant_qresponse import ApplicantQResponse as ApplicantQResponse
 from .employee_inactive import EmployeeInactiveRecord as EmployeeInactiveRecord
+
+from .overtime_approvals import OvertimeApproval as OvertimeApproval
+from .schedule_template import ScheduleTemplate as ScheduleTemplate

@@ -11,6 +11,7 @@ class EmployeeCreate(BaseModel):
     position: str
     date_hired: date
     department: str
+    schedule_template_id: int | None = None
     # created_by_user_id: int
 
 
@@ -23,6 +24,7 @@ class EmployeeUpdate(BaseModel):
     position: str
     date_hired: date
     department: str
+    schedule_template_id: int | None = None
     # created_by_user_id: int
 
 
@@ -37,6 +39,10 @@ class EmployeeResponse(BaseModel):
     date_hired: date
     department: str
     is_active: bool
+    daily_rate: float | None = None
+    employment_type: str | None = None
+    payroll_type: str | None = None
+    schedule_template_id: int | None = None
     # created_by_user_id: Optional[int]  # Make this optional in case it's not always returned
     # created_by_user_id: int
 

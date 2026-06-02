@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import Column, DateTime, Integer, String, Date, ForeignKey
+from sqlalchemy import Column, DateTime, Integer, String, Date, ForeignKey, Numeric
 from sqlalchemy.orm import relationship
 from app.core.database import Base
 from app.models.user import User
@@ -19,6 +19,10 @@ class Employee(Base):
     department = Column(String(100), nullable=False)
     is_active = Column(Integer, nullable=False, default=1)
     is_available = Column(Integer, nullable=False, default=1)
+
+    daily_rate = Column(Numeric(10, 2), nullable=True)
+    employment_type = Column(String(20), nullable=True)
+    payroll_type = Column(String(20), nullable=True)
 
     created_by_user_id = Column(Integer, ForeignKey("tpc_users.id"), nullable=False)
     updated_by_user_id = Column(Integer, ForeignKey("tpc_users.id"), nullable=True)
@@ -107,4 +111,22 @@ class Employee(Base):
         back_populates="employee",
         uselist=False,
         cascade="all, delete-orphan",
+    )
+
+    overtime_approvals = relationship(
+        "OvertimeApproval",
+        back_populates="employee",
+    )
+
+    schedule_template_id = Column(
+        Integer,
+        ForeignKey(
+            "tpc_schedule_templates.id"
+        ),
+        nullable=True,
+    )
+
+    schedule_template = relationship(
+        "ScheduleTemplate",
+        back_populates="employees",
     )

@@ -58,6 +58,18 @@ ATTENDANCE_ALLOWED_LOCATIONS = [
         "longitude": 123.973413,
         "radius_meters": 150,
     },
+    {
+        "name": "Consolacion Office",
+        "latitude": 10.3787,
+        "longitude": 123.9666,
+        "radius_meters": 150,
+    },
+    {
+        "name": "Mandaue Plant",
+        "latitude": 10.3305,
+        "longitude": 123.9333,
+        "radius_meters": 150,
+    },
 ]
 
 
@@ -561,6 +573,17 @@ def get_attendance_records(
                 ),
                 "check_in_time": format_attendance_time_only(record.check_in_time),
                 "check_out_time": format_attendance_time_only(record.check_out_time),
+                "check_in_time_raw": (
+                    record.check_in_time.isoformat()
+                    if record.check_in_time
+                    else None
+                ),
+
+                "check_out_time_raw": (
+                    record.check_out_time.isoformat()
+                    if record.check_out_time
+                    else None
+                ),
                 "time_in_latitude": record.time_in_latitude,
                 "time_in_longitude": record.time_in_longitude,
                 "time_in_address": record.time_in_address,
@@ -958,4 +981,71 @@ def reject_attendance(
         "message": "Attendance rejected.",
         "attendance_id": attendance.id,
         "status": attendance.face_review_status,
+    }
+
+
+@router.patch("/{attendance_id}/adjust-time")
+def adjust_attendance_time(
+    attendance_id: int,
+
+    check_in_time: str = Form(None),
+    check_out_time: str = Form(None),
+
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    # Only Admin and Superadmin can modify attendance
+    if current_user.role not in [
+        "admin",
+        "superadmin",
+    ]:
+        raise HTTPException(
+            status_code=403,
+            detail="Not authorized to adjust attendance.",
+        )
+
+    attendance = (
+        db.query(AttendanceRecord)
+        .filter(
+            AttendanceRecord.id == attendance_id
+        )
+        .first()
+    )
+
+    if not attendance:
+        raise HTTPException(
+            status_code=404,
+            detail="Attendance record not found.",
+        )
+
+    try:
+        if check_in_time:
+            attendance.check_in_time = datetime.strptime(
+                check_in_time,
+                "%Y-%m-%d %H:%M:%S",
+            )
+
+        if check_out_time:
+            attendance.check_out_time = datetime.strptime(
+                check_out_time,
+                "%Y-%m-%d %H:%M:%S",
+            )
+
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Invalid datetime format. "
+                "Use YYYY-MM-DD HH:MM:SS"
+            ),
+        )
+
+    db.commit()
+    db.refresh(attendance)
+
+    return {
+        "message": "Attendance adjusted successfully.",
+        "attendance_id": attendance.id,
+        "check_in_time": attendance.check_in_time,
+        "check_out_time": attendance.check_out_time,
     }
