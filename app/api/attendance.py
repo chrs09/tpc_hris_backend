@@ -31,6 +31,7 @@ from app.schemas.attendance import (
     AttendanceResponse,
     AttendanceUpdate,
     BulkAttendanceMixed,
+    AttendanceTimeAdjust
 )
 
 router = APIRouter(prefix="/attendance", tags=["Attendance"])
@@ -167,6 +168,7 @@ def create_attendance_record(
 
     db.add(record)
     return record
+
 
 
 @router.post("/time-in-selfie", response_model=AttendanceResponse)
@@ -987,9 +989,7 @@ def reject_attendance(
 @router.patch("/{attendance_id}/adjust-time")
 def adjust_attendance_time(
     attendance_id: int,
-
-    check_in_time: str = Form(None),
-    check_out_time: str = Form(None),
+    payload: AttendanceTimeAdjust,
 
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -1017,19 +1017,30 @@ def adjust_attendance_time(
             status_code=404,
             detail="Attendance record not found.",
         )
+    
+    print("PAYLOAD IN:", payload.check_in_time)
+    print("PAYLOAD OUT:", payload.check_out_time)
 
     try:
-        if check_in_time:
-            attendance.check_in_time = datetime.strptime(
-                check_in_time,
+        if payload.check_in_time:
+            local_dt = datetime.strptime(
+                payload.check_in_time,
                 "%Y-%m-%d %H:%M:%S",
             )
 
-        if check_out_time:
-            attendance.check_out_time = datetime.strptime(
-                check_out_time,
+            local_dt = PH_TZ.localize(local_dt)
+
+            attendance.check_in_time = local_dt.astimezone(UTC)
+
+        if payload.check_out_time:
+            local_dt = datetime.strptime(
+                payload.check_out_time,
                 "%Y-%m-%d %H:%M:%S",
             )
+
+            local_dt = PH_TZ.localize(local_dt)
+
+            attendance.check_out_time = local_dt.astimezone(UTC)
 
     except ValueError:
         raise HTTPException(
@@ -1039,6 +1050,8 @@ def adjust_attendance_time(
                 "Use YYYY-MM-DD HH:MM:SS"
             ),
         )
+    
+    
 
     db.commit()
     db.refresh(attendance)

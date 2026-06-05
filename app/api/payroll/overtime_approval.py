@@ -1,5 +1,5 @@
 from datetime import datetime
-
+from app.models.overtime_approval_details import OvertimeApprovalDetail
 from fastapi import (
     APIRouter,
     Depends,
@@ -36,9 +36,7 @@ def get_overtime_approvals(
     return records
 
 
-@router.get(
-    "/employee/{employee_id}"
-)
+@router.get("/employee/{employee_id}")
 def get_employee_overtime(
     employee_id: int,
     db: Session = Depends(get_db),
@@ -56,7 +54,27 @@ def get_employee_overtime(
         .all()
     )
 
-    return records
+    return [
+        {
+            "id": item.id,
+            "employee_id": item.employee_id,
+            "cutoff_start": item.cutoff_start,
+            "cutoff_end": item.cutoff_end,
+            "detected_ot_hours": item.detected_ot_hours,
+            "approved_ot_hours": item.approved_ot_hours,
+            "status": item.status,
+
+            "details": [
+                {
+                    "attendance_id": d.attendance_id,
+                    "detected_ot_hours": d.detected_ot_hours,
+                    "approved_ot_hours": d.approved_ot_hours,
+                }
+                for d in item.details
+            ],
+        }
+        for item in records
+    ]
 
 @router.post("/approve")
 def approve_overtime(
@@ -123,6 +141,40 @@ def approve_overtime(
             datetime.utcnow()
         )
 
+        db.query(
+            OvertimeApprovalDetail
+        ).filter(
+            OvertimeApprovalDetail
+            .overtime_approval_id
+            == existing.id
+        ).delete()
+
+        for detail in payload.get(
+            "details",
+            [],
+        ):
+            db.add(
+                OvertimeApprovalDetail(
+                    overtime_approval_id=
+                    existing.id,
+
+                    attendance_id=
+                    detail[
+                        "attendance_id"
+                    ],
+
+                    detected_ot_hours=
+                    detail[
+                        "detected_ot_hours"
+                    ],
+
+                    approved_ot_hours=
+                    detail[
+                        "approved_ot_hours"
+                    ],
+                )
+            )
+
         db.commit()
         db.refresh(existing)
 
@@ -157,13 +209,43 @@ def approve_overtime(
 
     db.add(overtime)
 
+    db.flush()
+
+    for detail in payload.get(
+        "details",
+        [],
+    ):
+        db.add(
+            OvertimeApprovalDetail(
+                overtime_approval_id=
+                overtime.id,
+
+                attendance_id=
+                detail[
+                    "attendance_id"
+                ],
+
+                detected_ot_hours=
+                detail[
+                    "detected_ot_hours"
+                ],
+
+                approved_ot_hours=
+                detail[
+                    "approved_ot_hours"
+                ],
+            )
+        )
+
     db.commit()
     db.refresh(overtime)
 
     return {
-        "message": "Overtime approved successfully.",
+        "message":
+        "Overtime approved successfully.",
         "id": overtime.id,
     }
+
 
 @router.post("/reverse")
 def reverse_overtime(
@@ -210,6 +292,14 @@ def reverse_overtime(
     overtime.reversed_at = (
         datetime.utcnow()
     )
+
+    db.query(
+        OvertimeApprovalDetail
+    ).filter(
+        OvertimeApprovalDetail
+        .overtime_approval_id
+        == overtime.id
+    ).delete()
 
     db.commit()
     db.refresh(overtime)

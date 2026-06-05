@@ -107,3 +107,9 @@ class OvertimeApproval(Base):
         "User",
         foreign_keys=[reversed_by_user_id],
     )
+
+    details = relationship(
+        "OvertimeApprovalDetail",
+        back_populates="overtime_approval",
+        cascade="all, delete-orphan",
+    )

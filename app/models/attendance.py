@@ -75,3 +75,7 @@ class AttendanceRecord(Base):
         foreign_keys=[created_by_user_id],
         back_populates="attendance_created_records",
     )
+    overtime_approval_details = relationship(
+        "OvertimeApprovalDetail",
+        back_populates="attendance",
+    )
