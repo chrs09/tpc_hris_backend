@@ -120,9 +120,7 @@ class Employee(Base):
 
     schedule_template_id = Column(
         Integer,
-        ForeignKey(
-            "tpc_schedule_templates.id"
-        ),
+        ForeignKey("tpc_schedule_templates.id"),
         nullable=True,
     )
 

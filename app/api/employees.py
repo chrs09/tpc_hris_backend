@@ -28,15 +28,14 @@ from app.models.employee_inactive import EmployeeInactiveRecord
 
 router = APIRouter(prefix="/employees", tags=["Employees"])
 
+
 def validate_schedule_template(
     db,
     schedule_template_id,
 ):
     schedule = (
         db.query(ScheduleTemplate)
-        .filter(
-            ScheduleTemplate.id == schedule_template_id
-        )
+        .filter(ScheduleTemplate.id == schedule_template_id)
         .first()
     )
 
@@ -136,6 +135,20 @@ def get_employees(
                 {
                     "id": emp.schedule_template.id,
                     "name": emp.schedule_template.name,
+                    "monday_in": emp.schedule_template.monday_in,
+                    "monday_out": emp.schedule_template.monday_out,
+                    "tuesday_in": emp.schedule_template.tuesday_in,
+                    "tuesday_out": emp.schedule_template.tuesday_out,
+                    "wednesday_in": emp.schedule_template.wednesday_in,
+                    "wednesday_out": emp.schedule_template.wednesday_out,
+                    "thursday_in": emp.schedule_template.thursday_in,
+                    "thursday_out": emp.schedule_template.thursday_out,
+                    "friday_in": emp.schedule_template.friday_in,
+                    "friday_out": emp.schedule_template.friday_out,
+                    "saturday_in": emp.schedule_template.saturday_in,
+                    "saturday_out": emp.schedule_template.saturday_out,
+                    "sunday_in": emp.schedule_template.sunday_in,
+                    "sunday_out": emp.schedule_template.sunday_out,
                 }
                 if emp.schedule_template
                 else None
@@ -225,6 +238,20 @@ def get_employee_detail(
             {
                 "id": employee.schedule_template.id,
                 "name": employee.schedule_template.name,
+                "monday_in": employee.schedule_template.monday_in,
+                "monday_out": employee.schedule_template.monday_out,
+                "tuesday_in": employee.schedule_template.tuesday_in,
+                "tuesday_out": employee.schedule_template.tuesday_out,
+                "wednesday_in": employee.schedule_template.wednesday_in,
+                "wednesday_out": employee.schedule_template.wednesday_out,
+                "thursday_in": employee.schedule_template.thursday_in,
+                "thursday_out": employee.schedule_template.thursday_out,
+                "friday_in": employee.schedule_template.friday_in,
+                "friday_out": employee.schedule_template.friday_out,
+                "saturday_in": employee.schedule_template.saturday_in,
+                "saturday_out": employee.schedule_template.saturday_out,
+                "sunday_in": employee.schedule_template.sunday_in,
+                "sunday_out": employee.schedule_template.sunday_out,
             }
             if employee.schedule_template
             else None
@@ -405,7 +432,6 @@ async def create_employee(
     parsed_employment = safe_json_loads(employment_history, "employment_history")
     parsed_references = safe_json_loads(character_references, "character_references")
 
-
     if schedule_template_id is not None:
         validate_schedule_template(
             db,
@@ -417,19 +443,15 @@ async def create_employee(
         #         status_code=404,
         #         detail="Schedule template not found",
         #     )
-        
-    existing_email = (
-        db.query(Employee)
-        .filter(Employee.email == email)
-        .first()
-    )
+
+    existing_email = db.query(Employee).filter(Employee.email == email).first()
 
     if existing_email:
         raise HTTPException(
             status_code=400,
             detail="Employee email already exists",
         )
-    
+
     employee = Employee(
         first_name=first_name,
         middle_name=middle_name,

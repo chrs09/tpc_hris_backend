@@ -31,7 +31,7 @@ from app.schemas.attendance import (
     AttendanceResponse,
     AttendanceUpdate,
     BulkAttendanceMixed,
-    AttendanceTimeAdjust
+    AttendanceTimeAdjust,
 )
 
 router = APIRouter(prefix="/attendance", tags=["Attendance"])
@@ -168,7 +168,6 @@ def create_attendance_record(
 
     db.add(record)
     return record
-
 
 
 @router.post("/time-in-selfie", response_model=AttendanceResponse)
@@ -576,15 +575,10 @@ def get_attendance_records(
                 "check_in_time": format_attendance_time_only(record.check_in_time),
                 "check_out_time": format_attendance_time_only(record.check_out_time),
                 "check_in_time_raw": (
-                    record.check_in_time.isoformat()
-                    if record.check_in_time
-                    else None
+                    record.check_in_time.isoformat() if record.check_in_time else None
                 ),
-
                 "check_out_time_raw": (
-                    record.check_out_time.isoformat()
-                    if record.check_out_time
-                    else None
+                    record.check_out_time.isoformat() if record.check_out_time else None
                 ),
                 "time_in_latitude": record.time_in_latitude,
                 "time_in_longitude": record.time_in_longitude,
@@ -990,7 +984,6 @@ def reject_attendance(
 def adjust_attendance_time(
     attendance_id: int,
     payload: AttendanceTimeAdjust,
-
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -1005,11 +998,7 @@ def adjust_attendance_time(
         )
 
     attendance = (
-        db.query(AttendanceRecord)
-        .filter(
-            AttendanceRecord.id == attendance_id
-        )
-        .first()
+        db.query(AttendanceRecord).filter(AttendanceRecord.id == attendance_id).first()
     )
 
     if not attendance:
@@ -1017,7 +1006,7 @@ def adjust_attendance_time(
             status_code=404,
             detail="Attendance record not found.",
         )
-    
+
     print("PAYLOAD IN:", payload.check_in_time)
     print("PAYLOAD OUT:", payload.check_out_time)
 
@@ -1045,13 +1034,8 @@ def adjust_attendance_time(
     except ValueError:
         raise HTTPException(
             status_code=400,
-            detail=(
-                "Invalid datetime format. "
-                "Use YYYY-MM-DD HH:MM:SS"
-            ),
+            detail=("Invalid datetime format. " "Use YYYY-MM-DD HH:MM:SS"),
         )
-    
-    
 
     db.commit()
     db.refresh(attendance)

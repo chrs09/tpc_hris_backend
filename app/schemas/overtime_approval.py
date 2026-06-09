@@ -32,6 +32,7 @@ class OvertimeApprovalResponse(BaseModel):
     approved_by_user_id: int | None
     approved_at: datetime | None
 
+
 class OvertimeApprovalRequest(BaseModel):
     employee_id: int
     cutoff_start: date
@@ -41,4 +42,3 @@ class OvertimeApprovalRequest(BaseModel):
 
     class Config:
         from_attributes = True
-

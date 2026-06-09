@@ -11,9 +11,7 @@ from app.core.database import Base
 
 
 class OvertimeApprovalDetail(Base):
-    __tablename__ = (
-        "tpc_overtime_approval_details"
-    )
+    __tablename__ = "tpc_overtime_approval_details"
 
     id = Column(
         Integer,
@@ -23,17 +21,13 @@ class OvertimeApprovalDetail(Base):
 
     overtime_approval_id = Column(
         Integer,
-        ForeignKey(
-            "tpc_overtime_approvals.id"
-        ),
+        ForeignKey("tpc_overtime_approvals.id"),
         nullable=False,
     )
 
     attendance_id = Column(
         Integer,
-        ForeignKey(
-            "tpc_attendance_records.id"
-        ),
+        ForeignKey("tpc_attendance_records.id"),
         nullable=False,
     )
 

@@ -25,9 +25,10 @@ class BulkAttendanceMixed(BaseModel):
     attendances: List[EmployeeAttendance]
 
 
-class AttendanceTimeAdjust(BaseModel): 
-    check_in_time: str | None = None 
+class AttendanceTimeAdjust(BaseModel):
+    check_in_time: str | None = None
     check_out_time: str | None = None
+
 
 class AttendanceResponse(BaseModel):
     id: int
