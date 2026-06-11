@@ -396,7 +396,7 @@ async def create_employee(
     middle_name: str = Form(None),
     suffix: str = Form(None),
     last_name: str = Form(...),
-    email: str = Form(...),
+    email: str = Form(None),
     position: str = Form(...),
     department: str = Form(...),
     date_hired: str = Form(...),
@@ -446,11 +446,20 @@ async def create_employee(
 
     existing_email = db.query(Employee).filter(Employee.email == email).first()
 
-    if existing_email:
-        raise HTTPException(
-            status_code=400,
-            detail="Employee email already exists",
+    if email:
+        existing_email = (
+            db.query(Employee)
+            .filter(Employee.email == email)
+            .first()
         )
+
+        if existing_email:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "email": "Employee email already exists"
+                },
+            )
 
     employee = Employee(
         first_name=first_name,
@@ -712,22 +721,28 @@ async def patch_employee(
     if suffix is not None:
         employee.suffix = suffix
     if email is not None:
-        existing_email = (
-            db.query(Employee)
-            .filter(
-                Employee.email == email,
-                Employee.id != employee.id,
-            )
-            .first()
-        )
-
-        if existing_email:
-            raise HTTPException(
-                status_code=400,
-                detail="Employee email already exists",
+        if email.strip():
+            existing_email = (
+                db.query(Employee)
+                .filter(
+                    Employee.email == email,
+                    Employee.id != employee.id,
+                )
+                .first()
             )
 
-        employee.email = email
+            if existing_email:
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "email": "Employee email already exists"
+                    },
+                )
+
+            employee.email = email
+        else:
+            employee.email = None
+
     if position is not None:
         employee.position = position
     if department is not None:

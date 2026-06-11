@@ -51,6 +51,11 @@ class AttendanceRecord(Base):
         nullable=False,
         default="Present",
     )
+    
+    remarks = Column(
+        Text,
+        nullable=True,
+    )
 
     attendance_method = Column(String(30), nullable=True)
 

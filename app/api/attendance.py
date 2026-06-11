@@ -142,6 +142,7 @@ def create_attendance_record(
     db: Session,
     employee_id: int,
     status: str,
+    remarks: str | None,
     user_id: int | None,
     attendance_date: date,
 ):
@@ -164,6 +165,7 @@ def create_attendance_record(
         check_in_time=datetime.utcnow(),
         attendance_method="MANUAL",
         created_by_user_id=user_id,
+        remarks=remarks,
     )
 
     db.add(record)
@@ -393,6 +395,7 @@ def mark_attendance(
         db=db,
         employee_id=employee.id,
         status=attendance_in.status,
+        remarks=attendance_in.remarks,
         user_id=current_user.id,
         attendance_date=attendance_in.attendance_date,
     )
@@ -440,6 +443,7 @@ def bulk_mixed_attendance(
             db=db,
             employee_id=att.employee_id,
             status=att.status,
+            remarks=getattr(att, "remarks", None),
             user_id=current_user.id,
             attendance_date=today,
         )
@@ -598,6 +602,7 @@ def get_attendance_records(
                 "reviewed_at": record.reviewed_at,
                 "attendance_method": record.attendance_method,
                 "status": record.status,
+                "remarks": record.remarks,
                 "created_by_user_id": record.created_by_user_id,
                 "completed_trips": (driver_trip_count or 0) + (helper_trip_count or 0),
             }
@@ -638,13 +643,17 @@ def update_attendance(
     if not record:
         raise HTTPException(status_code=404, detail="Attendance record not found")
 
-    if record.status == attendance_in.status:
+    if (
+        record.status == attendance_in.status
+        and record.remarks == attendance_in.remarks
+    ):
         raise HTTPException(
             status_code=400,
-            detail="Attendance status is already the same.",
+            detail="Attendance status and remarks are already the same.",
         )
 
     record.status = attendance_in.status
+    record.remarks = attendance_in.remarks
 
     db.commit()
     db.refresh(record)

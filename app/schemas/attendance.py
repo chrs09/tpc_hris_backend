@@ -6,6 +6,7 @@ from typing import List, Optional
 class AttendanceCreate(BaseModel):
     employee_id: int
     status: str
+    remarks: str | None = None
     attendance_date: date
     check_in_time: Optional[datetime] = None
 
@@ -19,10 +20,12 @@ class AttendanceUpdate(BaseModel):
     employee_id: int
     attendance_date: date
     status: str
+    remarks: str | None = None
 
 
 class BulkAttendanceMixed(BaseModel):
     attendances: List[EmployeeAttendance]
+    
 
 
 class AttendanceTimeAdjust(BaseModel):
@@ -66,6 +69,7 @@ class AttendanceResponse(BaseModel):
     attendance_method: Optional[str] = None
 
     status: str
+    remarks: str | None = None
 
     created_by_user_id: int
 

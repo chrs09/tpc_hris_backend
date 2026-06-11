@@ -13,7 +13,7 @@ class Employee(Base):
     middle_name = Column(String(50), nullable=True)
     last_name = Column(String(50), nullable=False)
     suffix = Column(String(20), nullable=True)
-    email = Column(String(100), unique=True, nullable=False)
+    email = Column(String(100), unique=True, nullable=True)
     position = Column(String(100), nullable=False)
     date_hired = Column(Date, nullable=False)
     department = Column(String(100), nullable=False)
