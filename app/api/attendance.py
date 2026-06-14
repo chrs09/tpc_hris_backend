@@ -71,6 +71,12 @@ ATTENDANCE_ALLOWED_LOCATIONS = [
         "longitude": 123.9333,
         "radius_meters": 150,
     },
+    {
+        "name": "Cordova",
+        "latitude": 10.2545,
+        "longitude": 123.9487,
+        "radius_meters": 150,
+    }
 ]
 
 
