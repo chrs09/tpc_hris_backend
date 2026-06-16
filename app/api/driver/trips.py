@@ -20,6 +20,8 @@ from app.models.employees import Employee
 from app.models.files import File as FileModel
 from app.services.file_service import FileService
 from app.models.gps_log import GPSLog
+from app.models.vehicle_unit import VehicleUnit
+from app.models.TripRate import TripRateProfile
 from app.models.trip_models import GPSActionType
 from app.services.gps_service import calculate_distance_meters
 from app.services.notification_service import create_notification
@@ -112,6 +114,62 @@ def get_available_helpers(
 
 
 # =========================
+# GET AVAILABLE VEHICLE
+# =========================
+@router.get("/available-vehicles")
+def get_available_vehicles(
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+
+    vehicles = (
+        db.query(VehicleUnit)
+        .filter(
+            VehicleUnit.is_active.is_(True),
+            VehicleUnit.is_available.is_(True),
+        )
+        .order_by(VehicleUnit.unit_code.asc())
+        .all()
+    )
+
+    return [
+        {
+            "id": vehicle.id,
+            "unit_code": vehicle.unit_code,
+            "plate_number": vehicle.plate_number,
+            "description": vehicle.description,
+        }
+        for vehicle in vehicles
+    ]
+
+
+# =========================
+# GET TRIP RATES
+# =========================
+@router.get("/trip-rate-profiles")
+def get_trip_rate_profiles(
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+
+    profiles = (
+        db.query(TripRateProfile)
+        .filter(TripRateProfile.is_active.is_(True))
+        .order_by(TripRateProfile.profile_name.asc())
+        .all()
+    )
+
+    return [
+        {
+            "id": profile.id,
+            "profile_name": profile.profile_name,
+            "helper_count": profile.helper_count,
+        }
+        for profile in profiles
+    ]
+
+
+# =========================
 # GET ACTIVE TRIP
 # =========================
 @router.get("/active")
@@ -197,6 +255,27 @@ def get_active_trip(
         "id": trip.id,
         "driver_id": trip.driver_id,
         "ticket_no": trip.ticket_no,
+        "vehicle": (
+            {
+                "id": trip.vehicle_unit.id,
+                "unit_code": trip.vehicle_unit.unit_code,
+                "plate_number": trip.vehicle_unit.plate_number,
+                "description": trip.vehicle_unit.description,
+            }
+            if trip.vehicle_unit
+            else None
+        ),
+        "trip_rate_profile": (
+            {
+                "id": trip.trip_rate_profile.id,
+                "profile_name": trip.trip_rate_profile.profile_name,
+                "helper_count": trip.trip_rate_profile.helper_count,
+                "driver_first_trip_rate": trip.trip_rate_profile.driver_first_trip_rate,
+                "driver_next_trip_rate": trip.trip_rate_profile.driver_next_trip_rate,
+            }
+            if trip.trip_rate_profile
+            else None
+        ),
         "status": trip.status.value if hasattr(trip.status, "value") else trip.status,
         "origin_store_id": trip.origin_store_id,
         "origin_name": origin_store.name if origin_store else "N/A",
@@ -221,6 +300,8 @@ def get_active_trip(
 @router.post("/start")
 def start_trip(
     ticket_no: str = Form(...),
+    vehicle_unit_id: int = Form(...),
+    trip_rate_profile_id: int = Form(...),
     lat: float = Form(...),
     long: float = Form(...),
     photo: UploadFile = File(...),
@@ -229,7 +310,43 @@ def start_trip(
     current_user=Depends(get_current_user),
 ):
 
-    helper_ids = json.loads(helper_ids)
+    try:
+        helper_ids = json.loads(helper_ids)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid helper format.")
+
+    if len(helper_ids) != len(set(helper_ids)):
+        raise HTTPException(status_code=400, detail="Duplicate helpers selected.")
+
+    # ---------------------------------------
+    # VEHICLE VALIDATION
+    # ---------------------------------------
+
+    vehicle = (
+        db.query(VehicleUnit)
+        .filter(
+            VehicleUnit.id == vehicle_unit_id,
+            VehicleUnit.is_active.is_(True),
+            VehicleUnit.is_available.is_(True),
+        )
+        .first()
+    )
+
+    if not vehicle:
+        raise HTTPException(status_code=400, detail="Selected vehicle is unavailable.")
+
+    # Trip Profile
+    profile = (
+        db.query(TripRateProfile)
+        .filter(
+            TripRateProfile.id == trip_rate_profile_id,
+            TripRateProfile.is_active.is_(True),
+        )
+        .first()
+    )
+
+    if not profile:
+        raise HTTPException(status_code=400, detail="Invalid trip rate profile.")
 
     # ---------------------------------------
     # 1️⃣ Prevent multiple ACTIVE trips
@@ -278,6 +395,15 @@ def start_trip(
     # ---------------------------------------
     # 4️⃣ Validate Helpers
     # ---------------------------------------
+
+    if len(helper_ids) != profile.helper_count:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"{profile.profile_name} requires " f"{profile.helper_count} helper(s)."
+            ),
+        )
+
     if len(helper_ids) > 3:
         raise HTTPException(status_code=400, detail="Maximum of 3 helpers allowed.")
 
@@ -308,7 +434,7 @@ def start_trip(
                 status_code=404, detail=f"Helper {helper_id} not found."
             )
 
-        if helper.position != "Helper":
+        if helper.position.upper() != "HELPER":
             raise HTTPException(status_code=400, detail="Invalid helper position.")
 
         if helper.department != required_department:
@@ -330,12 +456,16 @@ def start_trip(
             driver_id=current_user.id,
             origin_store_id=closest_store.id,
             ticket_no=ticket_no.strip(),
+            vehicle_unit_id=vehicle.id,
+            trip_rate_profile_id=profile.id,
             status=TripStatus.ACTIVE,
             start_time=datetime.utcnow(),
         )
 
         db.add(new_trip)
         db.flush()
+
+        vehicle.is_available = False
 
         # Upload start photo
         file_service = FileService()
@@ -363,8 +493,8 @@ def start_trip(
 
         db.commit()
 
-    except Exception as e:
-        print("START TRIP ERROR:", e)
+    except Exception:
+        logger.exception("START TRIP ERROR")
         db.rollback()
 
         raise HTTPException(status_code=500, detail="Failed to start trip.")
@@ -661,8 +791,6 @@ def complete_trip(
     # ---------------------------------------
     # 4️⃣ Complete Trip
     # ---------------------------------------
-    trip.status = TripStatus.PENDING_APPROVAL
-    trip.end_time = datetime.utcnow()
 
     completion_time = datetime.utcnow()
 
@@ -672,7 +800,8 @@ def complete_trip(
     completion_log = GPSLog(
         trip_id=trip.id,
         trip_stop_id=None,
-        action_type=GPSActionType.TRACK,
+        # action_type=GPSActionType.TRACK,
+        action_type=GPSActionType.COMPLETED,
         actual_lat=payload.lat,
         actual_long=payload.long,
         created_at=completion_time,
@@ -682,6 +811,9 @@ def complete_trip(
 
     for trip_helper in trip.trip_helpers:
         trip_helper.helper.is_available = 1
+
+    if trip.vehicle_unit:
+        trip.vehicle_unit.is_available = True
 
     # ---------------------------------------
     # 5️⃣ Notify Admin
@@ -774,7 +906,7 @@ def add_helpers_to_trip(
                 status_code=404, detail=f"Helper ID {helper_id} not found."
             )
 
-        if helper.position != "Helper":
+        if helper.position.upper() != "HELPER":
             raise HTTPException(
                 status_code=400, detail=f"{helper.first_name} is not a helper."
             )
@@ -868,6 +1000,12 @@ def get_my_trips(db: Session = Depends(get_db), current_user=Depends(get_current
             {
                 "id": trip.id,
                 "ticket_no": trip.ticket_no,
+                "vehicle": (trip.vehicle_unit.unit_code if trip.vehicle_unit else None),
+                "trip_profile": (
+                    trip.trip_rate_profile.profile_name
+                    if trip.trip_rate_profile
+                    else None
+                ),
                 "status": (
                     trip.status.value if hasattr(trip.status, "value") else trip.status
                 ),

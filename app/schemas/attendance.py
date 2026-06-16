@@ -25,7 +25,6 @@ class AttendanceUpdate(BaseModel):
 
 class BulkAttendanceMixed(BaseModel):
     attendances: List[EmployeeAttendance]
-    
 
 
 class AttendanceTimeAdjust(BaseModel):

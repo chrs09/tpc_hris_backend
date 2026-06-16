@@ -76,7 +76,7 @@ ATTENDANCE_ALLOWED_LOCATIONS = [
         "latitude": 10.2545,
         "longitude": 123.9487,
         "radius_meters": 150,
-    }
+    },
 ]
 
 

@@ -51,7 +51,7 @@ class AttendanceRecord(Base):
         nullable=False,
         default="Present",
     )
-    
+
     remarks = Column(
         Text,
         nullable=True,

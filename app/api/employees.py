@@ -447,18 +447,12 @@ async def create_employee(
     existing_email = db.query(Employee).filter(Employee.email == email).first()
 
     if email:
-        existing_email = (
-            db.query(Employee)
-            .filter(Employee.email == email)
-            .first()
-        )
+        existing_email = db.query(Employee).filter(Employee.email == email).first()
 
         if existing_email:
             raise HTTPException(
                 status_code=422,
-                detail={
-                    "email": "Employee email already exists"
-                },
+                detail={"email": "Employee email already exists"},
             )
 
     employee = Employee(
@@ -734,9 +728,7 @@ async def patch_employee(
             if existing_email:
                 raise HTTPException(
                     status_code=422,
-                    detail={
-                        "email": "Employee email already exists"
-                    },
+                    detail={"email": "Employee email already exists"},
                 )
 
             employee.email = email

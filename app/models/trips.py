@@ -26,6 +26,18 @@ class Trip(Base):
     ticket_no = Column(String(100), nullable=False, unique=True, index=True)
     origin_store_id = Column(Integer, ForeignKey("tpc_stores.id"), nullable=True)
 
+    vehicle_unit_id = Column(
+        Integer,
+        ForeignKey("tpc_vehicle_units.id"),
+        nullable=True,
+    )
+
+    trip_rate_profile_id = Column(
+        Integer,
+        ForeignKey("tpc_trip_rate_profiles.id"),
+        nullable=True,
+    )
+
     status = Column(
         Enum(TripStatus, name="trip_status_enum"),
         default=TripStatus.ACTIVE,
@@ -34,6 +46,7 @@ class Trip(Base):
 
     start_time = Column(DateTime, default=datetime.utcnow)
     end_time = Column(DateTime, nullable=True)
+
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
 
     driver = relationship("User", back_populates="trips")
@@ -56,3 +69,9 @@ class Trip(Base):
     )
 
     origin_store = relationship("Store", foreign_keys=[origin_store_id])
+
+    vehicle_unit = relationship("VehicleUnit", foreign_keys=[vehicle_unit_id])
+
+    trip_rate_profile = relationship(
+        "TripRateProfile", foreign_keys=[trip_rate_profile_id]
+    )

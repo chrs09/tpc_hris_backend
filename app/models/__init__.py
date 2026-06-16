@@ -37,3 +37,7 @@ from .employee_inactive import EmployeeInactiveRecord as EmployeeInactiveRecord
 from .overtime_approvals import OvertimeApproval as OvertimeApproval
 from .overtime_approval_details import OvertimeApprovalDetail as OvertimeApprovalDetail
 from .schedule_template import ScheduleTemplate as ScheduleTemplate
+
+# Trip Module
+from .TripRate import TripRateProfile as TripRateProfile
+from .vehicle_unit import VehicleUnit as VehicleUnit

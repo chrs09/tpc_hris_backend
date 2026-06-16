@@ -97,6 +97,10 @@ def get_active_trips(
         {
             "id": trip.id,
             "ticket_no": trip.ticket_no,
+            "vehicle_unit": (trip.vehicle_unit.unit_code if trip.vehicle_unit else "-"),
+            "trip_profile": (
+                trip.trip_rate_profile.profile_name if trip.trip_rate_profile else "-"
+            ),
             "status": trip.status.value,
             "start_time": (trip.start_time + timedelta(hours=8)).strftime(
                 "%Y-%m-%d %I:%M:%S %p"
@@ -147,6 +151,58 @@ def approve_trip(
     return {"message": "Trip approved successfully"}
 
 
+@router.post("/{trip_id}/reject")
+def reject_trip(
+    trip_id: int,
+    db: Session = Depends(get_db),
+    current_admin=Depends(get_current_admin),
+):
+
+    trip = (
+        db.query(Trip)
+        .options(
+            joinedload(Trip.trip_helpers),
+            joinedload(Trip.vehicle_unit),
+        )
+        .filter(Trip.id == trip_id)
+        .first()
+    )
+
+    if not trip:
+        raise HTTPException(status_code=404, detail="Trip not found.")
+
+    if trip.status != TripStatus.PENDING_APPROVAL:
+        raise HTTPException(status_code=400, detail="Trip not pending approval.")
+
+    trip.status = TripStatus.CANCELLED
+
+    notification = (
+        db.query(Notification)
+        .filter(
+            Notification.trip_id == trip.id,
+            Notification.type == "TRIP_COMPLETED",
+            Notification.status == "PENDING",
+        )
+        .first()
+    )
+
+    if notification:
+        notification.status = "REJECTED"
+        notification.reviewed_by_admin_id = current_admin.id
+        notification.reviewed_at = datetime.utcnow()
+
+    for trip_helper in trip.trip_helpers:
+        if trip_helper.helper:
+            trip_helper.helper.is_available = True
+
+    if trip.vehicle_unit:
+        trip.vehicle_unit.is_available = True
+
+    db.commit()
+
+    return {"message": "Trip rejected."}
+
+
 @router.get("/{trip_id}/review")
 def review_trip(
     trip_id: int,
@@ -158,6 +214,8 @@ def review_trip(
         .options(
             joinedload(Trip.driver).joinedload(User.employee),
             joinedload(Trip.origin_store),
+            joinedload(Trip.vehicle_unit),
+            joinedload(Trip.trip_rate_profile),
             joinedload(Trip.stops).joinedload(TripStop.store),
         )
         .filter(Trip.id == trip_id)
@@ -197,6 +255,7 @@ def review_trip(
         db.query(GPSLog)
         .filter(GPSLog.trip_id == trip_id)
         .order_by(GPSLog.created_at.asc())
+        .limit(5000)
         .all()
     )
 
@@ -253,6 +312,24 @@ def review_trip(
     return {
         "trip_id": trip.id,
         "ticket_no": trip.ticket_no,
+        "vehicle": (
+            {
+                "id": trip.vehicle_unit.id,
+                "unit_code": trip.vehicle_unit.unit_code,
+                "plate_number": trip.vehicle_unit.plate_number,
+            }
+            if trip.vehicle_unit
+            else None
+        ),
+        "trip_rate_profile": (
+            {
+                "id": trip.trip_rate_profile.id,
+                "profile_name": trip.trip_rate_profile.profile_name,
+                "helper_count": trip.trip_rate_profile.helper_count,
+            }
+            if trip.trip_rate_profile
+            else None
+        ),
         "status": trip.status.value,
         "driver_first_name": (
             trip.driver.employee.first_name if trip.driver.employee else "-"
