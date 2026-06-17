@@ -800,8 +800,8 @@ def complete_trip(
     completion_log = GPSLog(
         trip_id=trip.id,
         trip_stop_id=None,
-        # action_type=GPSActionType.TRACK,
-        action_type=GPSActionType.COMPLETED,
+        action_type=GPSActionType.TRACK,
+        # action_type=GPSActionType.COMPLETED,
         actual_lat=payload.lat,
         actual_long=payload.long,
         created_at=completion_time,
