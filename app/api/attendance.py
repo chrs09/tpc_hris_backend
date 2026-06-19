@@ -529,27 +529,109 @@ def get_attendance_records(
             .first()
         )
 
-        driver_trip_count = (
-            db.query(func.count(Trip.id))
+        # ---------------------------------------
+        # DRIVER TRIPS
+        # ---------------------------------------
+
+        driver_trips = (
+            db.query(Trip)
             .join(User, User.id == Trip.driver_id)
             .filter(
                 User.employee_id == record.employee_id,
                 Trip.status.in_(valid_statuses),
                 func.date(Trip.start_time) == record.attendance_date,
             )
-            .scalar()
+            .all()
         )
 
-        helper_trip_count = (
-            db.query(func.count(Trip.id))
+        # ---------------------------------------
+        # HELPER TRIPS
+        # ---------------------------------------
+
+        helper_trips = (
+            db.query(Trip)
             .join(TripHelper, TripHelper.trip_id == Trip.id)
             .filter(
                 TripHelper.helper_id == record.employee_id,
                 Trip.status.in_(valid_statuses),
                 func.date(Trip.start_time) == record.attendance_date,
             )
-            .scalar()
+            .all()
         )
+
+        # ---------------------------------------
+        # BUILD TRIP TICKETS
+        # ---------------------------------------
+
+        trip_tickets = []
+        seen_trip_ids = set()
+
+        for trip in driver_trips + helper_trips:
+
+            if trip.id in seen_trip_ids:
+                continue
+
+            seen_trip_ids.add(trip.id)
+
+            trip_tickets.append(
+                {
+                    "trip_id": trip.id,
+                    "ticket_no": trip.ticket_no,
+                    "vehicle_unit_id": trip.vehicle_unit_id,
+                    "vehicle_unit": (
+                        trip.vehicle_unit.unit_code if trip.vehicle_unit else None
+                    ),
+                    "plate_number": (
+                        trip.vehicle_unit.plate_number if trip.vehicle_unit else None
+                    ),
+                    "trip_rate_profile_id": trip.trip_rate_profile_id,
+                    "trip_rate_profile": (
+                        trip.trip_rate_profile.profile_name
+                        if trip.trip_rate_profile
+                        else None
+                    ),
+                    "driver_first_trip_rate": (
+                        float(trip.trip_rate_profile.driver_first_trip_rate)
+                        if trip.trip_rate_profile
+                        and trip.trip_rate_profile.driver_first_trip_rate
+                        else 0
+                    ),
+                    "driver_next_trip_rate": (
+                        float(trip.trip_rate_profile.driver_next_trip_rate)
+                        if trip.trip_rate_profile
+                        and trip.trip_rate_profile.driver_next_trip_rate
+                        else 0
+                    ),
+                    "helper_first_trip_rate": (
+                        float(trip.trip_rate_profile.helper_first_trip_rate)
+                        if trip.trip_rate_profile
+                        and trip.trip_rate_profile.helper_first_trip_rate
+                        else 0
+                    ),
+                    "helper_next_trip_rate": (
+                        float(trip.trip_rate_profile.helper_next_trip_rate)
+                        if trip.trip_rate_profile
+                        and trip.trip_rate_profile.helper_next_trip_rate
+                        else 0
+                    ),
+                    "helper_count": (
+                        trip.trip_rate_profile.helper_count
+                        if trip.trip_rate_profile
+                        else 0
+                    ),
+                    "status": (
+                        trip.status.value
+                        if hasattr(trip.status, "value")
+                        else trip.status
+                    ),
+                    "start_time": (
+                        trip.start_time.isoformat() if trip.start_time else None
+                    ),
+                    "end_time": (trip.end_time.isoformat() if trip.end_time else None),
+                }
+            )
+
+        total_count = len(trip_tickets)
 
         time_in_photo = (
             db.query(FileModel)
@@ -578,7 +660,9 @@ def get_attendance_records(
                 "employee_name": employee_name,
                 "employee_department": employee_department,
                 "department": employee_department,
-                "profile_photo_url": profile_photo.file_url if profile_photo else None,
+                "profile_photo_url": (
+                    profile_photo.file_url if profile_photo else None
+                ),
                 "attendance_date": (
                     str(record.attendance_date) if record.attendance_date else None
                 ),
@@ -596,7 +680,9 @@ def get_attendance_records(
                 "time_out_latitude": record.time_out_latitude,
                 "time_out_longitude": record.time_out_longitude,
                 "time_out_address": record.time_out_address,
-                "time_in_photo_url": time_in_photo.file_url if time_in_photo else None,
+                "time_in_photo_url": (
+                    time_in_photo.file_url if time_in_photo else None
+                ),
                 "time_out_photo_url": (
                     time_out_photo.file_url if time_out_photo else None
                 ),
@@ -610,7 +696,8 @@ def get_attendance_records(
                 "status": record.status,
                 "remarks": record.remarks,
                 "created_by_user_id": record.created_by_user_id,
-                "completed_trips": (driver_trip_count or 0) + (helper_trip_count or 0),
+                "completed_trips": total_count,
+                "trip_tickets": trip_tickets,
             }
         )
 

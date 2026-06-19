@@ -29,6 +29,29 @@ from app.models.employee_inactive import EmployeeInactiveRecord
 router = APIRouter(prefix="/employees", tags=["Employees"])
 
 
+# Validation error
+def validate_employee_required_fields(data):
+    errors = {}
+
+    required_fields = {
+        "first_name": "First Name",
+        "last_name": "Last Name",
+        "department": "Department",
+        "position": "Position",
+        "date_hired": "Date Hired",
+        "employment_type": "Employment Type",
+        "payroll_type": "Payroll Type",
+    }
+
+    for field, label in required_fields.items():
+        value = data.get(field)
+
+        if value is None or str(value).strip() == "":
+            errors[field] = f"{label} is required"
+
+    return errors
+
+
 def validate_schedule_template(
     db,
     schedule_template_id,
@@ -454,6 +477,27 @@ async def create_employee(
                 status_code=422,
                 detail={"email": "Employee email already exists"},
             )
+    errors = validate_employee_required_fields(
+        {
+            "first_name": first_name,
+            "last_name": last_name,
+            "department": department,
+            "position": position,
+            "date_hired": date_hired,
+            "employment_type": employment_type,
+            "payroll_type": payroll_type,
+        }
+    )
+
+    if errors:
+        raise HTTPException(
+            status_code=422,
+            detail=errors,
+        )
+
+    if department in ["CdcDriver", "CpdcDriver"]:
+        if not files:
+            errors["license"] = "Driver's License is required"
 
     employee = Employee(
         first_name=first_name,
@@ -1098,6 +1142,7 @@ async def patch_employee(
         "ACCOUNT_NUMBER",
         "ACCOUNTABILITY",
         "ID_FILE",
+        "LICENSE",
         "HEALTHCARD",
         "XRAY",
         "SSS",
