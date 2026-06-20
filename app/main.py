@@ -8,7 +8,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.core.config import settings
-from app.api import health, auth, employees, attendance, dashboard, reminder, users, map
+from app.api import health, auth, employees, attendance, dashboard, reminder, users, map, debugger
 from app.api.payroll import overtime_approval
 from app.api import schedule_template as schedule_template_router
 from app.api.driver import trips
@@ -105,6 +105,9 @@ app.include_router(admin_applicant_questions_router)
 app.include_router(public_applicant_router)
 app.include_router(applicant_onboarding_router)
 app.include_router(applicant_questions_router)
+
+# debugger
+app.include_router(debugger.router, prefix="/api")
 
 
 if settings.FILE_STORAGE == "local":
