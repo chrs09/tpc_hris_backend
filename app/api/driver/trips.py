@@ -3,6 +3,8 @@
 import json
 import logging
 import os
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from sqlalchemy.orm import Session
 from datetime import datetime, timedelta
@@ -31,16 +33,26 @@ router = APIRouter(prefix="/driver/trips", tags=["Driver Trips"])
 
 HUB_NAMES = {"Yard", "Plant", "Consolacion", "Test Hub"}
 
-LOG_DIR = "logs"
-os.makedirs(LOG_DIR, exist_ok=True)
+# =========================
+# DRIVER TRIP LOGGER
+# =========================
+
+BASE_DIR = Path(__file__).resolve().parents[3]
+
+LOG_DIR = BASE_DIR / "logs"
+LOG_DIR.mkdir(exist_ok=True)
 
 logger = logging.getLogger("driver.trips")
+logger.setLevel(logging.INFO)
 
 if not logger.handlers:
-    logger.setLevel(logging.INFO)
 
-    file_handler = logging.FileHandler(
-        os.path.join(LOG_DIR, "driver_trip_tracking.log"),
+    log_file = LOG_DIR / "driver_trip_tracking.log"
+
+    handler = RotatingFileHandler(
+        log_file,
+        maxBytes=5 * 1024 * 1024,   # 5 MB
+        backupCount=5,
         encoding="utf-8",
     )
 
@@ -48,8 +60,11 @@ if not logger.handlers:
         "%(asctime)s | %(levelname)s | %(message)s"
     )
 
-    file_handler.setFormatter(formatter)
-    logger.addHandler(file_handler)
+    handler.setFormatter(formatter)
+
+    logger.addHandler(handler)
+
+    logger.propagate = False
 
 
 class StartTripRequest(BaseModel):
@@ -698,7 +713,15 @@ def track_trip_location(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
-    # Validate trip
+
+    logger.info("=" * 80)
+    logger.info("TRACK REQUEST")
+    logger.info("Trip ID: %s", trip_id)
+    logger.info("Current User: %s", current_user.id)
+    logger.info("Created At: %s", payload.created_at)
+    logger.info("Latitude: %s", payload.lat)
+    logger.info("Longitude: %s", payload.long)
+
     trip = (
         db.query(Trip)
         .filter(
@@ -709,8 +732,34 @@ def track_trip_location(
         .first()
     )
 
+    logger.info("Trip Found: %s", "YES" if trip else "NO")
+
     if not trip:
-        raise HTTPException(status_code=404, detail="Active trip not found.")
+
+        driver_trips = (
+            db.query(Trip)
+            .filter(Trip.driver_id == current_user.id)
+            .all()
+        )
+
+        logger.info("Driver has %s trip(s)", len(driver_trips))
+
+        for t in driver_trips:
+            logger.info(
+                "Trip -> id=%s status=%s start=%s end=%s",
+                t.id,
+                t.status,
+                t.start_time,
+                t.end_time,
+            )
+
+        logger.error("TRACK REJECTED")
+        logger.info("=" * 80)
+
+        raise HTTPException(
+            status_code=404,
+            detail="Active trip not found.",
+        )
 
     gps_log = GPSLog(
         trip_id=trip.id,
@@ -726,19 +775,12 @@ def track_trip_location(
     db.add(gps_log)
     db.commit()
 
-    logger.info(
-        "[TRACK] trip_id=%s lat=%s long=%s accuracy=%s speed=%s created_at=%s",
-        trip.id,
-        payload.lat,
-        payload.long,
-        payload.accuracy,
-        payload.speed,
-        payload.created_at,
-    )
+    logger.info("GPS LOG SAVED")
+    logger.info("=" * 80)
 
-    return {"message": "Tracking saved"}
-
-
+    return {
+        "message": "Tracking saved"
+    }
 # =========================
 # COMPLETE TRIP
 # =========================
