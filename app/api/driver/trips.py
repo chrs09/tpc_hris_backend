@@ -713,74 +713,118 @@ def track_trip_location(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
+    logger.info("=" * 100)
+    logger.info("TRACK REQUEST RECEIVED")
+    logger.info("Trip ID        : %s", trip_id)
+    logger.info("Driver ID      : %s", current_user.id)
+    logger.info("Latitude       : %s", payload.lat)
+    logger.info("Longitude      : %s", payload.long)
+    logger.info("Accuracy       : %s", payload.accuracy)
+    logger.info("Speed          : %s", payload.speed)
+    logger.info("Client Time    : %s", payload.created_at)
 
-    logger.info("=" * 80)
-    logger.info("TRACK REQUEST")
-    logger.info("Trip ID: %s", trip_id)
-    logger.info("Current User: %s", current_user.id)
-    logger.info("Created At: %s", payload.created_at)
-    logger.info("Latitude: %s", payload.lat)
-    logger.info("Longitude: %s", payload.long)
+    try:
 
-    trip = (
-        db.query(Trip)
-        .filter(
-            Trip.id == trip_id,
-            Trip.driver_id == current_user.id,
-            Trip.status == TripStatus.ACTIVE,
-        )
-        .first()
-    )
+        logger.info("Searching ACTIVE trip...")
 
-    logger.info("Trip Found: %s", "YES" if trip else "NO")
-
-    if not trip:
-
-        driver_trips = (
+        trip = (
             db.query(Trip)
-            .filter(Trip.driver_id == current_user.id)
-            .all()
+            .filter(
+                Trip.id == trip_id,
+                Trip.driver_id == current_user.id,
+                Trip.status == TripStatus.ACTIVE,
+            )
+            .first()
         )
 
-        logger.info("Driver has %s trip(s)", len(driver_trips))
+        logger.info("Trip Found     : %s", "YES" if trip else "NO")
 
-        for t in driver_trips:
-            logger.info(
-                "Trip -> id=%s status=%s start=%s end=%s",
-                t.id,
-                t.status,
-                t.start_time,
-                t.end_time,
+        # ---------------------------------------------------------
+        # Trip not found
+        # ---------------------------------------------------------
+        if not trip:
+
+            logger.warning("ACTIVE trip not found.")
+            logger.info("Dumping all trips of current driver...")
+
+            driver_trips = (
+                db.query(Trip)
+                .filter(Trip.driver_id == current_user.id)
+                .order_by(Trip.id.desc())
+                .all()
             )
 
-        logger.error("TRACK REJECTED")
-        logger.info("=" * 80)
+            logger.info("Driver Trip Count : %s", len(driver_trips))
 
-        raise HTTPException(
-            status_code=404,
-            detail="Active trip not found.",
+            if len(driver_trips) == 0:
+                logger.warning("Driver has NO trips.")
+            else:
+                for t in driver_trips:
+                    logger.info(
+                        "[Trip] id=%s | status=%s | start=%s | end=%s",
+                        t.id,
+                        t.status,
+                        t.start_time,
+                        t.end_time,
+                    )
+
+            logger.error("TRACK REQUEST REJECTED")
+            logger.info("=" * 100)
+
+            raise HTTPException(
+                status_code=404,
+                detail="Active trip not found.",
+            )
+
+        # ---------------------------------------------------------
+        # Save GPS Log
+        # ---------------------------------------------------------
+
+        logger.info("Creating GPSLog object...")
+
+        gps_log = GPSLog(
+            trip_id=trip.id,
+            trip_stop_id=None,
+            action_type=GPSActionType.TRACK,
+            actual_lat=payload.lat,
+            actual_long=payload.long,
+            accuracy=payload.accuracy,
+            speed=payload.speed,
+            created_at=payload.created_at or datetime.utcnow(),
         )
 
-    gps_log = GPSLog(
-        trip_id=trip.id,
-        trip_stop_id=None,
-        action_type=GPSActionType.TRACK,
-        actual_lat=payload.lat,
-        actual_long=payload.long,
-        accuracy=payload.accuracy,
-        speed=payload.speed,
-        created_at=payload.created_at or datetime.utcnow(),
-    )
+        db.add(gps_log)
 
-    db.add(gps_log)
-    db.commit()
+        logger.info("Committing GPS log...")
 
-    logger.info("GPS LOG SAVED")
-    logger.info("=" * 80)
+        db.commit()
 
-    return {
-        "message": "Tracking saved"
-    }
+        logger.info("Commit successful.")
+
+        logger.info("GPS Log ID     : %s", gps_log.id)
+        logger.info("Trip ID        : %s", gps_log.trip_id)
+
+        logger.info("TRACK REQUEST COMPLETED")
+        logger.info("=" * 100)
+
+        return {
+            "message": "Tracking saved"
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        logger.exception("TRACK ENDPOINT CRASHED")
+
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+        raise
+
+
 # =========================
 # COMPLETE TRIP
 # =========================
