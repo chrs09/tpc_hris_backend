@@ -2,6 +2,7 @@
 
 import json
 import logging
+import os
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from sqlalchemy.orm import Session
 from datetime import datetime, timedelta
@@ -29,7 +30,26 @@ from app.services.notification_service import create_notification
 router = APIRouter(prefix="/driver/trips", tags=["Driver Trips"])
 
 HUB_NAMES = {"Yard", "Plant", "Consolacion", "Test Hub"}
+
+LOG_DIR = "logs"
+os.makedirs(LOG_DIR, exist_ok=True)
+
 logger = logging.getLogger("driver.trips")
+
+if not logger.handlers:
+    logger.setLevel(logging.INFO)
+
+    file_handler = logging.FileHandler(
+        os.path.join(LOG_DIR, "driver_trip_tracking.log"),
+        encoding="utf-8",
+    )
+
+    formatter = logging.Formatter(
+        "%(asctime)s | %(levelname)s | %(message)s"
+    )
+
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
 
 
 class StartTripRequest(BaseModel):
