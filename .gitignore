@@ -18,3 +18,8 @@ venv/
 .DS_Store
 
 uploads/
+
+logs/*
+!logs/.gitkeep
+
+*.log
