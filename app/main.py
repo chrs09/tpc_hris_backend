@@ -64,6 +64,8 @@ allowed_origins = [
     "http://18.142.183.226",
     "https://portal.tytanprime.net",
     "http://portal.tytanprime.net",
+
+    "http://192.168.1.141",
 ]
 
 app.add_middleware(
