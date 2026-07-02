@@ -8,7 +8,17 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.core.config import settings
-from app.api import health, auth, employees, attendance, dashboard, reminder, users, map, debugger
+from app.api import (
+    health,
+    auth,
+    employees,
+    attendance,
+    dashboard,
+    reminder,
+    users,
+    map,
+    debugger,
+)
 from app.api.payroll import overtime_approval
 from app.api import schedule_template as schedule_template_router
 from app.api.driver import trips
@@ -64,8 +74,10 @@ allowed_origins = [
     "http://18.142.183.226",
     "https://portal.tytanprime.net",
     "http://portal.tytanprime.net",
-
     "http://192.168.1.141",
+
+    # Vercel
+    "https://tpc-hris-frontend.vercel.app",
 ]
 
 app.add_middleware(
@@ -79,6 +91,7 @@ app.add_middleware(
         r"10\.\d+\.\d+\.\d+|"
         r"172\.(1[6-9]|2\d|3[0-1])\.\d+\.\d+"
         r")(:\d+)?$"
+        r"|^https://.*\.vercel\.app$"
     ),
     allow_credentials=True,
     allow_methods=["*"],

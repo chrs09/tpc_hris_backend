@@ -2,7 +2,6 @@
 
 import json
 import logging
-import os
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
@@ -51,14 +50,12 @@ if not logger.handlers:
 
     handler = RotatingFileHandler(
         log_file,
-        maxBytes=5 * 1024 * 1024,   # 5 MB
+        maxBytes=5 * 1024 * 1024,  # 5 MB
         backupCount=5,
         encoding="utf-8",
     )
 
-    formatter = logging.Formatter(
-        "%(asctime)s | %(levelname)s | %(message)s"
-    )
+    formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
 
     handler.setFormatter(formatter)
 
@@ -807,14 +804,12 @@ def track_trip_location(
         logger.info("TRACK REQUEST COMPLETED")
         logger.info("=" * 100)
 
-        return {
-            "message": "Tracking saved"
-        }
+        return {"message": "Tracking saved"}
 
     except HTTPException:
         raise
 
-    except Exception as e:
+    except Exception:
         logger.exception("TRACK ENDPOINT CRASHED")
 
         try:
