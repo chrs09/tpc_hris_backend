@@ -319,11 +319,11 @@ def get_active_trip(
     # =========================
     # 6️⃣ Final Response
     # =========================
-    return {
+    return api_response({
         "active_trip": active_trip_data,
         "latest_stop": latest_stop_data,
         "has_open_stop": has_open_stop,
-    }
+    })
 
 
 # =========================

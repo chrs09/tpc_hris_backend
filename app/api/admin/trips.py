@@ -16,14 +16,9 @@ from app.models.user import User
 from app.models.employees import Employee
 from app.models.trip_helper import TripHelper
 from app.models.files import File
+from app.utils.timezone import utc_to_ph
 
 router = APIRouter(prefix="/admin/trips", tags=["Admin Trips"])
-
-
-def to_ph_time(dt):
-    if not dt:
-        return None
-    return dt + timedelta(hours=8)
 
 
 # =========================
@@ -66,9 +61,7 @@ def get_pending_trips(
             "id": trip.id,
             "ticket_no": trip.ticket_no,
             "status": trip.status.value,
-            "start_time": (trip.start_time + timedelta(hours=8)).strftime(
-                "%Y-%m-%d %I:%M:%S %p"
-            ),
+            "start_time": utc_to_ph(trip.start_time).strftime("%Y-%m-%d %I:%M:%S %p"),
             "stops_count": db.query(TripStop)
             .filter(TripStop.trip_id == trip.id)
             .count(),
@@ -102,9 +95,7 @@ def get_active_trips(
                 trip.trip_rate_profile.profile_name if trip.trip_rate_profile else "-"
             ),
             "status": trip.status.value,
-            "start_time": (trip.start_time + timedelta(hours=8)).strftime(
-                "%Y-%m-%d %I:%M:%S %p"
-            ),
+            "start_time": utc_to_ph(trip.start_time).strftime("%Y-%m-%d %I:%M:%S %p"),
             "username": trip.driver.username,  # 👈 THIS IS ALL YOU NEED
         }
         for trip in trips
@@ -282,7 +273,8 @@ def review_trip(
     def to_ph(dt):
         if not dt:
             return None
-        return (dt + timedelta(hours=8)).strftime("%b %d, %Y, %I:%M %p")
+
+        return utc_to_ph(dt).strftime("%b %d, %Y, %I:%M %p")
 
     # SORT STOPS BY CHECK-IN TIME (important for route drawing)
     sorted_stops = sorted(trip.stops, key=lambda x: x.check_in_time or datetime.min)

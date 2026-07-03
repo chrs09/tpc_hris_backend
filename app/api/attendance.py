@@ -34,6 +34,8 @@ from app.schemas.attendance import (
     AttendanceTimeAdjust,
 )
 
+from app.utils.timezone import utc_to_ph_date
+
 router = APIRouter(prefix="/attendance", tags=["Attendance"])
 
 logger = logging.getLogger("attendance")
@@ -279,7 +281,7 @@ def sync_trip_attendance_records(db: Session, user_id: int):
     created_count = 0
 
     for trip in trips:
-        trip_date = trip.start_time.date()
+        trip_date = utc_to_ph_date(trip.start_time)
 
         driver_user = db.query(User).filter(User.id == trip.driver_id).first()
 
@@ -539,7 +541,13 @@ def get_attendance_records(
             .filter(
                 User.employee_id == record.employee_id,
                 Trip.status.in_(valid_statuses),
-                func.date(Trip.start_time) == record.attendance_date,
+                func.date(
+                    func.convert_tz(
+                        Trip.start_time,
+                        "+00:00",
+                        "+08:00",
+                    )
+                ) == record.attendance_date,
             )
             .all()
         )
@@ -554,7 +562,13 @@ def get_attendance_records(
             .filter(
                 TripHelper.helper_id == record.employee_id,
                 Trip.status.in_(valid_statuses),
-                func.date(Trip.start_time) == record.attendance_date,
+                func.date(
+                    func.convert_tz(
+                        Trip.start_time,
+                        "+00:00",
+                        "+08:00",
+                    )
+                ) == record.attendance_date,
             )
             .all()
         )
