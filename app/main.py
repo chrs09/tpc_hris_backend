@@ -78,7 +78,8 @@ allowed_origins = [
 
     # Vercel
     "https://tpc-hris-frontend.vercel.app",
-]
+    "https://tpcportal.tytanprime.net",
+]   
 
 app.add_middleware(
     CORSMiddleware,
