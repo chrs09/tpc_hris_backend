@@ -483,25 +483,55 @@ def bulk_mixed_attendance(
 def get_attendance_records(
     skip: int = 0,
     limit: int = 5000,
+
+    department: str | None = None,
+    attendance_date: date | None = None,
+
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     sync_trip_attendance_records(db, current_user.id)
 
-    records = (
+    query = (
         db.query(AttendanceRecord)
+        .join(Employee, Employee.id == AttendanceRecord.employee_id)
+    )
+
+    if department and department.lower() != "all":
+        query = query.filter(Employee.department == department)
+    
+    if attendance_date:
+        query = query.filter(AttendanceRecord.attendance_date == attendance_date)
+
+    records = (
+        query
         .order_by(AttendanceRecord.attendance_date.desc())
         .offset(skip)
         .limit(limit)
         .all()
     )
 
+    # added optimization
+
+    employee_ids = list({record.employee_id for record in records})
+
+    employees = (
+        db.query(Employee)
+        .filter(Employee.id.in_(employee_ids))
+        .all()
+    )
+
+    employee_map = {
+        employee.id: employee
+        for employee in employees
+    }
+
     valid_statuses = ["COMPLETED", "completed", "APPROVED", "approved"]
 
     response = []
 
     for record in records:
-        employee = db.query(Employee).filter(Employee.id == record.employee_id).first()
+        employee = employee_map.get(record.employee_id)
 
         employee_name = "Unknown Employee"
         employee_department = None
