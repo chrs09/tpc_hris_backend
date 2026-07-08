@@ -343,6 +343,39 @@ def review_trip(
     }
 
 
+@router.get("/completed")
+def get_completed_trips(
+    db: Session = Depends(get_db),
+    current_admin=Depends(get_current_admin),
+):
+    trips = (
+        db.query(Trip)
+        .options(joinedload(Trip.driver))
+        .filter(Trip.status == TripStatus.COMPLETED)
+        .order_by(Trip.end_time.desc())
+        .all()
+    )
+
+    return [
+        {
+            "id": trip.id,
+            "ticket_no": trip.ticket_no,
+            "status": trip.status.value,
+            "start_time": utc_to_ph(trip.start_time).strftime("%Y-%m-%d %I:%M:%S %p"),
+            "end_time": (
+                utc_to_ph(trip.end_time).strftime("%Y-%m-%d %I:%M:%S %p")
+                if trip.end_time
+                else None
+            ),
+            "stops_count": db.query(TripStop)
+                .filter(TripStop.trip_id == trip.id)
+                .count(),
+            "username": trip.driver.username,
+        }
+        for trip in trips
+    ]
+
+
 @router.post("/{trip_id}/track-location")
 def track_location(
     trip_id: int,
