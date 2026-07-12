@@ -5,6 +5,7 @@ from typing import List
 from fastapi.params import Query
 from sqlalchemy import case
 from sqlalchemy.orm import Session
+from app.api import users
 from app.core.database import get_db
 
 from app.utils.response import api_response
@@ -112,10 +113,22 @@ def get_employees(
 
     employees = (
         db.query(Employee)
+        .outerjoin(
+            User,
+            User.employee_id == Employee.id,
+        )
         .filter(Employee.is_active == is_active)
-        .order_by(department_order, Employee.last_name.asc())
+        .order_by(
+            department_order,
+            Employee.last_name.asc(),
+        )
         .all()
     )
+
+    user_lookup = {
+        user.employee_id: user.id
+        for user in db.query(User).all()
+    }
 
     employee_ids = [emp.id for emp in employees]
 
@@ -142,6 +155,7 @@ def get_employees(
     response = [
         {
             "id": emp.id,
+            "user_id": user_lookup.get(emp.id),
             "first_name": emp.first_name,
             "middle_name": emp.middle_name,
             "last_name": emp.last_name,

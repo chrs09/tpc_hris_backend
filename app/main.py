@@ -23,13 +23,15 @@ from app.api.payroll import overtime_approval
 from app.api import schedule_template as schedule_template_router
 from app.api.driver import trips
 from app.api.admin import trips as admin_trips
-from app.api.admin import stores
+from app.api.admin import stores as stores
+from app.api.admin import dispatch as admin_dispatch
 from app.api.admin.applicants import router as admin_applicants_router
 from app.api.public.public_applicant import router as public_applicant_router
 from app.api.public.applicant_onboarding import router as applicant_onboarding_router
 from app.api.public.applicant_questions import router as applicant_questions_router
 from app.api.admin.applicant_questions import router as admin_applicant_questions_router
 from app.api.tripProfile import trip_maintenance as trip_maintenance_router
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -115,6 +117,7 @@ app.include_router(trip_maintenance_router.router, prefix="/api")
 
 app.include_router(admin_trips.router, prefix="/api")
 app.include_router(stores.router, prefix="/api")
+app.include_router(admin_dispatch.router, prefix="/api")
 app.include_router(admin_applicants_router)
 app.include_router(admin_applicant_questions_router)
 

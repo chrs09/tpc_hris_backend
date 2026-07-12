@@ -128,3 +128,9 @@ class Employee(Base):
         "ScheduleTemplate",
         back_populates="employees",
     )
+
+    dispatch_assignments = relationship(
+        "DispatchHelper",
+        back_populates="helper",
+        cascade="all, delete-orphan",
+    )

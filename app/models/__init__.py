@@ -44,3 +44,6 @@ from .vehicle_unit import VehicleUnit as VehicleUnit
 
 # Administrator related models
 from .holiday import Holiday as Holiday
+from .dispatch import Dispatch as Dispatch
+from .dispatch_item import DispatchItem as DispatchItem
+from .dispatch_helpers import DispatchHelper as DispatchHelper

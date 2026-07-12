@@ -43,6 +43,7 @@ class EmployeeResponse(BaseModel):
     employment_type: str | None = None
     payroll_type: str | None = None
     schedule_template_id: int | None = None
+    user_id: int | None = None
     # created_by_user_id: Optional[int]  # Make this optional in case it's not always returned
     # created_by_user_id: int
 

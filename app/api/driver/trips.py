@@ -4,7 +4,7 @@ import json
 import logging
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query
 from sqlalchemy.orm import Session
 from datetime import datetime, timedelta
 from pydantic import BaseModel
@@ -27,6 +27,14 @@ from app.models.TripRate import TripRateProfile
 from app.models.trip_models import GPSActionType
 from app.services.gps_service import calculate_distance_meters
 from app.services.notification_service import create_notification
+from app.services.trip_payroll_service import (
+    to_ph,
+    now_ph,
+    period_key,
+    period_bounds,
+    next_period_key,
+    parse_cutoff_value,
+)
 
 router = APIRouter(prefix="/driver/trips", tags=["Driver Trips"])
 
@@ -1150,3 +1158,124 @@ def get_driver_profile(
         "position": employee.position,
         "email": employee.email,
     }
+
+    # wallet
+# =========================
+# WALLET - AVAILABLE CUTOFFS
+# =========================
+@router.get("/wallet/cutoffs")
+def get_wallet_cutoffs(
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    first_trip = (
+        db.query(Trip)
+        .filter(Trip.driver_id == current_user.id, Trip.status == TripStatus.COMPLETED)
+        .order_by(Trip.end_time.asc())
+        .first()
+    )
+
+    current_key = period_key(now_ph())
+
+    if not first_trip:
+        _, _, value, label = period_bounds(current_key)
+        return api_response([{"value": value, "label": label}])
+
+    cursor_key = period_key(to_ph(first_trip.end_time))  # UTC -> PH before keying
+
+    cutoffs = []
+    for _ in range(500):
+        _, _, value, label = period_bounds(cursor_key)
+        cutoffs.append({"value": value, "label": label})
+
+        if cursor_key >= current_key:
+            break
+
+        cursor_key = next_period_key(cursor_key)
+
+    cutoffs.reverse()
+    return api_response(cutoffs)
+
+
+@router.get("/wallet")
+def get_wallet(
+    cutoff: str | None = Query(None),
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    if cutoff:
+        try:
+            cursor_key = parse_cutoff_value(cutoff)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid cutoff format.")
+    else:
+        cursor_key = period_key(now_ph())
+
+    start_utc, end_utc, cutoff_value, label = period_bounds(cursor_key)
+
+    trips = (
+        db.query(Trip)
+        .filter(
+            Trip.driver_id == current_user.id,
+            Trip.status == TripStatus.COMPLETED,
+            Trip.end_time >= start_utc,
+            Trip.end_time <= end_utc,
+        )
+        .order_by(Trip.start_time.asc())
+        .all()
+    )
+
+    trips_by_day: dict[str, list[Trip]] = {}
+    for t in trips:
+        day_key = to_ph(t.start_time).strftime("%Y-%m-%d")  # group by start_time's PH day
+        trips_by_day.setdefault(day_key, []).append(t)
+
+    total_earnings = 0.0
+    raw_transactions = []
+
+    for day_key, day_trips in trips_by_day.items():
+        for idx, trip in enumerate(day_trips):
+            profile = trip.trip_rate_profile
+            if not profile:
+                continue
+
+            rate = float(
+                profile.driver_first_trip_rate
+                if idx == 0
+                else profile.driver_next_trip_rate
+            )
+            total_earnings += rate
+
+            raw_transactions.append({
+                "id": str(trip.id),
+                "shipment": f"Shipment #{trip.ticket_no}",
+                "trip_label": f"Trip #{idx + 1}",
+                "start_time": trip.start_time,
+                "end_time": trip.end_time,
+                "sort_time": trip.end_time,
+                "amount": rate,
+                "cutoff": cutoff_value,
+            })
+
+    raw_transactions.sort(key=lambda t: t["sort_time"], reverse=True)
+
+    transactions = [
+        {
+            "id": t["id"],
+            "shipment": t["shipment"],
+            "trip": t["trip_label"],
+            "start_time": to_ph(t["start_time"]).strftime("%b %d • %I:%M %p"),
+            "end_time": to_ph(t["end_time"]).strftime("%b %d • %I:%M %p"),
+            "amount": t["amount"],
+            "cutoff": t["cutoff"],
+        }
+        for t in raw_transactions
+    ]
+
+    return api_response({
+        "cutoff_value": cutoff_value,
+        "cutoff_label": label,
+        "earnings": round(total_earnings, 2),
+        "trips": len(trips),
+        "transactions": transactions,
+    })
