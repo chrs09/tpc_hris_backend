@@ -70,6 +70,14 @@ class StoreUpdateRequest(BaseModel):
     class Config:
         orm_mode = True
 
+class BulkStoreItem(BaseModel):
+    name: str = Field(..., min_length=1)
+    profile: str
+
+
+class BulkStoreCreateRequest(BaseModel):
+    stores: List[BulkStoreItem]
+
 
 def validate_profile(profile: str) -> None:
     if profile not in STORE_PROFILE_CHOICES:
@@ -375,6 +383,156 @@ def get_trip_rate_profiles_for_admin(
         for profile in profiles
     ]
 
+
+# ==========================================
+# BULK CREATE STORES
+# ==========================================
+@router.post("/bulk")
+def bulk_create_stores(
+    payload: BulkStoreCreateRequest,
+    db: Session = Depends(get_db),
+    current_admin=Depends(get_current_admin),
+):
+    if not payload.stores:
+        raise HTTPException(
+            status_code=400,
+            detail="No stores provided."
+        )
+
+    # Load active profiles once instead of querying for every store.
+    profiles = (
+        db.query(TripRateProfile)
+        .filter(TripRateProfile.is_active.is_(True))
+        .all()
+    )
+
+    profile_map = {
+        profile.code.upper(): profile
+        for profile in profiles
+        if profile.code
+    }
+
+    created = []
+    skipped = []
+    failed = []
+
+    # Keep track of names already processed in this request.
+    processed_names = set()
+
+    for item in payload.stores:
+        store_name = item.name.strip()
+        service_code = item.profile.strip().upper()
+
+        # --------------------------------------
+        # Validate name
+        # --------------------------------------
+        if not store_name:
+            failed.append({
+                "name": item.name,
+                "reason": "Store name is required."
+            })
+            continue
+
+        normalized_name = store_name.lower()
+
+        # --------------------------------------
+        # Duplicate inside uploaded JSON
+        # --------------------------------------
+        if normalized_name in processed_names:
+            skipped.append({
+                "name": store_name,
+                "reason": "Duplicate store in import."
+            })
+            continue
+
+        processed_names.add(normalized_name)
+
+        # --------------------------------------
+        # Temporary rule: DS -> DP
+        # --------------------------------------
+        if service_code == "DS":
+            service_code = "DP"
+
+        # --------------------------------------
+        # Find trip rate profile by code
+        # --------------------------------------
+        trip_rate_profile = profile_map.get(service_code)
+
+        if not trip_rate_profile:
+            failed.append({
+                "name": store_name,
+                "profile": service_code,
+                "reason": "Invalid or inactive trip rate profile."
+            })
+            continue
+
+        # --------------------------------------
+        # Check existing store
+        # --------------------------------------
+        existing_store = (
+            db.query(Store)
+            .filter(Store.name == store_name)
+            .first()
+        )
+
+        if existing_store:
+            skipped.append({
+                "name": store_name,
+                "reason": "Store already exists."
+            })
+            continue
+
+        # --------------------------------------
+        # Create pending-location store
+        # --------------------------------------
+        new_store = Store(
+            name=store_name,
+
+            # Pending coordinates
+            latitude=0,
+            longitude=0,
+
+            allowed_radius_meters=100,
+
+            # Take helper requirement from rate profile
+            required_helper=trip_rate_profile.helper_count or 0,
+
+            trip_rate_profile_id=trip_rate_profile.id,
+
+            # Legacy field
+            profile=trip_rate_profile.code,
+        )
+
+        db.add(new_store)
+
+        created.append({
+            "name": store_name,
+            "profile": trip_rate_profile.code,
+            "trip_rate_profile_id": trip_rate_profile.id,
+            "required_helper": trip_rate_profile.helper_count or 0,
+        })
+
+    try:
+        db.commit()
+
+    except Exception:
+        db.rollback()
+
+        raise HTTPException(
+            status_code=500,
+            detail="Bulk store import failed. No stores were committed."
+        )
+
+    return {
+        "message": "Bulk store import completed.",
+        "total_received": len(payload.stores),
+        "created_count": len(created),
+        "skipped_count": len(skipped),
+        "failed_count": len(failed),
+        "created": created,
+        "skipped": skipped,
+        "failed": failed,
+    }
 
 # Apply the same pattern to update_store: resolve trip_rate_profile_id the
 # same way, set both trip_rate_profile_id and the legacy profile field
