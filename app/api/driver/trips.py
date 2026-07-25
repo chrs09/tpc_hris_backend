@@ -2,10 +2,11 @@
 
 import json
 import logging
+import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from datetime import datetime, timedelta
 from pydantic import BaseModel
 from typing import List
@@ -15,6 +16,7 @@ from app.utils.response import api_response
 from app.schemas.trip import LocationRequest
 from app.core.dependencies import get_current_user
 from app.models.trips import Trip, TripStatus
+from app.models.trip_finance_review import TripFinanceReview, FinanceReviewStatus
 from app.models.trip_stops import TripStop, StopStatus
 from app.models.stores import Store
 from app.models.trip_helper import TripHelper
@@ -70,6 +72,40 @@ if not logger.handlers:
     logger.addHandler(handler)
 
     logger.propagate = False
+
+
+# =========================
+# WALLET DEBUG LOGGER (terminal, JSON)
+# =========================
+# Separate from `logger` above (which only writes to a file). This one
+# prints a single JSON object per line straight to stdout so you can
+# watch what the wallet endpoints matched/computed live in the terminal
+# while testing, e.g.:
+#   tail -f your_terminal | grep '"event": "wallet' (or just watch it scroll)
+wallet_logger = logging.getLogger("driver.wallet")
+wallet_logger.setLevel(logging.INFO)
+
+if not wallet_logger.handlers:
+
+    stream_handler = logging.StreamHandler(sys.stdout)
+
+    # Bare message only -- we already put everything (timestamp included)
+    # into the JSON payload itself, so the line stays valid/parseable JSON.
+    stream_handler.setFormatter(logging.Formatter("%(message)s"))
+
+    wallet_logger.addHandler(stream_handler)
+
+    wallet_logger.propagate = False
+
+
+def log_wallet_event(event: str, **fields):
+    """Emit one JSON line to the terminal for wallet debugging."""
+    payload = {
+        "event": event,
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        **fields,
+    }
+    wallet_logger.info(json.dumps(payload, default=str))
 
 
 class StartTripRequest(BaseModel):
@@ -209,6 +245,69 @@ def get_trip_rate_profiles(
     ]
 
 
+
+# =========================
+# GET AVAILABLE STORES
+# =========================
+
+# Hub/origin locations that drivers pick up from, not deliver to --
+# these should not appear in the "select store" list on Start Trip.
+#
+# NOTE: matching by name is a quick fix. If these get renamed, this
+# silently stops excluding them. Consider adding a proper boolean
+# column (e.g. Store.is_hub) instead of relying on name matching.
+EXCLUDED_STORE_NAMES = {"plant", "test hub", "yard", "consolacion"}
+
+
+@router.get("/available-stores")
+def get_available_stores(
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    stores = db.query(Store).order_by(Store.name.asc()).all()
+
+    results = []
+
+    for store in stores:
+        if store.name.strip().lower() in EXCLUDED_STORE_NAMES:
+            continue
+
+        # Preferred path: direct FK, set by the migration/backfill or by
+        # the updated create_store/update_store endpoints going forward.
+        if store.trip_rate_profile_id and store.trip_rate_profile:
+            profile = store.trip_rate_profile
+
+            results.append(
+                {
+                    "id": store.id,
+                    "name": store.name,
+                    "latitude": store.latitude,
+                    "longitude": store.longitude,
+                    "allowed_radius_meters": store.allowed_radius_meters,
+                    "trip_rate_profile_id": profile.id,
+                    "profile_name": profile.profile_name,
+                    "helper_count": profile.helper_count,
+                }
+            )
+            continue
+
+        # Fallback path: legacy stores not yet backfilled. Remove this
+        # branch once every store has trip_rate_profile_id populated
+        # (check with the audit query in the migration notes).
+        results.append(
+            {
+                "id": store.id,
+                "name": store.name,
+                "latitude": store.latitude,
+                "longitude": store.longitude,
+                "allowed_radius_meters": store.allowed_radius_meters,
+                "trip_rate_profile_id": None,
+                "profile_name": None,
+                "helper_count": store.required_helper,
+            }
+        )
+
+    return results
 # =========================
 # GET ACTIVE TRIP
 # =========================
@@ -339,9 +438,9 @@ def get_active_trip(
 # =========================
 @router.post("/start")
 def start_trip(
-    ticket_no: str = Form(...),
+    shipment_no: str = Form(...),
     vehicle_unit_id: int = Form(...),
-    trip_rate_profile_id: int = Form(...),
+    store_id: int = Form(...),  # NEW: destination store selected by driver
     lat: float = Form(...),
     long: float = Form(...),
     photo: UploadFile = File(...),
@@ -375,18 +474,42 @@ def start_trip(
     if not vehicle:
         raise HTTPException(status_code=400, detail="Selected vehicle is unavailable.")
 
-    # Trip Profile
+    # ---------------------------------------
+    # DESTINATION STORE + TRIP RATE PROFILE
+    #
+    # trip_rate_profile_id is no longer trusted from the client -- it's
+    # derived here from the store the driver actually selected, so a
+    # store that isn't yet linked to a profile fails clearly instead of
+    # silently sending a bad/missing ID from the app.
+    # ---------------------------------------
+    destination_store = db.query(Store).filter(Store.id == store_id).first()
+
+    if not destination_store:
+        raise HTTPException(status_code=400, detail="Selected store not found.")
+
+    if not destination_store.trip_rate_profile_id:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"'{destination_store.name}' has no trip rate profile linked. "
+                "Please contact an admin to fix this store's setup."
+            ),
+        )
+
     profile = (
         db.query(TripRateProfile)
         .filter(
-            TripRateProfile.id == trip_rate_profile_id,
+            TripRateProfile.id == destination_store.trip_rate_profile_id,
             TripRateProfile.is_active.is_(True),
         )
         .first()
     )
 
     if not profile:
-        raise HTTPException(status_code=400, detail="Invalid trip rate profile.")
+        raise HTTPException(
+            status_code=400,
+            detail="This store's trip rate profile is invalid or inactive.",
+        )
 
     # ---------------------------------------
     # 1️⃣ Prevent multiple ACTIVE trips
@@ -401,18 +524,29 @@ def start_trip(
         raise HTTPException(status_code=400, detail="You already have an active trip.")
 
     # ---------------------------------------
-    # 2️⃣ Validate ticket
+    # 2️⃣ Validate shipment number
+    #
+    # NOTE: the Trip table's column is still named `ticket_no` on purpose --
+    # renaming it would require a DB migration and could break existing
+    # reports/finance code that reads Trip.ticket_no. The API now accepts
+    # `shipment_no` from the client and maps it to that same column.
     # ---------------------------------------
-    if not ticket_no or not ticket_no.strip():
-        raise HTTPException(status_code=400, detail="Ticket number is required.")
+    if not shipment_no or not shipment_no.strip():
+        raise HTTPException(status_code=400, detail="Shipment number is required.")
 
-    existing_ticket = db.query(Trip).filter(Trip.ticket_no == ticket_no).first()
+    shipment_no = shipment_no.strip()
+
+    existing_ticket = db.query(Trip).filter(Trip.ticket_no == shipment_no).first()
 
     if existing_ticket:
-        raise HTTPException(status_code=400, detail="Ticket number already exists.")
+        raise HTTPException(status_code=400, detail="Shipment number already exists.")
 
     # ---------------------------------------
     # 3️⃣ Validate Origin GPS
+    #
+    # Origin is the hub the driver is physically at right now (Yard,
+    # Plant, Test Hub, Consolacion, etc.) -- determined by GPS proximity,
+    # independent of the destination store selected above.
     # ---------------------------------------
     stores = db.query(Store).all()
 
@@ -495,7 +629,7 @@ def start_trip(
         new_trip = Trip(
             driver_id=current_user.id,
             origin_store_id=closest_store.id,
-            ticket_no=ticket_no.strip(),
+            ticket_no=shipment_no,
             vehicle_unit_id=vehicle.id,
             trip_rate_profile_id=profile.id,
             status=TripStatus.ACTIVE,
@@ -510,7 +644,10 @@ def start_trip(
         # Upload start photo
         file_service = FileService()
 
-        photo_url = file_service.upload_trip_start_photo(photo, new_trip.id)
+        photo_url = file_service.upload_trip_start_photo(   
+            photo,
+            new_trip.id,
+        )
 
         trip_file = FileModel(
             entity_type="trip",
@@ -545,7 +682,6 @@ def start_trip(
         "origin": closest_store.name,
         "helpers_assigned": len(helper_objects),
     }
-
 
 # =========================
 # CHECK-IN
@@ -671,7 +807,9 @@ def check_in(
 def check_out(
     trip_id: int,
     stop_id: int,
-    payload: LocationRequest,
+    lat: float = Form(...),
+    long: float = Form(...),
+    proof_photo: UploadFile = File(...),
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
@@ -689,9 +827,7 @@ def check_out(
         raise HTTPException(status_code=400, detail="Must check-in first")
 
     # if lat_out and long_out not matches the lat_in and long_in, then reject the check-out
-    distance = calculate_distance_meters(
-        payload.lat, payload.long, stop.lat_in, stop.long_in
-    )
+    distance = calculate_distance_meters(lat, long, stop.lat_in, stop.long_in)
     if distance > 150:
         raise HTTPException(
             status_code=400,
@@ -700,13 +836,36 @@ def check_out(
 
     stop.status = StopStatus.CHECKED_OUT
     stop.check_out_time = datetime.utcnow()
-    stop.lat_out = payload.lat
-    stop.long_out = payload.long
+    stop.lat_out = lat
+    stop.long_out = long
+
+    db.flush()
+
+    # Upload delivery proof photo
+    # TODO: confirm the actual FileService method name -- I've matched
+    # the naming pattern from start_trip's upload_trip_start_photo, but
+    # your FileService may name this differently. Adjust if so.
+    file_service = FileService()
+
+    photo_url = file_service.upload_trip_pod_photo(
+        proof_photo,
+        trip_id=trip_id,
+        stop_id=stop.id,
+    )
+
+    stop_file = FileModel(
+        entity_type="trip_stop",
+        entity_id=stop.id,
+        document_type="DELIVERY_PROOF_PHOTO",
+        file_url=photo_url,
+        uploaded_by=current_user.id,
+    )
+
+    db.add(stop_file)
 
     db.commit()
 
     return {"message": "Checked out successfully."}
-
 
 # =========================
 # TRACK TRIP LOCATION
@@ -834,7 +993,9 @@ def track_trip_location(
 @router.post("/{trip_id}/complete")
 def complete_trip(
     trip_id: int,
-    payload: LocationRequest,
+    lat: float = Form(...),
+    long: float = Form(...),
+    stamped_invoice_photo: UploadFile = File(...),
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
@@ -884,7 +1045,7 @@ def complete_trip(
 
     for store in hub_stores:
         distance = calculate_distance_meters(
-            payload.lat, payload.long, store.latitude, store.longitude
+            lat, long, store.latitude, store.longitude
         )
 
         if distance <= store.allowed_radius_meters and distance < min_distance:
@@ -911,8 +1072,8 @@ def complete_trip(
         trip_stop_id=None,
         action_type=GPSActionType.TRACK,
         # action_type=GPSActionType.COMPLETED,
-        actual_lat=payload.lat,
-        actual_long=payload.long,
+        actual_lat=lat,
+        actual_long=long,
         created_at=completion_time,
     )
 
@@ -924,8 +1085,33 @@ def complete_trip(
     if trip.vehicle_unit:
         trip.vehicle_unit.is_available = True
 
+    db.flush()
+
     # ---------------------------------------
-    # 5️⃣ Notify Admin
+    # 5️⃣ Upload stamped invoice photo
+    #
+    # TODO: same as check_out -- confirm the actual FileService method
+    # name against your real service class.
+    # ---------------------------------------
+    file_service = FileService()
+
+    photo_url = file_service.upload_trip_end_photo(
+        stamped_invoice_photo,
+        trip.id,
+    )
+
+    trip_file = FileModel(
+        entity_type="trip",
+        entity_id=trip.id,
+        document_type="STAMPED_INVOICE_PHOTO",
+        file_url=photo_url,
+        uploaded_by=current_user.id,
+    )
+
+    db.add(trip_file)
+
+    # ---------------------------------------
+    # 6️⃣ Notify Admin
     # ---------------------------------------
     create_notification(
         db=db,
@@ -938,7 +1124,6 @@ def complete_trip(
     db.commit()
 
     return {"message": "Trip submitted for approval.", "completed_at": valid_hub.name}
-
 
 # =========================
 # TRIP HELPERS
@@ -1093,18 +1278,46 @@ def driver_trip_summary(
 # GET DRIVER TRIPS LIST
 # =========================
 @router.get("/my-trips")
-def get_my_trips(db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+def get_my_trips(
+    cutoff: str | None = Query(None),
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    query = db.query(Trip).options(
+        joinedload(Trip.stops).joinedload(TripStop.store)
+    ).filter(Trip.driver_id == current_user.id)
 
-    trips = (
-        db.query(Trip)
-        .filter(Trip.driver_id == current_user.id)
-        .order_by(Trip.start_time.desc())
-        .all()
-    )
+    if cutoff:
+        try:
+            cursor_key = parse_cutoff_value(cutoff)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid cutoff format.")
+
+        # Same period_bounds() the wallet uses, and the same field
+        # (start_time) the cutoff list itself is anchored on -- keeps
+        # "which trips fall in period X" consistent everywhere.
+        start_utc, end_utc, _, _ = period_bounds(cursor_key)
+
+        query = query.filter(
+            Trip.start_time >= start_utc,
+            Trip.start_time <= end_utc,
+        )
+
+    trips = query.order_by(Trip.start_time.desc()).all()
 
     results = []
 
     for trip in trips:
+        # Delivery stores, in stop order, de-duplicated (a trip can have
+        # multiple stops at the same store).
+        ordered_stops = sorted(
+            trip.stops, key=lambda s: s.check_in_time or datetime.min
+        )
+        stores = []
+        for stop in ordered_stops:
+            if stop.store and stop.store.name not in stores:
+                stores.append(stop.store.name)
+
         results.append(
             {
                 "id": trip.id,
@@ -1120,6 +1333,7 @@ def get_my_trips(db: Session = Depends(get_db), current_user=Depends(get_current
                 ),
                 "start_time": trip.start_time,
                 "end_time": trip.end_time,
+                "stores": stores,
             }
         )
 
@@ -1127,8 +1341,53 @@ def get_my_trips(db: Session = Depends(get_db), current_user=Depends(get_current
 
 
 # =========================
-# DRIVER PROFILE
+# GET SINGLE TRIP (driver's own trip detail / review screen)
 # =========================
+# NOTE: nested under /trip-detail/ (not a bare "/{trip_id}") so this can't
+# collide with any other single-segment GET route already registered on
+# this router.
+@router.get("/trip-detail/{trip_id}")
+def get_trip_detail(
+    trip_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    trip = (
+        db.query(Trip)
+        .options(joinedload(Trip.stops).joinedload(TripStop.store))
+        .filter(Trip.id == trip_id, Trip.driver_id == current_user.id)
+        .first()
+    )
+
+    if not trip:
+        raise HTTPException(status_code=404, detail="Trip not found.")
+
+    ordered_stops = sorted(
+        trip.stops, key=lambda s: s.check_in_time or datetime.min
+    )
+    stores = []
+    for stop in ordered_stops:
+        if stop.store and stop.store.name not in stores:
+            stores.append(stop.store.name)
+
+    return api_response(
+        {
+            "id": trip.id,
+            "ticket_no": trip.ticket_no,
+            "vehicle": (trip.vehicle_unit.unit_code if trip.vehicle_unit else None),
+            "trip_profile": (
+                trip.trip_rate_profile.profile_name
+                if trip.trip_rate_profile
+                else None
+            ),
+            "status": (
+                trip.status.value if hasattr(trip.status, "value") else trip.status
+            ),
+            "start_time": trip.start_time,
+            "end_time": trip.end_time,
+            "stores": stores,
+        }
+    )
 @router.get("/profile")
 def get_driver_profile(
     db: Session = Depends(get_db),
@@ -1161,6 +1420,37 @@ def get_driver_profile(
 
     # wallet
 # =========================
+# WALLET - SETTLEMENT DATE SOURCE
+# =========================
+# A trip only counts toward the driver's wallet once its
+# TripFinanceReview has been fully approved. Which date within that
+# review workflow determines the payroll cutoff is controlled by a
+# single switch here, so it can be changed later without touching
+# the query logic below.
+#
+#   "coordinator" -> TripFinanceReview.coordinator_settlement_date
+#   "office"      -> TripFinanceReview.office_reviewed_at
+#   "finance"     -> TripFinanceReview.approved_at
+WALLET_SETTLEMENT_SOURCE = "coordinator"
+
+WALLET_SETTLEMENT_ATTR = {
+    "coordinator": "coordinator_settlement_date",
+    "office": "office_reviewed_at",
+    "finance": "approved_at",
+}
+
+
+def _wallet_settlement_column():
+    """SQLAlchemy column to filter/order by, per WALLET_SETTLEMENT_SOURCE."""
+    return getattr(TripFinanceReview, WALLET_SETTLEMENT_ATTR[WALLET_SETTLEMENT_SOURCE])
+
+
+def _wallet_settlement_value(review: TripFinanceReview):
+    """Actual datetime value on a loaded review, per WALLET_SETTLEMENT_SOURCE."""
+    return getattr(review, WALLET_SETTLEMENT_ATTR[WALLET_SETTLEMENT_SOURCE])
+
+
+# =========================
 # WALLET - AVAILABLE CUTOFFS
 # =========================
 @router.get("/wallet/cutoffs")
@@ -1168,10 +1458,23 @@ def get_wallet_cutoffs(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
+    # NOTE: this list of selectable periods is intentionally independent
+    # of finance-review approval status. It anchors on the driver's very
+    # first trip so past periods stay visible/browsable for tracking
+    # purposes even before they've been approved -- the *earnings shown
+    # inside* a given period (see get_wallet below) are still gated on
+    # an approved TripFinanceReview and its settlement date.
+    log_wallet_event(
+        "wallet_cutoffs_request",
+        driver_id=current_user.id,
+        settlement_source=WALLET_SETTLEMENT_SOURCE,
+        settlement_attr=WALLET_SETTLEMENT_ATTR[WALLET_SETTLEMENT_SOURCE],
+    )
+
     first_trip = (
         db.query(Trip)
-        .filter(Trip.driver_id == current_user.id, Trip.status == TripStatus.COMPLETED)
-        .order_by(Trip.end_time.asc())
+        .filter(Trip.driver_id == current_user.id)
+        .order_by(Trip.start_time.asc())
         .first()
     )
 
@@ -1179,9 +1482,23 @@ def get_wallet_cutoffs(
 
     if not first_trip:
         _, _, value, label = period_bounds(current_key)
+        log_wallet_event(
+            "wallet_cutoffs_result",
+            driver_id=current_user.id,
+            first_trip_found=False,
+            cutoffs=[{"value": value, "label": label}],
+        )
         return api_response([{"value": value, "label": label}])
 
-    cursor_key = period_key(to_ph(first_trip.end_time))  # UTC -> PH before keying
+    cursor_key = period_key(to_ph(first_trip.start_time))  # UTC -> PH before keying
+
+    log_wallet_event(
+        "wallet_cutoffs_first_trip",
+        driver_id=current_user.id,
+        trip_id=first_trip.id,
+        trip_start_time_raw=first_trip.start_time,
+        trip_start_time_ph=to_ph(first_trip.start_time),
+    )
 
     cutoffs = []
     for _ in range(500):
@@ -1194,6 +1511,15 @@ def get_wallet_cutoffs(
         cursor_key = next_period_key(cursor_key)
 
     cutoffs.reverse()
+
+    log_wallet_event(
+        "wallet_cutoffs_result",
+        driver_id=current_user.id,
+        first_trip_found=True,
+        cutoff_count=len(cutoffs),
+        cutoffs=cutoffs,
+    )
+
     return api_response(cutoffs)
 
 
@@ -1213,28 +1539,62 @@ def get_wallet(
 
     start_utc, end_utc, cutoff_value, label = period_bounds(cursor_key)
 
-    trips = (
-        db.query(Trip)
+    settlement_col = _wallet_settlement_column()
+
+    log_wallet_event(
+        "wallet_request",
+        driver_id=current_user.id,
+        cutoff_param=cutoff,
+        settlement_source=WALLET_SETTLEMENT_SOURCE,
+        settlement_attr=WALLET_SETTLEMENT_ATTR[WALLET_SETTLEMENT_SOURCE],
+        cutoff_value=cutoff_value,
+        cutoff_label=label,
+        start_utc=start_utc,
+        end_utc=end_utc,
+    )
+
+    trip_reviews = (
+        db.query(Trip, TripFinanceReview)
+        .join(TripFinanceReview, TripFinanceReview.trip_id == Trip.id)
         .filter(
             Trip.driver_id == current_user.id,
-            Trip.status == TripStatus.COMPLETED,
-            Trip.end_time >= start_utc,
-            Trip.end_time <= end_utc,
+            TripFinanceReview.status == FinanceReviewStatus.APPROVED,
+            settlement_col >= start_utc,
+            settlement_col <= end_utc,
         )
-        .order_by(Trip.start_time.asc())
+        .order_by(settlement_col.asc())
         .all()
     )
 
-    trips_by_day: dict[str, list[Trip]] = {}
-    for t in trips:
-        day_key = to_ph(t.start_time).strftime("%Y-%m-%d")  # group by start_time's PH day
-        trips_by_day.setdefault(day_key, []).append(t)
+    log_wallet_event(
+        "wallet_matched_reviews",
+        driver_id=current_user.id,
+        count=len(trip_reviews),
+        reviews=[
+            {
+                "trip_id": trip.id,
+                "ticket_no": trip.ticket_no,
+                "review_id": review.id,
+                "review_status": review.status.value,
+                "settlement_date_raw": _wallet_settlement_value(review),
+                "settlement_date_ph": to_ph(_wallet_settlement_value(review)),
+                "has_rate_profile": trip.trip_rate_profile is not None,
+            }
+            for trip, review in trip_reviews
+        ],
+    )
+
+    trips_by_day: dict[str, list[tuple[Trip, TripFinanceReview]]] = {}
+    for trip, review in trip_reviews:
+        settlement_date = _wallet_settlement_value(review)
+        day_key = to_ph(settlement_date).strftime("%Y-%m-%d")  # group by settlement date's PH day
+        trips_by_day.setdefault(day_key, []).append((trip, review))
 
     total_earnings = 0.0
     raw_transactions = []
 
-    for day_key, day_trips in trips_by_day.items():
-        for idx, trip in enumerate(day_trips):
+    for day_key, day_items in trips_by_day.items():
+        for idx, (trip, review) in enumerate(day_items):
             profile = trip.trip_rate_profile
             if not profile:
                 continue
@@ -1252,7 +1612,7 @@ def get_wallet(
                 "trip_label": f"Trip #{idx + 1}",
                 "start_time": trip.start_time,
                 "end_time": trip.end_time,
-                "sort_time": trip.end_time,
+                "sort_time": _wallet_settlement_value(review),
                 "amount": rate,
                 "cutoff": cutoff_value,
             })
@@ -1272,10 +1632,20 @@ def get_wallet(
         for t in raw_transactions
     ]
 
+    log_wallet_event(
+        "wallet_response",
+        driver_id=current_user.id,
+        cutoff_value=cutoff_value,
+        cutoff_label=label,
+        earnings=round(total_earnings, 2),
+        trips=len(trip_reviews),
+        transactions=transactions,
+    )
+
     return api_response({
         "cutoff_value": cutoff_value,
         "cutoff_label": label,
         "earnings": round(total_earnings, 2),
-        "trips": len(trips),
+        "trips": len(trip_reviews),
         "transactions": transactions,
     })

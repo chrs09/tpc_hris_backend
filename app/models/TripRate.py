@@ -20,6 +20,16 @@ class TripRateProfile(Base):
 
     id = Column(Integer, primary_key=True, index=True)
 
+    # NEW: short, stable code used to link Store -> TripRateProfile
+    # (e.g. "DP", "KA", "WS"). This is now the single source of truth
+    # for trip category codes -- Store no longer defines its own enum.
+    code = Column(
+        String(20),
+        nullable=True,  # nullable for now during rollout; backfill then tighten
+        unique=True,
+        index=True,
+    )
+
     profile_name = Column(
         String(100),
         nullable=False,
@@ -89,5 +99,10 @@ class TripRateProfile(Base):
 
     trips = relationship(
         "Trip",
+        back_populates="trip_rate_profile",
+    )
+
+    stores = relationship(
+        "Store",
         back_populates="trip_rate_profile",
     )

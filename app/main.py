@@ -31,7 +31,9 @@ from app.api.public.applicant_onboarding import router as applicant_onboarding_r
 from app.api.public.applicant_questions import router as applicant_questions_router
 from app.api.admin.applicant_questions import router as admin_applicant_questions_router
 from app.api.tripProfile import trip_maintenance as trip_maintenance_router
+from app.api.office import trips as office_trip_review_router
 from app.api import holidays as holiday_router
+from app.api.finance import trips as finance_trips_router
 
 
 logging.basicConfig(
@@ -125,6 +127,12 @@ app.include_router(admin_applicant_questions_router)
 app.include_router(public_applicant_router)
 app.include_router(applicant_onboarding_router)
 app.include_router(applicant_questions_router)
+
+# finance
+app.include_router(finance_trips_router.router, prefix="/api")  # Add this line to include the finance trips router
+
+# office
+app.include_router(office_trip_review_router.router, prefix="/api")  # Add this line to include the office trip review router
 
 app.include_router(holiday_router.router, prefix="/api")  # Add this line to include the holiday router
 

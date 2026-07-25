@@ -127,13 +127,42 @@ class FileService:
     # SPECIFIC FILE TYPES
     # ===============================
 
+    # ===============================
+    # TRIP FILES
+    # ===============================
+
     def upload_trip_start_photo(self, file, trip_id):
+        """
+        Upload photo taken when starting a trip.
+
+        Structure:
+        trips/{trip_id}/start/{filename}
+        """
         folder = f"trips/{trip_id}/start"
         return self.upload(file, folder)
 
-    def upload_trip_stop_photo(self, file, trip_id):
-        folder = f"trips/{trip_id}/stop"
+
+    def upload_trip_pod_photo(self, file, trip_id, stop_id):
+        """
+        Upload Proof of Delivery (POD) for a specific trip stop.
+
+        Structure:
+        trips/{trip_id}/pod/{stop_id}/{filename}
+        """
+        folder = f"trips/{trip_id}/pod/{stop_id}"
         return self.upload(file, folder)
+
+
+    def upload_trip_end_photo(self, file, trip_id):
+        """
+        Upload stamped invoice / end-of-trip photo.
+
+        Structure:
+        trips/{trip_id}/end/{filename}
+        """
+        folder = f"trips/{trip_id}/end"
+        return self.upload(file, folder)
+
 
     def upload_gps_log_photo(self, file, trip_id):
         folder = f"gps_logs/{trip_id}"

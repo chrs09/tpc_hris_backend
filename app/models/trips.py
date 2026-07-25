@@ -10,8 +10,22 @@ from app.core.database import Base
 class TripStatus(str, enum.Enum):
     ASSIGNED = "ASSIGNED"
     ACTIVE = "ACTIVE"
+
+    # Driver completed trip.
+    # Waiting for coordinator.
     PENDING_APPROVAL = "PENDING_APPROVAL"
+
+    # Coordinator approved trip.
+    # Waiting for office personnel.
+    PENDING_OFFICE_REVIEW = "PENDING_OFFICE_REVIEW"
+
+    # Office personnel reviewed trip.
+    # Waiting for finance.
+    PENDING_FINANCE_REVIEW = "PENDING_FINANCE_REVIEW"
+
+    # Finance approved trip.
     COMPLETED = "COMPLETED"
+
     CANCELLED = "CANCELLED"
 
 
@@ -74,4 +88,12 @@ class Trip(Base):
 
     trip_rate_profile = relationship(
         "TripRateProfile", foreign_keys=[trip_rate_profile_id]
+    )
+
+    # NEW — one finance review per trip, created when the coordinator approves
+    finance_review = relationship(
+        "TripFinanceReview",
+        back_populates="trip",
+        uselist=False,
+        cascade="all, delete-orphan",
     )

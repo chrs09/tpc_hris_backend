@@ -3,7 +3,7 @@
 from app.models.gps_log import GPSLog
 from app.models.trip_models import GPSActionType
 from app.schemas import trip
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Body
 from sqlalchemy.orm import Session, joinedload
 from datetime import datetime, date, timedelta
 
@@ -15,6 +15,7 @@ from app.models.trip_stops import TripStop
 from app.models.user import User
 from app.models.employees import Employee
 from app.models.trip_helper import TripHelper
+from app.models.trip_finance_review import FinanceReviewStatus, TripFinanceReview
 from app.models.files import File
 from app.utils.timezone import utc_to_ph
 
@@ -105,22 +106,97 @@ def get_active_trips(
 # =========================
 # APPROVE TRIP
 # =========================
+
 @router.post("/{trip_id}/approve")
 def approve_trip(
     trip_id: int,
+    remarks: str = Body(..., embed=True),
     db: Session = Depends(get_db),
     current_admin=Depends(get_current_admin),
 ):
-    trip = db.query(Trip).filter(Trip.id == trip_id).first()
+    # =========================================================
+    # 1. GET TRIP
+    # =========================================================
+
+    trip = (
+        db.query(Trip)
+        .filter(Trip.id == trip_id)
+        .first()
+    )
 
     if not trip:
-        raise HTTPException(404, "Trip not found")
+        raise HTTPException(
+            status_code=404,
+            detail="Trip not found",
+        )
+
+    # =========================================================
+    # 2. VERIFY TRIP IS WAITING FOR COORDINATOR
+    # =========================================================
 
     if trip.status != TripStatus.PENDING_APPROVAL:
-        raise HTTPException(400, "Trip not pending approval")
+        raise HTTPException(
+            status_code=400,
+            detail="Trip is not pending coordinator approval",
+        )
 
-    trip.status = TripStatus.COMPLETED
-    trip.end_time = trip.end_time or datetime.utcnow()
+    # =========================================================
+    # 3. VALIDATE COORDINATOR REMARKS
+    # =========================================================
+
+    if not remarks or not remarks.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="Coordinator remarks are required",
+        )
+
+    # =========================================================
+    # 4. PREVENT DUPLICATE REVIEW RECORD
+    # =========================================================
+
+    existing_review = (
+        db.query(TripFinanceReview)
+        .filter(
+            TripFinanceReview.trip_id == trip.id
+        )
+        .first()
+    )
+
+    if existing_review:
+        raise HTTPException(
+            status_code=400,
+            detail="Trip already has a review record",
+        )
+
+    # =========================================================
+    # 5. SET COORDINATOR SETTLEMENT DATE
+    # =========================================================
+
+    now = datetime.utcnow()
+
+    # =========================================================
+    # 6. MOVE TRIP TO OFFICE REVIEW
+    # =========================================================
+
+    trip.status = TripStatus.PENDING_OFFICE_REVIEW
+
+    # =========================================================
+    # 7. CREATE REVIEW RECORD
+    # =========================================================
+
+    review = TripFinanceReview(
+        trip_id=trip.id,
+        coordinator_id=current_admin.id,
+        coordinator_remarks=remarks.strip(),
+        coordinator_settlement_date=now,
+        status=FinanceReviewStatus.OFFICE_REVIEW,
+    )
+
+    db.add(review)
+
+    # =========================================================
+    # 8. UPDATE EXISTING TRIP COMPLETION NOTIFICATION
+    # =========================================================
 
     notification = (
         db.query(Notification)
@@ -135,12 +211,33 @@ def approve_trip(
     if notification:
         notification.status = "APPROVED"
         notification.reviewed_by_admin_id = current_admin.id
-        notification.reviewed_at = datetime.utcnow()
+        notification.reviewed_at = now
+
+    # =========================================================
+    # 9. SAVE CHANGES
+    # =========================================================
 
     db.commit()
 
-    return {"message": "Trip approved successfully"}
+    db.refresh(trip)
+    db.refresh(review)
 
+    # =========================================================
+    # 10. RESPONSE
+    # =========================================================
+
+    return {
+        "message": (
+            "Trip approved by coordinator "
+            "and sent for office review"
+        ),
+        "trip_id": trip.id,
+        "trip_status": trip.status.value,
+        "review_status": review.status.value,
+        "coordinator_settlement_date": (
+            review.coordinator_settlement_date
+        ),
+    }
 
 @router.post("/{trip_id}/reject")
 def reject_trip(
@@ -194,12 +291,18 @@ def reject_trip(
     return {"message": "Trip rejected."}
 
 
+# =========================
+# REVIEW TRIP
+# =========================
 @router.get("/{trip_id}/review")
 def review_trip(
     trip_id: int,
     db: Session = Depends(get_db),
     current_admin=Depends(get_current_admin),
 ):
+    # =========================================================
+    # 1. GET TRIP + RELATED DATA
+    # =========================================================
     trip = (
         db.query(Trip)
         .options(
@@ -214,22 +317,24 @@ def review_trip(
     )
 
     if not trip:
-        raise HTTPException(status_code=404, detail="Trip not found.")
+        raise HTTPException(
+            status_code=404,
+            detail="Trip not found.",
+        )
 
+    # =========================================================
+    # 2. GET TRIP HELPERS
+    # =========================================================
     trip_helpers = (
         db.query(Employee)
-        .join(TripHelper, TripHelper.helper_id == Employee.id)
-        .filter(TripHelper.trip_id == trip_id)
-        .all()
-    )
-    start_photo = (
-        db.query(File)
-        .filter(
-            File.entity_type == "trip",
-            File.entity_id == trip_id,
-            File.document_type == "START_TRIP_PHOTO",
+        .join(
+            TripHelper,
+            TripHelper.helper_id == Employee.id,
         )
-        .first()
+        .filter(
+            TripHelper.trip_id == trip_id,
+        )
+        .all()
     )
 
     helpers_data = [
@@ -241,11 +346,61 @@ def review_trip(
         for helper in trip_helpers
     ]
 
-    # GPS LOGS
+    # =========================================================
+    # 3. GET START TRIP PHOTO
+    #
+    # Expected:
+    # entity_type   = trip
+    # entity_id     = trip_id
+    # document_type = START_TRIP_PHOTO
+    #
+    # Example path:
+    # /uploads/trips/49/start/xxx.jpg
+    # =========================================================
+    start_photo = (
+        db.query(File)
+        .filter(
+            File.entity_type == "trip",
+            File.entity_id == trip_id,
+            File.document_type == "START_TRIP_PHOTO",
+        )
+        .order_by(File.id.desc())
+        .first()
+    )
+
+    # =========================================================
+    # 4. GET END TRIP / STAMPED INVOICE PHOTO
+    #
+    # Expected:
+    # entity_type   = trip
+    # entity_id     = trip_id
+    # document_type = STAMPED_INVOICE_PHOTO
+    #
+    # Example path:
+    # /uploads/trips/49/end/xxx.jpg
+    # =========================================================
+    stamped_invoice_photo = (
+        db.query(File)
+        .filter(
+            File.entity_type == "trip",
+            File.entity_id == trip_id,
+            File.document_type == "STAMPED_INVOICE_PHOTO",
+        )
+        .order_by(File.id.desc())
+        .first()
+    )
+
+    # =========================================================
+    # 5. GET GPS LOGS
+    # =========================================================
     gps_logs = (
         db.query(GPSLog)
-        .filter(GPSLog.trip_id == trip_id)
-        .order_by(GPSLog.created_at.asc())
+        .filter(
+            GPSLog.trip_id == trip_id,
+        )
+        .order_by(
+            GPSLog.created_at.asc(),
+        )
         .limit(5000)
         .all()
     )
@@ -258,90 +413,307 @@ def review_trip(
                 if hasattr(log.action_type, "value")
                 else log.action_type
             ),
-            "actual_lat": float(log.actual_lat) if log.actual_lat is not None else None,
+            "actual_lat": (
+                float(log.actual_lat)
+                if log.actual_lat is not None
+                else None
+            ),
             "actual_long": (
-                float(log.actual_long) if log.actual_long is not None else None
+                float(log.actual_long)
+                if log.actual_long is not None
+                else None
             ),
             "accuracy": log.accuracy,
             "speed": log.speed,
-            "created_at": log.created_at.isoformat() if log.created_at else None,
+            "created_at": (
+                log.created_at.isoformat()
+                if log.created_at
+                else None
+            ),
         }
         for log in gps_logs
     ]
 
-    # Convert UTC -> PH time
+    # =========================================================
+    # 6. UTC -> PH TIME FORMATTER
+    # =========================================================
     def to_ph(dt):
         if not dt:
             return None
 
-        return utc_to_ph(dt).strftime("%b %d, %Y, %I:%M %p")
+        return utc_to_ph(dt).strftime(
+            "%b %d, %Y, %I:%M %p"
+        )
 
-    # SORT STOPS BY CHECK-IN TIME (important for route drawing)
-    sorted_stops = sorted(trip.stops, key=lambda x: x.check_in_time or datetime.min)
+    # =========================================================
+    # 7. SORT STOPS BY CHECK-IN TIME
+    # =========================================================
+    sorted_stops = sorted(
+        trip.stops,
+        key=lambda x: (
+            x.check_in_time
+            or datetime.min
+        ),
+    )
 
+    # =========================================================
+    # 8. GET ALL STOP IDS
+    # =========================================================
+    stop_ids = [
+        stop.id
+        for stop in sorted_stops
+    ]
+
+    # =========================================================
+    # 9. GET ALL DELIVERY PROOF PHOTOS
+    #
+    # Expected:
+    # entity_type   = trip_stop
+    # entity_id     = stop.id
+    # document_type = DELIVERY_PROOF_PHOTO
+    #
+    # Example:
+    # Trip ID = 49
+    # Stop ID = 45
+    #
+    # File path:
+    # /uploads/trips/49/pod/45/xxx.jpg
+    #
+    # Database:
+    # entity_type = trip_stop
+    # entity_id   = 45
+    # =========================================================
+    delivery_proof_photos = []
+
+    if stop_ids:
+        delivery_proof_photos = (
+            db.query(File)
+            .filter(
+                File.entity_type == "trip_stop",
+                File.entity_id.in_(stop_ids),
+                File.document_type
+                == "DELIVERY_PROOF_PHOTO",
+            )
+            .order_by(
+                File.id.desc(),
+            )
+            .all()
+        )
+
+    # =========================================================
+    # 10. CREATE POD LOOKUP
+    #
+    # Example:
+    #
+    # {
+    #     45: "http://localhost:8000/uploads/trips/49/pod/45/a.jpg",
+    #     46: "http://localhost:8000/uploads/trips/49/pod/46/b.jpg"
+    # }
+    #
+    # Because photos are ordered newest first,
+    # only keep the newest photo for each stop.
+    # =========================================================
+    delivery_proof_by_stop_id = {}
+
+    for photo in delivery_proof_photos:
+        if (
+            photo.entity_id
+            not in delivery_proof_by_stop_id
+        ):
+            delivery_proof_by_stop_id[
+                photo.entity_id
+            ] = photo.file_url
+
+    # =========================================================
+    # 11. BUILD STOPS DATA
+    # =========================================================
     stops_data = []
 
     for stop in sorted_stops:
         stops_data.append(
             {
-                "store_name": stop.store.name if stop.store else "Unknown",
-                "check_in_time": to_ph(stop.check_in_time),
-                "check_out_time": to_ph(stop.check_out_time),
-                # actual recorded gps
+                # TripStop ID
+                "id": stop.id,
+
+                # Store information
+                "store_name": (
+                    stop.store.name
+                    if stop.store
+                    else "Unknown"
+                ),
+
+                # Check-in / Check-out
+                "check_in_time": to_ph(
+                    stop.check_in_time
+                ),
+                "check_out_time": to_ph(
+                    stop.check_out_time
+                ),
+
+                # Actual recorded GPS
                 "lat_in": stop.lat_in,
                 "long_in": stop.long_in,
                 "lat_out": stop.lat_out,
                 "long_out": stop.long_out,
-                # official store coordinates
-                "store_lat": stop.store.latitude if stop.store else None,
-                "store_long": stop.store.longitude if stop.store else None,
+
+                # Official store coordinates
+                "store_lat": (
+                    stop.store.latitude
+                    if stop.store
+                    else None
+                ),
+                "store_long": (
+                    stop.store.longitude
+                    if stop.store
+                    else None
+                ),
+
+                # Allowed GPS radius
                 "allowed_radius": (
-                    stop.store.allowed_radius_meters if stop.store else None
+                    stop.store.allowed_radius_meters
+                    if stop.store
+                    else None
+                ),
+
+                # POD / Delivery Proof
+                "delivery_proof_photo": (
+                    delivery_proof_by_stop_id.get(
+                        stop.id
+                    )
                 ),
             }
         )
 
+    # =========================================================
+    # 12. RETURN COMPLETE TRIP REVIEW DATA
+    # =========================================================
     return {
+        # -------------------------
+        # TRIP
+        # -------------------------
         "trip_id": trip.id,
         "ticket_no": trip.ticket_no,
+        "status": (
+            trip.status.value
+            if hasattr(trip.status, "value")
+            else trip.status
+        ),
+
+        # -------------------------
+        # VEHICLE
+        # -------------------------
         "vehicle": (
             {
                 "id": trip.vehicle_unit.id,
-                "unit_code": trip.vehicle_unit.unit_code,
-                "plate_number": trip.vehicle_unit.plate_number,
+                "unit_code": (
+                    trip.vehicle_unit.unit_code
+                ),
+                "plate_number": (
+                    trip.vehicle_unit.plate_number
+                ),
             }
             if trip.vehicle_unit
             else None
         ),
+
+        # -------------------------
+        # TRIP RATE PROFILE
+        # -------------------------
         "trip_rate_profile": (
             {
-                "id": trip.trip_rate_profile.id,
-                "profile_name": trip.trip_rate_profile.profile_name,
-                "helper_count": trip.trip_rate_profile.helper_count,
+                "id": (
+                    trip.trip_rate_profile.id
+                ),
+                "profile_name": (
+                    trip.trip_rate_profile.profile_name
+                ),
+                "helper_count": (
+                    trip.trip_rate_profile.helper_count
+                ),
             }
             if trip.trip_rate_profile
             else None
         ),
-        "status": trip.status.value,
+
+        # -------------------------
+        # DRIVER
+        # -------------------------
         "driver_first_name": (
-            trip.driver.employee.first_name if trip.driver.employee else "-"
+            trip.driver.employee.first_name
+            if trip.driver
+            and trip.driver.employee
+            else "-"
         ),
+
         "driver_last_name": (
-            trip.driver.employee.last_name if trip.driver.employee else "-"
+            trip.driver.employee.last_name
+            if trip.driver
+            and trip.driver.employee
+            else "-"
         ),
-        "start_photo": start_photo.file_url if start_photo else None,
-        # helpers
+
+        # -------------------------
+        # HELPERS
+        # -------------------------
         "helpers": helpers_data,
-        # origin info
-        "origin_store": trip.origin_store.name if trip.origin_store else "-",
-        "origin_lat": trip.origin_store.latitude if trip.origin_store else None,
-        "origin_long": trip.origin_store.longitude if trip.origin_store else None,
-        "start_time": to_ph(trip.start_time),
-        "end_time": to_ph(trip.end_time),
+
+        # -------------------------
+        # ORIGIN
+        # -------------------------
+        "origin_store": (
+            trip.origin_store.name
+            if trip.origin_store
+            else "-"
+        ),
+
+        "origin_lat": (
+            trip.origin_store.latitude
+            if trip.origin_store
+            else None
+        ),
+
+        "origin_long": (
+            trip.origin_store.longitude
+            if trip.origin_store
+            else None
+        ),
+
+        # -------------------------
+        # TIMES
+        # -------------------------
+        "start_time": to_ph(
+            trip.start_time
+        ),
+
+        "end_time": to_ph(
+            trip.end_time
+        ),
+
+        # -------------------------
+        # TRIP PHOTOS
+        # -------------------------
+        "start_photo": (
+            start_photo.file_url
+            if start_photo
+            else None
+        ),
+
+        "stamped_invoice_photo": (
+            stamped_invoice_photo.file_url
+            if stamped_invoice_photo
+            else None
+        ),
+
+        # -------------------------
+        # STOPS + POD
+        # -------------------------
         "stops": stops_data,
+
+        # -------------------------
+        # GPS ROUTE
+        # -------------------------
         "gps_logs": gps_logs_data,
     }
-
 
 @router.get("/completed")
 def get_completed_trips(
