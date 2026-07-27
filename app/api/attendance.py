@@ -71,7 +71,7 @@ ATTENDANCE_ALLOWED_LOCATIONS = [
         "name": "Mandaue Plant",
         "latitude": 10.3305,
         "longitude": 123.9333,
-        "radius_meters": 150,
+        "radius_meters": 350,
     },
     {
         "name": "Cordova",
