@@ -286,7 +286,7 @@ def get_available_stores(
                     "allowed_radius_meters": store.allowed_radius_meters,
                     "trip_rate_profile_id": profile.id,
                     "profile_name": profile.profile_name,
-                    "helper_count": profile.helper_count,
+                    "helper_count": store.required_helper,
                 }
             )
             continue
@@ -570,11 +570,14 @@ def start_trip(
     # 4️⃣ Validate Helpers
     # ---------------------------------------
 
-    if len(helper_ids) != profile.helper_count:
+    required_helper_count = destination_store.required_helper
+
+    if len(helper_ids) != required_helper_count:
         raise HTTPException(
             status_code=400,
             detail=(
-                f"{profile.profile_name} requires " f"{profile.helper_count} helper(s)."
+                f"{destination_store.name} requires "
+                f"{required_helper_count} helper(s)."
             ),
         )
 
