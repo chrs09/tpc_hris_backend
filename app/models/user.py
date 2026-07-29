@@ -11,6 +11,9 @@ class UserRole(str, enum.Enum):
     DRIVER = "driver"
     HELPER = "helper"
     EMPLOYEE = "employee"
+    COORDINATOR_ADMIN = "coordinator_admin"
+    PAYROLL_ADMIN = "payroll_admin"
+    OFFICE_ADMIN = "office_admin"
 
 
 class User(Base):

@@ -58,6 +58,23 @@ def get_current_admin(current_user: User = Depends(get_current_user)):
     return current_user
 
 
+def get_current_trip_manager(current_user: User = Depends(get_current_user)):
+    """
+    Ensures the current user can manage trips/stores.
+
+    Kept separate from get_current_admin so granting coordinators access
+    to trip/store endpoints doesn't also widen their access to unrelated
+    admin-only areas (payroll, user management, etc).
+    """
+
+    if current_user.role not in ["admin", "superadmin", "coordinator_admin"]:
+        raise HTTPException(
+            status_code=403, detail="Trip management privileges required."
+        )
+
+    return current_user
+
+
 def require_superadmin(current_user: User = Depends(get_current_user)):
     if current_user.role != UserRole.SUPERADMIN:
         raise HTTPException(

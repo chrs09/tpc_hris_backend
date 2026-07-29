@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session, joinedload
 from datetime import datetime, date, timedelta
 
 from app.core.database import get_db
-from app.core.dependencies import get_current_admin, get_current_user
+from app.core.dependencies import get_current_trip_manager, get_current_user
 from app.models.trips import Trip, TripStatus
 from app.models.notification import Notification
 from app.models.trip_stops import TripStop
@@ -27,7 +27,7 @@ router = APIRouter(prefix="/admin/trips", tags=["Admin Trips"])
 # =========================
 @router.get("/summary")
 def get_trip_summary(
-    db: Session = Depends(get_db), current_admin=Depends(get_current_admin)
+    db: Session = Depends(get_db), current_admin=Depends(get_current_trip_manager)
 ):
     today = date.today()
 
@@ -47,7 +47,7 @@ def get_trip_summary(
 # =========================
 @router.get("/pending")
 def get_pending_trips(
-    db: Session = Depends(get_db), current_admin=Depends(get_current_admin)
+    db: Session = Depends(get_db), current_admin=Depends(get_current_trip_manager)
 ):
     trips = (
         db.query(Trip)
@@ -77,7 +77,7 @@ def get_pending_trips(
 # =========================
 @router.get("/active")
 def get_active_trips(
-    db: Session = Depends(get_db), current_admin=Depends(get_current_admin)
+    db: Session = Depends(get_db), current_admin=Depends(get_current_trip_manager)
 ):
     trips = (
         db.query(Trip)
@@ -112,7 +112,7 @@ def approve_trip(
     trip_id: int,
     remarks: str = Body(..., embed=True),
     db: Session = Depends(get_db),
-    current_admin=Depends(get_current_admin),
+    current_admin=Depends(get_current_trip_manager),
 ):
     # =========================================================
     # 1. GET TRIP
@@ -243,7 +243,7 @@ def approve_trip(
 def reject_trip(
     trip_id: int,
     db: Session = Depends(get_db),
-    current_admin=Depends(get_current_admin),
+    current_admin=Depends(get_current_trip_manager),
 ):
 
     trip = (
@@ -298,7 +298,7 @@ def reject_trip(
 def review_trip(
     trip_id: int,
     db: Session = Depends(get_db),
-    current_admin=Depends(get_current_admin),
+    current_admin=Depends(get_current_trip_manager),
 ):
     # =========================================================
     # 1. GET TRIP + RELATED DATA
@@ -718,7 +718,7 @@ def review_trip(
 @router.get("/completed")
 def get_completed_trips(
     db: Session = Depends(get_db),
-    current_admin=Depends(get_current_admin),
+    current_admin=Depends(get_current_trip_manager),
 ):
     trips = (
         db.query(Trip)
