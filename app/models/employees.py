@@ -21,6 +21,8 @@ class Employee(Base):
     is_available = Column(Integer, nullable=False, default=1)
 
     daily_rate = Column(Numeric(10, 2), nullable=True)
+    monthly_basic = Column(Numeric(10, 2), nullable=True)
+    monthly_allow = Column(Numeric(10, 2), nullable=True)
     employment_type = Column(String(20), nullable=True)
     payroll_type = Column(String(20), nullable=True)
 

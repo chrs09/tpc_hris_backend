@@ -164,7 +164,13 @@ def get_employees(
             "position": emp.position,
             "date_hired": str(emp.date_hired) if emp.date_hired else None,
             "department": emp.department,
-            "daily_rate": float(emp.daily_rate) if emp.daily_rate else None,
+            "daily_rate": float(emp.daily_rate) if emp.daily_rate is not None else None,
+            "monthly_basic": (
+                float(emp.monthly_basic) if emp.monthly_basic is not None else None
+            ),
+            "monthly_allow": (
+                float(emp.monthly_allow) if emp.monthly_allow is not None else None
+            ),
             "employment_type": emp.employment_type,
             "payroll_type": emp.payroll_type,
             "schedule_template_id": emp.schedule_template_id,
@@ -267,7 +273,19 @@ def get_employee_detail(
         "department": employee.department,
         "is_active": employee.is_active,
         "is_available": employee.is_available,
-        "daily_rate": float(employee.daily_rate) if employee.daily_rate else None,
+        "daily_rate": (
+            float(employee.daily_rate) if employee.daily_rate is not None else None
+        ),
+        "monthly_basic": (
+            float(employee.monthly_basic)
+            if employee.monthly_basic is not None
+            else None
+        ),
+        "monthly_allow": (
+            float(employee.monthly_allow)
+            if employee.monthly_allow is not None
+            else None
+        ),
         "employment_type": employee.employment_type,
         "payroll_type": employee.payroll_type,
         "schedule_template_id": employee.schedule_template_id,
@@ -438,6 +456,8 @@ async def create_employee(
     department: str = Form(...),
     date_hired: str = Form(...),
     daily_rate: float = Form(None),
+    monthly_basic: float = Form(None),
+    monthly_allow: float = Form(None),
     employment_type: str = Form(None),
     payroll_type: str = Form(None),
     schedule_template_id: int = Form(None),
@@ -525,6 +545,8 @@ async def create_employee(
         created_by_user_id=current_user.id,
         is_active=1,
         daily_rate=daily_rate,
+        monthly_basic=monthly_basic,
+        monthly_allow=monthly_allow,
         employment_type=employment_type,
         payroll_type=payroll_type,
         schedule_template_id=schedule_template_id,
@@ -705,6 +727,8 @@ async def patch_employee(
     date_hired: str = Form(None),
     is_active: int = Form(None),
     daily_rate: float = Form(None),
+    monthly_basic: float = Form(None),
+    monthly_allow: float = Form(None),
     employment_type: str = Form(None),
     payroll_type: str = Form(None),
     schedule_template_id: int = Form(None),
@@ -799,6 +823,12 @@ async def patch_employee(
         employee.department = department
     if daily_rate is not None:
         employee.daily_rate = daily_rate
+
+    if monthly_basic is not None:
+        employee.monthly_basic = monthly_basic
+
+    if monthly_allow is not None:
+        employee.monthly_allow = monthly_allow
 
     if employment_type is not None:
         employee.employment_type = employment_type
