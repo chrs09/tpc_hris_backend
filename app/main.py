@@ -141,5 +141,10 @@ app.include_router(debugger.router, prefix="/api")
 
 
 if settings.FILE_STORAGE == "local":
-    os.makedirs("uploads", exist_ok=True)
-    app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
+    os.makedirs(settings.UPLOAD_FOLDER, exist_ok=True)
+
+    app.mount(
+        "/uploads",
+        StaticFiles(directory=settings.UPLOAD_FOLDER),
+        name="uploads",
+    )

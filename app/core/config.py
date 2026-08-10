@@ -14,6 +14,10 @@ class Settings:
 
     # FILE STORAGE
     FILE_STORAGE = os.getenv("FILE_STORAGE", "local")
+    UPLOAD_FOLDER = os.getenv(
+        "UPLOAD_FOLDER",
+        "C:/Users/Tytan Server/Desktop/Portal/uploads"
+    )
     AZURE_STORAGE_CONNECTION_STRING = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
     AZURE_CONTAINER = os.getenv("AZURE_CONTAINER", "tpc_files")
 
