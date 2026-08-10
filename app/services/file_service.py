@@ -41,7 +41,7 @@ class FileService:
     # ===============================
 
     def _upload_local(self, file, folder_path):
-        base_path = f"uploads/{folder_path}"
+        base_path = os.path.join(settings.UPLOAD_FOLDER, folder_path)
         os.makedirs(base_path, exist_ok=True)
 
         extension = (
@@ -51,15 +51,17 @@ class FileService:
         )
 
         filename = f"{uuid.uuid4()}.{extension}"
-        file_path = f"{base_path}/{filename}"
+        file_path = os.path.join(base_path, filename)
 
         file.file.seek(0)
 
         with open(file_path, "wb") as buffer:
             buffer.write(file.file.read())
 
-        # URL that will be stored in the database
-        return f"{settings.API_BASE_URL.rstrip('/')}/{file_path}"
+        # URL used by the frontend
+        url_path = f"/uploads/{folder_path}/{filename}"
+
+        return f"{settings.API_BASE_URL.rstrip('/')}{url_path}"
 
     
     # ===============================
