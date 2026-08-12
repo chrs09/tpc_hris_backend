@@ -5,41 +5,99 @@ load_dotenv()
 
 
 class Settings:
+    # ===============================
     # APP
+    # ===============================
     APP_NAME = os.getenv("APP_NAME", "FastAPI Application")
     ENV = os.getenv("ENV", "development")
 
+    # ===============================
     # FRONTEND
-    FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
+    # ===============================
+    FRONTEND_URL = os.getenv(
+        "FRONTEND_URL",
+        "http://localhost:5173"
+    )
 
+    # ===============================
     # FILE STORAGE
+    # ===============================
     FILE_STORAGE = os.getenv("FILE_STORAGE", "local")
+
+    # Keep uploads inside the backend project.
+    # This works on both local development
+    # and the office server.
     UPLOAD_FOLDER = os.getenv(
         "UPLOAD_FOLDER",
-        "C:/Users/Tytan Server/Desktop/Portal/uploads"
+        "uploads"
     )
-    AZURE_STORAGE_CONNECTION_STRING = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
-    AZURE_CONTAINER = os.getenv("AZURE_CONTAINER", "tpc_files")
 
+    # Azure Blob Storage
+    AZURE_STORAGE_CONNECTION_STRING = os.getenv(
+        "AZURE_STORAGE_CONNECTION_STRING"
+    )
+
+    AZURE_CONTAINER = os.getenv(
+        "AZURE_CONTAINER",
+        "tpc_files"
+    )
+
+    # ===============================
     # AWS S3
+    # ===============================
     AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
     AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
     AWS_BUCKET_NAME = os.getenv("AWS_BUCKET_NAME")
     AWS_REGION = os.getenv("AWS_REGION")
 
-    API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000")
+    # ===============================
+    # API
+    # ===============================
+    API_BASE_URL = os.getenv(
+        "API_BASE_URL",
+        "http://localhost:8000"
+    )
 
+    # ===============================
     # DATABASE
+    # ===============================
     DATABASE_URL = os.getenv("DATABASE_URL")
 
+    # ===============================
     # SECURITY
+    # ===============================
     SECRET_KEY = os.getenv("SECRET_KEY")
-    ALGORITHM = os.getenv("ALGORITHM")
-    ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", 2160))
-    REFRESH_TOKEN_EXPIRE_DAYS = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", 30))
 
+    ALGORITHM = os.getenv(
+        "ALGORITHM",
+        "HS256"
+    )
+
+    ACCESS_TOKEN_EXPIRE_MINUTES = int(
+        os.getenv(
+            "ACCESS_TOKEN_EXPIRE_MINUTES",
+            2160
+        )
+    )
+
+    REFRESH_TOKEN_EXPIRE_DAYS = int(
+        os.getenv(
+            "REFRESH_TOKEN_EXPIRE_DAYS",
+            30
+        )
+    )
+
+    # ===============================
     # CORS
-    CORS_ORIGINS = os.getenv("CORS_ORIGINS", "").split(",")
+    # ===============================
+    CORS_ORIGINS = [
+        origin.strip()
+        for origin in os.getenv(
+            "CORS_ORIGINS",
+            ""
+        ).split(",")
+        if origin.strip()
+    ]
 
 
 settings = Settings()
