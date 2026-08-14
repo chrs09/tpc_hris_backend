@@ -49,3 +49,5 @@ from .dispatch_item import DispatchItem as DispatchItem
 from .dispatch_helpers import DispatchHelper as DispatchHelper
 
 from .holiday import Holiday as Holiday
+from .payroll_deductions import PayrollDeduction as PayrollDeduction
+

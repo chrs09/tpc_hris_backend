@@ -5,7 +5,7 @@ import logging
 import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query, Request
 from sqlalchemy.orm import Session, joinedload
 from datetime import datetime, timedelta
 from pydantic import BaseModel
@@ -72,6 +72,34 @@ if not logger.handlers:
     logger.addHandler(handler)
 
     logger.propagate = False
+
+# =========================
+# GPS TRAFFIC BYTE LOGGER
+# =========================
+
+gps_traffic_logger = logging.getLogger("driver.gps_traffic")
+gps_traffic_logger.setLevel(logging.INFO)
+
+if not gps_traffic_logger.handlers:
+
+    traffic_log_file = LOG_DIR / "gps_traffic.log"
+
+    traffic_handler = RotatingFileHandler(
+        traffic_log_file,
+        maxBytes=5 * 1024 * 1024,  # 5 MB
+        backupCount=5,
+        encoding="utf-8",
+    )
+
+    traffic_formatter = logging.Formatter(
+        "%(asctime)s | %(message)s"
+    )
+
+    traffic_handler.setFormatter(traffic_formatter)
+
+    gps_traffic_logger.addHandler(traffic_handler)
+
+    gps_traffic_logger.propagate = False
 
 
 # =========================
@@ -830,12 +858,81 @@ def check_out(
         raise HTTPException(status_code=400, detail="Must check-in first")
 
     # if lat_out and long_out not matches the lat_in and long_in, then reject the check-out
-    # if lat_out and long_out not matches the lat_in and long_in, then reject the check-out
-    distance = calculate_distance_meters(lat, long, stop.lat_in, stop.long_in)
-    if distance > 150:
+    # ---------------------------------------
+    # 3️⃣ Validate CHECKOUT GPS against STORE
+    # ---------------------------------------
+
+    store = None
+
+    # If the stop already has a store, use it.
+    if stop.store_id:
+        store = (
+            db.query(Store)
+            .filter(Store.id == stop.store_id)
+            .first()
+        )
+
+    # If check-in was an unknown location,
+    # try to identify the store using the CHECKOUT GPS.
+    if not store:
+        stores = db.query(Store).all()
+
+        closest_store = None
+        min_distance = float("inf")
+
+        for candidate in stores:
+            # Ignore stores that don't have valid coordinates yet.
+            if (
+                candidate.latitude is None
+                or candidate.longitude is None
+                or (
+                    candidate.latitude == 0
+                    and candidate.longitude == 0
+                )
+            ):
+                continue
+
+            distance = calculate_distance_meters(
+                lat,
+                long,
+                candidate.latitude,
+                candidate.longitude,
+            )
+
+            if (
+                distance <= candidate.allowed_radius_meters
+                and distance < min_distance
+            ):
+                min_distance = distance
+                closest_store = candidate
+
+        if closest_store:
+            store = closest_store
+            stop.store_id = closest_store.id
+            stop.requires_review = False
+
+    # Still no store found
+    if not store:
         raise HTTPException(
             status_code=400,
-            detail="Check-out location is too far from check-in location.",
+            detail="Checkout location is not within any registered store location.",
+        )
+
+    # Validate checkout GPS against the store's coordinates.
+    distance = calculate_distance_meters(
+        lat,
+        long,
+        store.latitude,
+        store.longitude,
+    )
+
+    if distance > store.allowed_radius_meters:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Checkout location is too far from {store.name}. "
+                f"Allowed radius is {store.allowed_radius_meters:.0f} meters."
+            ),
         )
 
     stop.status = StopStatus.CHECKED_OUT
@@ -878,9 +975,37 @@ def check_out(
 def track_trip_location(
     trip_id: int,
     payload: TrackLocationRequest,
+    request: Request,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
+
+    
 ):
+    # ---------------------------------------
+    # GPS TRAFFIC SIZE
+    # ---------------------------------------
+
+    content_length = request.headers.get("content-length")
+
+    try:
+        request_bytes = int(content_length) if content_length else None
+    except (TypeError, ValueError):
+        request_bytes = None
+
+    gps_traffic_logger.info(
+        "trip=%s | driver=%s | request_bytes=%s | "
+        "content_type=%s | lat=%s | long=%s | accuracy=%s | speed=%s",
+        trip_id,
+        current_user.id,
+        request_bytes if request_bytes is not None else "unknown",
+        request.headers.get("content-type"),
+        payload.lat,
+        payload.long,
+        payload.accuracy,
+        payload.speed,
+    )
+
+
     logger.info("=" * 100)
     logger.info("TRACK REQUEST RECEIVED")
     logger.info("Trip ID        : %s", trip_id)
