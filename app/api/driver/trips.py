@@ -830,6 +830,7 @@ def check_out(
         raise HTTPException(status_code=400, detail="Must check-in first")
 
     # if lat_out and long_out not matches the lat_in and long_in, then reject the check-out
+    # if lat_out and long_out not matches the lat_in and long_in, then reject the check-out
     distance = calculate_distance_meters(lat, long, stop.lat_in, stop.long_in)
     if distance > 150:
         raise HTTPException(
