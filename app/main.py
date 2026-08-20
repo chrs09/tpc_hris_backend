@@ -34,6 +34,7 @@ from app.api.tripProfile import trip_maintenance as trip_maintenance_router
 from app.api.office import trips as office_trip_review_router
 from app.api import holidays as holiday_router
 from app.api.finance import trips as finance_trips_router
+from app.api.finance import expenses as finance_expense_router
 
 
 logging.basicConfig(
@@ -131,6 +132,7 @@ app.include_router(applicant_questions_router)
 
 # finance
 app.include_router(finance_trips_router.router, prefix="/api")  # Add this line to include the finance trips router
+app.include_router(finance_expense_router.router, prefix="/api")  # Add this line to include the finance expense router
 
 # office
 app.include_router(office_trip_review_router.router, prefix="/api")  # Add this line to include the office trip review router
