@@ -1,6 +1,8 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
-from typing import Optional
+from typing import Optional, Any
+import re
+import json
 
 from fastapi import (
     APIRouter,
@@ -18,6 +20,7 @@ from app.core.database import get_db
 from app.core.dependencies import get_current_user
 
 from app.models.finance_expense import FinanceExpense
+from app.models.finance_expense_item import FinanceExpenseItem
 from app.models.user import User
 
 from app.schemas.finance_expense import (
@@ -77,29 +80,143 @@ def decimal_to_float(value):
 
     return value
 
+def generate_expense_number(db: Session) -> str:
+    """
+    Generate the next expense number.
+
+    Example:
+        EXP001
+        EXP002
+        EXP003
+    """
+
+    expenses = (
+        db.query(FinanceExpense.expense_number)
+        .filter(FinanceExpense.expense_number.isnot(None))
+        .all()
+    )
+
+    max_number = 0
+
+    for (expense_number,) in expenses:
+        if not expense_number:
+            continue
+
+        match = re.fullmatch(r"EXP(\d+)", expense_number)
+
+        if match:
+            number = int(match.group(1))
+            max_number = max(max_number, number)
+
+    next_number = max_number + 1
+
+    return f"EXP{next_number:03d}"
+
+def calculate_posting_period(created_at: datetime) -> str:
+    """
+    Calculate posting period based on creation date.
+
+    1st–15th:
+        YYYY-MM-01 to YYYY-MM-15
+
+    16th–end:
+        YYYY-MM-16 to YYYY-MM-last-day
+    """
+
+    year = created_at.year
+    month = created_at.month
+
+    if created_at.day <= 15:
+        return f"{year}-{month:02d}-01 to {year}-{month:02d}-15"
+
+    if month == 12:
+        next_month = datetime(year + 1, 1, 1)
+    else:
+        next_month = datetime(year, month + 1, 1)
+
+    last_day = (next_month - timedelta(days=1)).day
+
+    return (
+        f"{year}-{month:02d}-16 "
+        f"to {year}-{month:02d}-{last_day:02d}"
+    )
+
+def parse_expense_items(items: Optional[str]) -> list[dict[str, Any]]:
+    """
+    Parse expense items JSON received from the frontend.
+
+    Expected format:
+
+    [
+        {
+            "particulars": "Printer Ink",
+            "qty": 2,
+            "unit": "Box",
+            "unit_price": 500
+        },
+        {
+            "particulars": "Bond Paper",
+            "qty": 5,
+            "unit": "Pack",
+            "unit_price": 200
+        }
+    ]
+    """
+
+    if not items:
+        return []
+
+    try:
+        parsed_items = json.loads(items)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid expense items JSON.",
+        ) from exc
+
+    if not isinstance(parsed_items, list):
+        raise HTTPException(
+            status_code=400,
+            detail="Expense items must be a list.",
+        )
+
+    return parsed_items
 
 def serialize_expense(expense: FinanceExpense):
     return {
+        # ==============================
+        # EXPENSE INFORMATION
+        # ==============================
+
         "id": expense.id,
+        "expense_number": expense.expense_number,
 
         "encoded_date": expense.encoded_date,
-
         "posting_period": expense.posting_period,
+        "invoice_date": expense.date,
 
-        "date": expense.date,
+        # ==============================
+        # REFERENCE
+        # ==============================
 
         "po_number": expense.po_number,
-
         "supplier": expense.supplier,
+        "invoice_number": expense.receipt_number,
 
-        "receipt_number": expense.receipt_number,
+        # ==============================
+        # RECEIPT / EXPENSE IMAGE
+        # ==============================
 
         "receipt_image_url": expense.receipt_image_url,
 
+        # ==============================
+        # LEGACY ITEM DETAILS
+        # ==============================
+        # Kept temporarily for compatibility
+        # with existing expense records.
+
         "qty": decimal_to_float(expense.qty),
-
         "unit": expense.unit,
-
         "particulars": expense.particulars,
 
         "unit_price": decimal_to_float(
@@ -110,28 +227,57 @@ def serialize_expense(expense: FinanceExpense):
             expense.amount
         ),
 
+        # ==============================
+        # EXPENSE ITEMS
+        # ==============================
+
+        "items": [
+            {
+                "id": item.id,
+                "expense_id": item.expense_id,
+                "particulars": item.particulars,
+                "qty": decimal_to_float(item.qty),
+                "unit": item.unit,
+                "unit_price": decimal_to_float(
+                    item.unit_price
+                ),
+                "amount": decimal_to_float(
+                    item.amount
+                ),
+            }
+            for item in expense.items
+        ],
+
+        # ==============================
+        # ASSIGNMENT
+        # ==============================
+
         "responsible": expense.responsible,
-
         "additional_details": expense.additional_details,
-
         "requested_by": expense.requested_by,
-
         "received_by": expense.received_by,
 
+        # ==============================
+        # ACCOUNTING
+        # ==============================
+
         "category": expense.category,
-
         "account": expense.account,
-
         "notes": expense.notes,
 
-        "date_countered": expense.date_countered,
+        # ==============================
+        # COUNTERING
+        # ==============================
 
+        "date_countered": expense.date_countered,
         "counter_number": expense.counter_number,
 
+        # ==============================
+        # PAYMENT
+        # ==============================
+
         "date_paid": expense.date_paid,
-
         "bank": expense.bank,
-
         "check_number": expense.check_number,
 
         "check_amount": decimal_to_float(
@@ -140,21 +286,28 @@ def serialize_expense(expense: FinanceExpense):
 
         "receipt_number_2": expense.receipt_number_2,
 
+        # ==============================
+        # ACCOUNTS PAYABLE
+        # ==============================
+
         "status": expense.status,
 
-        "ap": decimal_to_float(expense.ap),
+        "ap": decimal_to_float(
+            expense.ap
+        ),
 
         "remarks": expense.remarks,
 
-        "created_by_user_id": expense.created_by_user_id,
+        # ==============================
+        # AUDIT
+        # ==============================
 
+        "created_by_user_id": expense.created_by_user_id,
         "updated_by_user_id": expense.updated_by_user_id,
 
         "created_at": expense.created_at,
-
         "updated_at": expense.updated_at,
     }
-
 
 def validate_unit(unit: Optional[str]):
     if unit and unit not in ALLOWED_UNITS:
@@ -302,12 +455,12 @@ def get_expense(
 
 @router.post("/", status_code=201)
 async def create_expense(
-    posting_period: Optional[str] = Form(None),
     date: Optional[str] = Form(None),
 
     po_number: Optional[str] = Form(None),
     supplier: Optional[str] = Form(None),
-    receipt_number: Optional[str] = Form(None),
+    invoice_number: Optional[str] = Form(None),
+    items: Optional[str] = Form(None),
 
     qty: Optional[float] = Form(1),
     unit: Optional[str] = Form("Piece"),
@@ -410,8 +563,21 @@ async def create_expense(
     # CREATE EXPENSE
     # -----------------------------------------
 
+    expense_number = generate_expense_number(db)
+
+    created_at = datetime.utcnow()
+
+    posting_period = calculate_posting_period(
+        created_at
+    )
+
+    expense_items = parse_expense_items(items)
+
     expense = FinanceExpense(
-        encoded_date=datetime.utcnow(),
+        expense_number=expense_number,
+
+        encoded_date=created_at,
+        created_at=created_at,
 
         posting_period=posting_period,
 
@@ -421,7 +587,7 @@ async def create_expense(
 
         supplier=supplier,
 
-        receipt_number=receipt_number,
+        receipt_number=invoice_number,
 
         qty=qty,
 
@@ -492,6 +658,39 @@ async def create_expense(
     db.commit()
     db.refresh(expense)
 
+    # -----------------------------------------
+    # CREATE EXPENSE ITEMS
+    # -----------------------------------------
+
+    for item in expense_items:
+        particulars = item.get("particulars")
+
+        if not particulars:
+            continue
+
+        qty = Decimal(str(item.get("qty") or 1))
+        unit = item.get("unit")
+        unit_price = item.get("unit_price")
+
+        if unit_price is not None:
+            unit_price = Decimal(str(unit_price))
+            amount = qty * unit_price
+        else:
+            amount = None
+
+        expense_item = FinanceExpenseItem(
+            expense_id=expense.id,
+            particulars=particulars,
+            qty=qty,
+            unit=unit,
+            unit_price=unit_price,
+            amount=amount,
+        )
+
+        db.add(expense_item)
+
+    db.commit()
+
     return api_response(
         serialize_expense(expense)
     )
@@ -505,13 +704,15 @@ async def create_expense(
 async def update_expense(
     expense_id: int,
 
-    posting_period: Optional[str] = Form(None),
     date: Optional[str] = Form(None),
 
     po_number: Optional[str] = Form(None),
     supplier: Optional[str] = Form(None),
-    receipt_number: Optional[str] = Form(None),
+    invoice_number: Optional[str] = Form(None),
+    items: Optional[str] = Form(None),
 
+    # Legacy item fields
+    # Kept temporarily for backward compatibility.
     qty: Optional[float] = Form(None),
     unit: Optional[str] = Form(None),
     particulars: Optional[str] = Form(None),
@@ -558,15 +759,20 @@ async def update_expense(
             detail="Expense not found",
         )
 
+    # Parse items only when the frontend
+    # actually sends the items field.
+    expense_items = (
+        parse_expense_items(items)
+        if items is not None
+        else None
+    )
+
     validate_unit(unit)
     validate_status(status)
 
     # -----------------------------------------
     # BASIC FIELDS
     # -----------------------------------------
-
-    if posting_period is not None:
-        expense.posting_period = posting_period
 
     if date is not None:
         try:
@@ -587,12 +793,15 @@ async def update_expense(
     if supplier is not None:
         expense.supplier = supplier
 
-    if receipt_number is not None:
-        expense.receipt_number = receipt_number
+    if invoice_number is not None:
+        expense.receipt_number = invoice_number
 
     # -----------------------------------------
-    # ITEM
+    # LEGACY ITEM FIELDS
     # -----------------------------------------
+
+    # These remain temporarily for backward
+    # compatibility with existing records.
 
     if qty is not None:
         expense.qty = qty
@@ -606,8 +815,6 @@ async def update_expense(
     if unit_price is not None:
         expense.unit_price = unit_price
 
-    # Recalculate amount whenever
-    # quantity or unit price changes.
     if qty is not None or unit_price is not None:
         expense.amount = calculate_amount(
             expense.qty,
@@ -699,7 +906,7 @@ async def update_expense(
         expense.receipt_number_2 = receipt_number_2
 
     # -----------------------------------------
-    # AP
+    # ACCOUNTS PAYABLE
     # -----------------------------------------
 
     if status is not None:
@@ -726,10 +933,132 @@ async def update_expense(
         expense.receipt_image_url = file_url
 
     # -----------------------------------------
+    # EXPENSE ITEMS
+    # -----------------------------------------
+
+    if expense_items is not None:
+
+        existing_items = {
+            item.id: item
+            for item in expense.items
+        }
+
+        incoming_item_ids = set()
+
+        for item_data in expense_items:
+            item_id = item_data.get("id")
+
+            item_particulars = item_data.get(
+                "particulars"
+            )
+
+            # Ignore incomplete rows.
+            if not item_particulars:
+                continue
+
+            item_qty = Decimal(
+                str(
+                    item_data.get("qty")
+                    or 1
+                )
+            )
+
+            item_unit = item_data.get("unit")
+
+            item_unit_price = item_data.get(
+                "unit_price"
+            )
+
+            # -----------------------------------------
+            # UPDATE EXISTING ITEM
+            # -----------------------------------------
+
+            if (
+                item_id is not None
+                and item_id in existing_items
+            ):
+                expense_item = existing_items[item_id]
+
+                # Preserve existing price when the
+                # frontend doesn't provide one.
+                if item_unit_price is None:
+                    item_unit_price = (
+                        expense_item.unit_price
+                    )
+                else:
+                    item_unit_price = Decimal(
+                        str(item_unit_price)
+                    )
+
+                if item_unit_price is not None:
+                    item_amount = (
+                        item_qty * item_unit_price
+                    )
+                else:
+                    item_amount = None
+
+                expense_item.particulars = (
+                    item_particulars
+                )
+
+                expense_item.qty = item_qty
+                expense_item.unit = item_unit
+                expense_item.unit_price = (
+                    item_unit_price
+                )
+                expense_item.amount = (
+                    item_amount
+                )
+
+                incoming_item_ids.add(item_id)
+
+            # -----------------------------------------
+            # CREATE NEW ITEM
+            # -----------------------------------------
+
+            else:
+                if item_unit_price is not None:
+                    item_unit_price = Decimal(
+                        str(item_unit_price)
+                    )
+
+                    item_amount = (
+                        item_qty * item_unit_price
+                    )
+                else:
+                    item_amount = None
+
+                expense_item = FinanceExpenseItem(
+                    expense_id=expense.id,
+                    particulars=item_particulars,
+                    qty=item_qty,
+                    unit=item_unit,
+                    unit_price=item_unit_price,
+                    amount=item_amount,
+                )
+
+                db.add(expense_item)
+
+        # -----------------------------------------
+        # DELETE REMOVED ITEMS
+        # -----------------------------------------
+
+        for (
+            item_id,
+            existing_item,
+        ) in existing_items.items():
+
+            if item_id not in incoming_item_ids:
+                db.delete(existing_item)
+
+    # -----------------------------------------
     # AUDIT
     # -----------------------------------------
 
-    expense.updated_by_user_id = current_user.id
+    expense.updated_by_user_id = (
+        current_user.id
+    )
+
     expense.updated_at = datetime.utcnow()
 
     db.commit()
@@ -738,7 +1067,6 @@ async def update_expense(
     return api_response(
         serialize_expense(expense)
     )
-
 
 # =========================================================
 # DELETE EXPENSE

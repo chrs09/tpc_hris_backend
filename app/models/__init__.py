@@ -51,3 +51,4 @@ from .dispatch_helpers import DispatchHelper as DispatchHelper
 from .holiday import Holiday as Holiday
 from .payroll_deductions import PayrollDeduction as PayrollDeduction
 from .finance_expense import FinanceExpense as FinanceExpense
+from .finance_expense_item import FinanceExpenseItem as FinanceExpenseItem

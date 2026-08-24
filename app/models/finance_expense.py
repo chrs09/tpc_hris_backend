@@ -1,7 +1,7 @@
 from datetime import date, datetime
 
 from sqlalchemy import Date, DateTime, Integer, Numeric, String, Text
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
 
@@ -12,6 +12,12 @@ class FinanceExpense(Base):
     id: Mapped[int] = mapped_column(
         Integer,
         primary_key=True,
+        index=True,
+    )
+    expense_number: Mapped[str | None] = mapped_column(
+        String(50),
+        nullable=True,
+        unique=True,
         index=True,
     )
 
@@ -223,4 +229,10 @@ class FinanceExpense(Base):
         nullable=False,
         default=datetime.utcnow,
         onupdate=datetime.utcnow,
+    )
+
+    items: Mapped[list["FinanceExpenseItem"]] = relationship(
+        "FinanceExpenseItem",
+        back_populates="expense",
+        cascade="all, delete-orphan",
     )
