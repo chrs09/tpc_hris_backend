@@ -483,14 +483,16 @@ def bulk_mixed_attendance(
 def get_attendance_records(
     skip: int = 0,
     limit: int = 5000,
-
     department: str | None = None,
     attendance_date: date | None = None,
-
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     sync_trip_attendance_records(db, current_user.id)
+
+    # ---------------------------------------
+    # ATTENDANCE QUERY
+    # ---------------------------------------
 
     query = (
         db.query(AttendanceRecord)
@@ -499,9 +501,11 @@ def get_attendance_records(
 
     if department and department.lower() != "all":
         query = query.filter(Employee.department == department)
-    
+
     if attendance_date:
-        query = query.filter(AttendanceRecord.attendance_date == attendance_date)
+        query = query.filter(
+            AttendanceRecord.attendance_date == attendance_date
+        )
 
     records = (
         query
@@ -511,7 +515,51 @@ def get_attendance_records(
         .all()
     )
 
-    # added optimization
+    # ---------------------------------------
+    # ACTIVE EMPLOYEE COUNT
+    # ADMIN + motorpool
+    #
+    # This count is independent of:
+    # - selected attendance date
+    # - attendance department filter
+    # ---------------------------------------
+
+    admin_count = (
+        db.query(func.count(Employee.id))
+        .filter(
+            Employee.is_active == 1,
+            Employee.department == "Admin",
+        )
+        .scalar()
+        or 0
+    )
+
+    motorpool_count = (
+        db.query(func.count(Employee.id))
+        .filter(
+            Employee.is_active == 1,
+            Employee.department == "Motorpool",
+        )
+        .scalar()
+        or 0
+    )
+
+    active_employee_count = admin_count + motorpool_count
+
+    # ---------------------------------------
+    # DEBUG LOG
+    # ---------------------------------------
+
+    print("========================================")
+    print("ACTIVE EMPLOYEE COUNT")
+    print(f"Admin: {admin_count}")
+    print(f"motorpool: {motorpool_count}")
+    print(f"Total Admin + motorpool: {active_employee_count}")
+    print("========================================")
+
+    # ---------------------------------------
+    # EMPLOYEE DATA
+    # ---------------------------------------
 
     employee_ids = list({record.employee_id for record in records})
 
@@ -526,9 +574,18 @@ def get_attendance_records(
         for employee in employees
     }
 
-    valid_statuses = ["COMPLETED", "completed", "APPROVED", "approved"]
+    valid_statuses = [
+        "COMPLETED",
+        "completed",
+        "APPROVED",
+        "approved",
+    ]
 
     response = []
+
+    # ---------------------------------------
+    # BUILD ATTENDANCE RESPONSE
+    # ---------------------------------------
 
     for record in records:
         employee = employee_map.get(record.employee_id)
@@ -550,6 +607,10 @@ def get_attendance_records(
             )
 
             employee_department = employee.department
+
+        # ---------------------------------------
+        # PROFILE PHOTO
+        # ---------------------------------------
 
         profile_photo = (
             db.query(FileModel)
@@ -611,7 +672,6 @@ def get_attendance_records(
         seen_trip_ids = set()
 
         for trip in driver_trips + helper_trips:
-
             if trip.id in seen_trip_ids:
                 continue
 
@@ -622,60 +682,102 @@ def get_attendance_records(
                     "trip_id": trip.id,
                     "ticket_no": trip.ticket_no,
                     "vehicle_unit_id": trip.vehicle_unit_id,
+
                     "vehicle_unit": (
-                        trip.vehicle_unit.unit_code if trip.vehicle_unit else None
+                        trip.vehicle_unit.unit_code
+                        if trip.vehicle_unit
+                        else None
                     ),
+
                     "plate_number": (
-                        trip.vehicle_unit.plate_number if trip.vehicle_unit else None
+                        trip.vehicle_unit.plate_number
+                        if trip.vehicle_unit
+                        else None
                     ),
+
                     "trip_rate_profile_id": trip.trip_rate_profile_id,
+
                     "trip_rate_profile": (
                         trip.trip_rate_profile.profile_name
                         if trip.trip_rate_profile
                         else None
                     ),
+
                     "driver_first_trip_rate": (
-                        float(trip.trip_rate_profile.driver_first_trip_rate)
-                        if trip.trip_rate_profile
-                        and trip.trip_rate_profile.driver_first_trip_rate
+                        float(
+                            trip.trip_rate_profile.driver_first_trip_rate
+                        )
+                        if (
+                            trip.trip_rate_profile
+                            and trip.trip_rate_profile.driver_first_trip_rate
+                        )
                         else 0
                     ),
+
                     "driver_next_trip_rate": (
-                        float(trip.trip_rate_profile.driver_next_trip_rate)
-                        if trip.trip_rate_profile
-                        and trip.trip_rate_profile.driver_next_trip_rate
+                        float(
+                            trip.trip_rate_profile.driver_next_trip_rate
+                        )
+                        if (
+                            trip.trip_rate_profile
+                            and trip.trip_rate_profile.driver_next_trip_rate
+                        )
                         else 0
                     ),
+
                     "helper_first_trip_rate": (
-                        float(trip.trip_rate_profile.helper_first_trip_rate)
-                        if trip.trip_rate_profile
-                        and trip.trip_rate_profile.helper_first_trip_rate
+                        float(
+                            trip.trip_rate_profile.helper_first_trip_rate
+                        )
+                        if (
+                            trip.trip_rate_profile
+                            and trip.trip_rate_profile.helper_first_trip_rate
+                        )
                         else 0
                     ),
+
                     "helper_next_trip_rate": (
-                        float(trip.trip_rate_profile.helper_next_trip_rate)
-                        if trip.trip_rate_profile
-                        and trip.trip_rate_profile.helper_next_trip_rate
+                        float(
+                            trip.trip_rate_profile.helper_next_trip_rate
+                        )
+                        if (
+                            trip.trip_rate_profile
+                            and trip.trip_rate_profile.helper_next_trip_rate
+                        )
                         else 0
                     ),
+
                     "helper_count": (
                         trip.trip_rate_profile.helper_count
                         if trip.trip_rate_profile
                         else 0
                     ),
+
                     "status": (
                         trip.status.value
                         if hasattr(trip.status, "value")
                         else trip.status
                     ),
+
                     "start_time": (
-                        trip.start_time.isoformat() if trip.start_time else None
+                        trip.start_time.isoformat()
+                        if trip.start_time
+                        else None
                     ),
-                    "end_time": (trip.end_time.isoformat() if trip.end_time else None),
+
+                    "end_time": (
+                        trip.end_time.isoformat()
+                        if trip.end_time
+                        else None
+                    ),
                 }
             )
 
         total_count = len(trip_tickets)
+
+        # ---------------------------------------
+        # ATTENDANCE TIME-IN PHOTO
+        # ---------------------------------------
 
         time_in_photo = (
             db.query(FileModel)
@@ -687,6 +789,10 @@ def get_attendance_records(
             .first()
         )
 
+        # ---------------------------------------
+        # ATTENDANCE TIME-OUT PHOTO
+        # ---------------------------------------
+
         time_out_photo = (
             db.query(FileModel)
             .filter(
@@ -697,6 +803,10 @@ def get_attendance_records(
             .first()
         )
 
+        # ---------------------------------------
+        # BUILD RESPONSE
+        # ---------------------------------------
+
         response.append(
             {
                 "id": record.id,
@@ -704,32 +814,59 @@ def get_attendance_records(
                 "employee_name": employee_name,
                 "employee_department": employee_department,
                 "department": employee_department,
+
                 "profile_photo_url": (
-                    profile_photo.file_url if profile_photo else None
+                    profile_photo.file_url
+                    if profile_photo
+                    else None
                 ),
+
                 "attendance_date": (
-                    str(record.attendance_date) if record.attendance_date else None
+                    str(record.attendance_date)
+                    if record.attendance_date
+                    else None
                 ),
-                "check_in_time": format_attendance_time_only(record.check_in_time),
-                "check_out_time": format_attendance_time_only(record.check_out_time),
+
+                "check_in_time": format_attendance_time_only(
+                    record.check_in_time
+                ),
+
+                "check_out_time": format_attendance_time_only(
+                    record.check_out_time
+                ),
+
                 "check_in_time_raw": (
-                    record.check_in_time.isoformat() if record.check_in_time else None
+                    record.check_in_time.isoformat()
+                    if record.check_in_time
+                    else None
                 ),
+
                 "check_out_time_raw": (
-                    record.check_out_time.isoformat() if record.check_out_time else None
+                    record.check_out_time.isoformat()
+                    if record.check_out_time
+                    else None
                 ),
+
                 "time_in_latitude": record.time_in_latitude,
                 "time_in_longitude": record.time_in_longitude,
                 "time_in_address": record.time_in_address,
+
                 "time_out_latitude": record.time_out_latitude,
                 "time_out_longitude": record.time_out_longitude,
                 "time_out_address": record.time_out_address,
+
                 "time_in_photo_url": (
-                    time_in_photo.file_url if time_in_photo else None
+                    time_in_photo.file_url
+                    if time_in_photo
+                    else None
                 ),
+
                 "time_out_photo_url": (
-                    time_out_photo.file_url if time_out_photo else None
+                    time_out_photo.file_url
+                    if time_out_photo
+                    else None
                 ),
+
                 "face_match_score": record.face_match_score,
                 "face_review_status": record.face_review_status,
                 "face_review_reason": record.face_review_reason,
@@ -740,12 +877,22 @@ def get_attendance_records(
                 "status": record.status,
                 "remarks": record.remarks,
                 "created_by_user_id": record.created_by_user_id,
+
                 "completed_trips": total_count,
                 "trip_tickets": trip_tickets,
             }
         )
 
-    return response
+    # ---------------------------------------
+    # RETURN ATTENDANCE + EMPLOYEE COUNTS
+    # ---------------------------------------
+
+    return {
+        "records": response,
+        "admin_count": admin_count,
+        "motorpool_count": motorpool_count,
+        "active_employee_count": active_employee_count,
+    }
 
 
 @router.patch("/update", response_model=AttendanceResponse)
