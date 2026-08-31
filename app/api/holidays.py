@@ -39,15 +39,28 @@ def get_holiday(holiday_id: int, db: Session = Depends(get_db)):
 
 @router.post("", response_model=HolidayResponse, status_code=201)
 def add_holiday(payload: HolidayCreate, db: Session = Depends(get_db)):
-    return create_manual_holiday(db, payload)
+    try:
+        return create_manual_holiday(db, payload)
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
 
 
 @router.patch("/{holiday_id}", response_model=HolidayResponse)
-def edit_holiday(holiday_id: int, payload: HolidayUpdate, db: Session = Depends(get_db)):
-    holiday = update_holiday(db, holiday_id, payload)
-    if not holiday:
-        raise HTTPException(404, "Holiday not found")
-    return holiday
+def edit_holiday(
+    holiday_id: int,
+    payload: HolidayUpdate,
+    db: Session = Depends(get_db),
+):
+    try:
+        holiday = update_holiday(db, holiday_id, payload)
+
+        if not holiday:
+            raise HTTPException(404, "Holiday not found")
+
+        return holiday
+
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
 
 
 @router.delete("/{holiday_id}", status_code=204)
