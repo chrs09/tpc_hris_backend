@@ -14,6 +14,7 @@ class FinanceExpense(Base):
         primary_key=True,
         index=True,
     )
+
     expense_number: Mapped[str | None] = mapped_column(
         String(50),
         nullable=True,
@@ -28,6 +29,16 @@ class FinanceExpense(Base):
     encoded_date: Mapped[datetime | None] = mapped_column(
         DateTime,
         nullable=True,
+    )
+
+    # Payment method for the entire expense.
+    # Allowed values:
+    #   - PO
+    #   - Cash
+    payment_type: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="PO",
     )
 
     posting_period: Mapped[str | None] = mapped_column(

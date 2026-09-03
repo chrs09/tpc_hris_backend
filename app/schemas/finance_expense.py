@@ -1,5 +1,5 @@
 from datetime import date, datetime
-from typing import Optional
+from typing import Optional, Literal, List
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -11,6 +11,7 @@ class FinanceExpenseBase(BaseModel):
 
     posting_period: Optional[str] = None
     date: Optional[date] = None
+    payment_type: Literal["PO", "Cash"] = "PO"
 
     # ==============================
     # REFERENCE

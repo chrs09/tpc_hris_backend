@@ -28,6 +28,7 @@ from app.schemas.finance_expense import (
 )
 
 from app.services.file_service import FileService
+from app.services.expense_ocr_service import ExpenseOCRService
 from app.utils.response import api_response
 
 
@@ -66,6 +67,10 @@ ALLOWED_STATUS = {
     "Cancelled",
 }
 
+ALLOWED_PAYMENT_TYPES = {
+    "PO",
+    "Cash",
+}
 
 # =========================================================
 # HELPERS
@@ -194,6 +199,7 @@ def serialize_expense(expense: FinanceExpense):
         "encoded_date": expense.encoded_date,
         "posting_period": expense.posting_period,
         "invoice_date": expense.date,
+        "payment_type": expense.payment_type,
 
         # ==============================
         # REFERENCE
@@ -327,6 +333,16 @@ def validate_status(status: Optional[str]):
             ),
         )
 
+def validate_payment_type(payment_type: Optional[str]):
+    if payment_type and payment_type not in ALLOWED_PAYMENT_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Invalid payment type. "
+                "Allowed payment types: PO, Cash"
+            ),
+        )
+
 
 def calculate_amount(
     qty,
@@ -419,6 +435,61 @@ def get_expenses(
     return api_response(response)
 
 
+
+@router.post("/ocr")
+async def extract_expense_receipt(
+    receipt_image: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Extract text from an uploaded expense receipt.
+
+    This endpoint does NOT create an expense.
+    It only performs OCR and returns the detected text.
+    """
+
+    allowed_types = {
+        "image/jpeg",
+        "image/png",
+        "image/webp",
+    }
+
+    if receipt_image.content_type not in allowed_types:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Unsupported receipt image format. "
+                "Allowed formats: JPEG, PNG, WebP."
+            ),
+        )
+
+    file_bytes = await receipt_image.read()
+
+    if not file_bytes:
+        raise HTTPException(
+            status_code=400,
+            detail="Uploaded receipt image is empty.",
+        )
+
+    try:
+        ocr_service = ExpenseOCRService()
+
+        extracted_text = ocr_service.extract_text(
+            file_bytes
+        )
+
+        return {
+            "success": True,
+            "raw_text": extracted_text,
+        }
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to process receipt image: {str(exc)}",
+        ) from exc
+
+
 # =========================================================
 # GET EXPENSE DETAIL
 # =========================================================
@@ -456,6 +527,8 @@ def get_expense(
 @router.post("/", status_code=201)
 async def create_expense(
     date: Optional[str] = Form(None),
+
+    payment_type: Optional[str] = Form("PO"),
 
     po_number: Optional[str] = Form(None),
     supplier: Optional[str] = Form(None),
@@ -499,6 +572,7 @@ async def create_expense(
     # -----------------------------------------
 
     validate_unit(unit)
+    validate_payment_type(payment_type)
     validate_status(status)
 
     # -----------------------------------------
@@ -578,6 +652,8 @@ async def create_expense(
 
         encoded_date=created_at,
         created_at=created_at,
+
+        payment_type=payment_type or "PO",
 
         posting_period=posting_period,
 
@@ -706,6 +782,8 @@ async def update_expense(
 
     date: Optional[str] = Form(None),
 
+    payment_type: Optional[str] = Form(None),
+
     po_number: Optional[str] = Form(None),
     supplier: Optional[str] = Form(None),
     invoice_number: Optional[str] = Form(None),
@@ -769,6 +847,7 @@ async def update_expense(
 
     validate_unit(unit)
     validate_status(status)
+    validate_payment_type(payment_type)
 
     # -----------------------------------------
     # BASIC FIELDS
@@ -786,6 +865,23 @@ async def update_expense(
                 status_code=400,
                 detail="Invalid date format. Use YYYY-MM-DD",
             )
+    
+    if payment_type is not None:
+        expense.payment_type = payment_type
+
+        if payment_type == "Cash":
+            expense.po_number = None
+
+            expense.date_countered = None
+            expense.counter_number = None
+
+            expense.date_paid = None
+            expense.bank = None
+            expense.check_number = None
+            expense.check_amount = None
+            expense.receipt_number_2 = None
+
+            expense.ap = None
 
     if po_number is not None:
         expense.po_number = po_number
