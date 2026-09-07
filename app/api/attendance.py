@@ -2,6 +2,7 @@ import logging
 import math
 import pytz
 
+from collections import defaultdict
 from datetime import datetime, date
 from zoneinfo import ZoneInfo
 
@@ -14,7 +15,7 @@ from fastapi import (
     Form,
 )
 from sqlalchemy import func
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from app.core.database import get_db
 from app.core.dependencies import get_current_user
@@ -485,6 +486,10 @@ def get_attendance_records(
     limit: int = 5000,
     department: str | None = None,
     attendance_date: date | None = None,
+    # Callers that don't render photos (e.g. PayrollList, which only
+    # needs hours/status/trip data) can skip these two batch queries and
+    # the profile/time-in/time-out URL fields entirely by passing false.
+    include_photos: bool = True,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -581,6 +586,106 @@ def get_attendance_records(
         "approved",
     ]
 
+    # ---------------------------------------
+    # BATCH LOOKUPS
+    #
+    # The previous version of this endpoint issued 5 extra queries PER
+    # ATTENDANCE RECORD returned (profile photo, driver trips, helper
+    # trips, time-in photo, time-out photo) - for a 5000-record page
+    # that is up to 25,000 additional round trips, two of which also
+    # ran a non-sargable date/timezone SQL function per row against the
+    # trips table, forcing a full scan each time. Everything below is
+    # fetched once for the whole page and matched up in memory instead,
+    # which is what made this endpoint (and PayrollList, its main
+    # consumer) slow to load.
+    # ---------------------------------------
+
+    record_ids = [record.id for record in records]
+
+    # --- Profile photos (one lookup for every employee on the page) ---
+    profile_photo_map = {}
+
+    if include_photos and employee_ids:
+        for photo in (
+            db.query(FileModel)
+            .filter(
+                FileModel.entity_type == "employee",
+                FileModel.entity_id.in_(employee_ids),
+                FileModel.document_type == "PROFILE_IMAGE",
+            )
+            .all()
+        ):
+            profile_photo_map[photo.entity_id] = photo.file_url
+
+    # --- Attendance time-in/time-out photos, keyed by record + type ---
+    attendance_photo_map = {}
+
+    if include_photos and record_ids:
+        for photo in (
+            db.query(FileModel)
+            .filter(
+                FileModel.entity_type == "attendance",
+                FileModel.entity_id.in_(record_ids),
+                FileModel.document_type.in_(
+                    ["ATTENDANCE_TIME_IN", "ATTENDANCE_TIME_OUT"]
+                ),
+            )
+            .all()
+        ):
+            attendance_photo_map[(photo.entity_id, photo.document_type)] = (
+                photo.file_url
+            )
+
+    # --- Driver + helper trips for every employee on the page, grouped
+    #     by (employee_id, Philippine attendance date) so each record
+    #     below can look its trips up in memory instead of querying
+    #     the trips table again. ---
+    trips_by_employee_date = defaultdict(list)
+    seen_trip_ids_by_key = defaultdict(set)
+
+    if employee_ids:
+        driver_trips = (
+            db.query(Trip, User.employee_id)
+            .join(User, User.id == Trip.driver_id)
+            .options(
+                joinedload(Trip.vehicle_unit),
+                joinedload(Trip.trip_rate_profile),
+            )
+            .filter(
+                User.employee_id.in_(employee_ids),
+                Trip.status.in_(valid_statuses),
+            )
+            .all()
+        )
+
+        helper_trips = (
+            db.query(Trip, TripHelper.helper_id)
+            .join(TripHelper, TripHelper.trip_id == Trip.id)
+            .options(
+                joinedload(Trip.vehicle_unit),
+                joinedload(Trip.trip_rate_profile),
+            )
+            .filter(
+                TripHelper.helper_id.in_(employee_ids),
+                Trip.status.in_(valid_statuses),
+            )
+            .all()
+        )
+
+        for trip, trip_employee_id in driver_trips + helper_trips:
+            trip_date = utc_to_ph_date(trip.start_time)
+
+            if trip_date is None:
+                continue
+
+            key = (trip_employee_id, trip_date)
+
+            if trip.id in seen_trip_ids_by_key[key]:
+                continue
+
+            seen_trip_ids_by_key[key].add(trip.id)
+            trips_by_employee_date[key].append(trip)
+
     response = []
 
     # ---------------------------------------
@@ -609,74 +714,14 @@ def get_attendance_records(
             employee_department = employee.department
 
         # ---------------------------------------
-        # PROFILE PHOTO
-        # ---------------------------------------
-
-        profile_photo = (
-            db.query(FileModel)
-            .filter(
-                FileModel.entity_type == "employee",
-                FileModel.entity_id == record.employee_id,
-                FileModel.document_type == "PROFILE_IMAGE",
-            )
-            .first()
-        )
-
-        # ---------------------------------------
-        # DRIVER TRIPS
-        # ---------------------------------------
-
-        driver_trips = (
-            db.query(Trip)
-            .join(User, User.id == Trip.driver_id)
-            .filter(
-                User.employee_id == record.employee_id,
-                Trip.status.in_(valid_statuses),
-                func.date(
-                    func.convert_tz(
-                        Trip.start_time,
-                        "+00:00",
-                        "+08:00",
-                    )
-                ) == record.attendance_date,
-            )
-            .all()
-        )
-
-        # ---------------------------------------
-        # HELPER TRIPS
-        # ---------------------------------------
-
-        helper_trips = (
-            db.query(Trip)
-            .join(TripHelper, TripHelper.trip_id == Trip.id)
-            .filter(
-                TripHelper.helper_id == record.employee_id,
-                Trip.status.in_(valid_statuses),
-                func.date(
-                    func.convert_tz(
-                        Trip.start_time,
-                        "+00:00",
-                        "+08:00",
-                    )
-                ) == record.attendance_date,
-            )
-            .all()
-        )
-
-        # ---------------------------------------
         # BUILD TRIP TICKETS
         # ---------------------------------------
 
         trip_tickets = []
-        seen_trip_ids = set()
 
-        for trip in driver_trips + helper_trips:
-            if trip.id in seen_trip_ids:
-                continue
-
-            seen_trip_ids.add(trip.id)
-
+        for trip in trips_by_employee_date.get(
+            (record.employee_id, record.attendance_date), []
+        ):
             trip_tickets.append(
                 {
                     "trip_id": trip.id,
@@ -776,34 +821,6 @@ def get_attendance_records(
         total_count = len(trip_tickets)
 
         # ---------------------------------------
-        # ATTENDANCE TIME-IN PHOTO
-        # ---------------------------------------
-
-        time_in_photo = (
-            db.query(FileModel)
-            .filter(
-                FileModel.entity_type == "attendance",
-                FileModel.entity_id == record.id,
-                FileModel.document_type == "ATTENDANCE_TIME_IN",
-            )
-            .first()
-        )
-
-        # ---------------------------------------
-        # ATTENDANCE TIME-OUT PHOTO
-        # ---------------------------------------
-
-        time_out_photo = (
-            db.query(FileModel)
-            .filter(
-                FileModel.entity_type == "attendance",
-                FileModel.entity_id == record.id,
-                FileModel.document_type == "ATTENDANCE_TIME_OUT",
-            )
-            .first()
-        )
-
-        # ---------------------------------------
         # BUILD RESPONSE
         # ---------------------------------------
 
@@ -815,11 +832,7 @@ def get_attendance_records(
                 "employee_department": employee_department,
                 "department": employee_department,
 
-                "profile_photo_url": (
-                    profile_photo.file_url
-                    if profile_photo
-                    else None
-                ),
+                "profile_photo_url": profile_photo_map.get(record.employee_id),
 
                 "attendance_date": (
                     str(record.attendance_date)
@@ -855,16 +868,12 @@ def get_attendance_records(
                 "time_out_longitude": record.time_out_longitude,
                 "time_out_address": record.time_out_address,
 
-                "time_in_photo_url": (
-                    time_in_photo.file_url
-                    if time_in_photo
-                    else None
+                "time_in_photo_url": attendance_photo_map.get(
+                    (record.id, "ATTENDANCE_TIME_IN")
                 ),
 
-                "time_out_photo_url": (
-                    time_out_photo.file_url
-                    if time_out_photo
-                    else None
+                "time_out_photo_url": attendance_photo_map.get(
+                    (record.id, "ATTENDANCE_TIME_OUT")
                 ),
 
                 "face_match_score": record.face_match_score,

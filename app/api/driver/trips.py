@@ -600,13 +600,21 @@ def start_trip(
 
     required_helper_count = destination_store.required_helper
 
-    if len(helper_ids) != required_helper_count:
+    # Stores that require helpers accept anywhere from 1 up to the required
+    # count -- a driver may not always have every helper available.
+    if required_helper_count > 0:
+        if len(helper_ids) < 1 or len(helper_ids) > required_helper_count:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"{destination_store.name} requires up to "
+                    f"{required_helper_count} helper(s). Select at least 1."
+                ),
+            )
+    elif len(helper_ids) != 0:
         raise HTTPException(
             status_code=400,
-            detail=(
-                f"{destination_store.name} requires "
-                f"{required_helper_count} helper(s)."
-            ),
+            detail=f"{destination_store.name} does not require any helpers.",
         )
 
     if len(helper_ids) > 3:

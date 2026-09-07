@@ -474,13 +474,11 @@ async def extract_expense_receipt(
     try:
         ocr_service = ExpenseOCRService()
 
-        extracted_text = ocr_service.extract_text(
-            file_bytes
-        )
+        extraction = ocr_service.extract_receipt(file_bytes)
 
         return {
             "success": True,
-            "raw_text": extracted_text,
+            **extraction,
         }
 
     except Exception as exc:

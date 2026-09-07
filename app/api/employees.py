@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import List
 from fastapi.params import Query
 from sqlalchemy import case
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from app.api import users
 from app.core.database import get_db
 
@@ -111,12 +111,13 @@ def get_employees(
         else_=100,
     )
 
+    # `joinedload` eager-loads schedule_template in the same query - without
+    # it, accessing `emp.schedule_template` below for every employee in the
+    # list triggers one extra SELECT per employee (classic N+1), which is
+    # the main reason this endpoint was slow with a large roster.
     employees = (
         db.query(Employee)
-        .outerjoin(
-            User,
-            User.employee_id == Employee.id,
-        )
+        .options(joinedload(Employee.schedule_template))
         .filter(Employee.is_active == is_active)
         .order_by(
             department_order,
@@ -125,12 +126,18 @@ def get_employees(
         .all()
     )
 
-    user_lookup = {
-        user.employee_id: user.id
-        for user in db.query(User).all()
-    }
-
     employee_ids = [emp.id for emp in employees]
+
+    # Only look up users linked to the employees actually being returned,
+    # and only the two columns needed - not every column of every user
+    # in the system.
+    user_lookup = dict(
+        db.query(User.employee_id, User.id)
+        .filter(User.employee_id.in_(employee_ids))
+        .all()
+        if employee_ids
+        else []
+    )
 
     files = (
         db.query(FileModel)
