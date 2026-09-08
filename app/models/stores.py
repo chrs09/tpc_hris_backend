@@ -3,7 +3,7 @@
 # ==========================================
 
 import enum
-from sqlalchemy import Column, Integer, String, Float, ForeignKey
+from sqlalchemy import Boolean, Column, Integer, String, Float, ForeignKey
 from sqlalchemy.orm import relationship
 from app.core.database import Base
 
@@ -33,6 +33,18 @@ class Store(Base):
 
     allowed_radius_meters = Column(Integer, default=100, nullable=False)
     required_helper = Column(Integer, default=0, nullable=False)
+
+    # Marks a row as a company hub/origin point (yard, plant, satellite
+    # office) rather than a delivery destination. Required by:
+    #   - app/api/driver/trips.py:get_available_stores() -- hubs are
+    #     excluded from the "select store" dropdown when starting a trip,
+    #     since a driver delivers TO a store, not to a hub.
+    #   - app/api/driver/trips.py:complete_trip() -- a trip can only be
+    #     completed once the driver's GPS is back within range of a hub.
+    # Previously both of those matched on a hardcoded set of store names
+    # (e.g. {"Yard", "Plant", "Consolacion"}); this column replaces that
+    # name-matching with a real, admin-editable flag on the store record.
+    is_hub = Column(Boolean, default=False, nullable=False)
 
     # LEGACY: kept temporarily for safe rollout. Do not write new code
     # that depends on this column -- use trip_rate_profile_id instead.

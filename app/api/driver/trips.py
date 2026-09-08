@@ -27,6 +27,7 @@ from app.models.gps_log import GPSLog
 from app.models.vehicle_unit import VehicleUnit
 from app.models.TripRate import TripRateProfile
 from app.models.trip_models import GPSActionType
+from app.models.app_setting import AppSetting
 from app.services.gps_service import calculate_distance_meters
 from app.services.notification_service import create_notification
 from app.services.trip_payroll_service import (
@@ -40,7 +41,11 @@ from app.services.trip_payroll_service import (
 
 router = APIRouter(prefix="/driver/trips", tags=["Driver Trips"])
 
-HUB_NAMES = {"Yard", "Plant", "Consolacion", "Test Hub"}
+# Hub/origin locations (yard, plant, satellite offices) used to be
+# identified here by a hardcoded set of store names. They're now marked
+# with Store.is_hub (see app/models/stores.py) and looked up with a plain
+# `Store.is_hub.is_(True)` filter wherever this used to be referenced --
+# see get_available_stores() and complete_trip() below.
 
 # =========================
 # DRIVER TRIP LOGGER
@@ -278,26 +283,21 @@ def get_trip_rate_profiles(
 # GET AVAILABLE STORES
 # =========================
 
-# Hub/origin locations that drivers pick up from, not deliver to --
-# these should not appear in the "select store" list on Start Trip.
-#
-# NOTE: matching by name is a quick fix. If these get renamed, this
-# silently stops excluding them. Consider adding a proper boolean
-# column (e.g. Store.is_hub) instead of relying on name matching.
-EXCLUDED_STORE_NAMES = {"plant", "test hub", "yard", "consolacion"}
-
-
 @router.get("/available-stores")
 def get_available_stores(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
+    """List stores a driver can pick as a delivery destination when
+    starting a trip. Hub/origin locations (Store.is_hub) are excluded --
+    a driver delivers TO a store, not to a hub, so hubs don't belong in
+    this dropdown."""
     stores = db.query(Store).order_by(Store.name.asc()).all()
 
     results = []
 
     for store in stores:
-        if store.name.strip().lower() in EXCLUDED_STORE_NAMES:
+        if store.is_hub:
             continue
 
         # Preferred path: direct FK, set by the migration/backfill or by
@@ -1168,9 +1168,12 @@ def complete_trip(
         )
 
     # ---------------------------------------
-    # 3️⃣ Validate GPS Against Allowed Hub Names
+    # 3️⃣ Validate GPS Against Allowed Hub Locations
     # ---------------------------------------
-    hub_stores = db.query(Store).filter(Store.name.in_(HUB_NAMES)).all()
+    # A trip can only be completed once the driver's GPS is back within
+    # range of a hub (Store.is_hub) -- each hub's own latitude/longitude/
+    # allowed_radius_meters (from tpc_stores) defines its geofence.
+    hub_stores = db.query(Store).filter(Store.is_hub.is_(True)).all()
 
     if not hub_stores:
         raise HTTPException(
@@ -1190,9 +1193,10 @@ def complete_trip(
             valid_hub = store
 
     if not valid_hub:
+        hub_names = ", ".join(store.name for store in hub_stores)
         raise HTTPException(
             status_code=400,
-            detail="You must return to Yard, Plant, or Consolacion to complete trip.",
+            detail=f"You must return to one of: {hub_names} to complete trip.",
         )
 
     # ---------------------------------------
@@ -1562,13 +1566,19 @@ def get_driver_profile(
 # A trip only counts toward the driver's wallet once its
 # TripFinanceReview has been fully approved. Which date within that
 # review workflow determines the payroll cutoff is controlled by a
-# single switch here, so it can be changed later without touching
-# the query logic below.
+# single switch, so it can be changed later without touching the query
+# logic below.
 #
 #   "coordinator" -> TripFinanceReview.coordinator_settlement_date
 #   "office"      -> TripFinanceReview.office_reviewed_at
 #   "finance"     -> TripFinanceReview.approved_at
-WALLET_SETTLEMENT_SOURCE = "coordinator"
+#
+# This used to be a hardcoded WALLET_SETTLEMENT_SOURCE = "coordinator"
+# constant. It now lives in the tpc_app_settings table (key
+# "wallet_settlement_source") so it can be changed by updating a row
+# instead of editing code and redeploying -- see get_wallet_settlement_source()
+# below, and app/models/app_setting.py for the table itself.
+WALLET_SETTLEMENT_SOURCE_DEFAULT = "coordinator"
 
 WALLET_SETTLEMENT_ATTR = {
     "coordinator": "coordinator_settlement_date",
@@ -1577,14 +1587,38 @@ WALLET_SETTLEMENT_ATTR = {
 }
 
 
-def _wallet_settlement_column():
-    """SQLAlchemy column to filter/order by, per WALLET_SETTLEMENT_SOURCE."""
-    return getattr(TripFinanceReview, WALLET_SETTLEMENT_ATTR[WALLET_SETTLEMENT_SOURCE])
+def get_wallet_settlement_source(db: Session) -> str:
+    """Reads the `wallet_settlement_source` row from tpc_app_settings.
+
+    Required by: get_wallet() and get_wallet_cutoffs() below, which both
+    need to know which TripFinanceReview date column decides whether a
+    trip's earnings fall inside the payroll cutoff being viewed.
+
+    Falls back to WALLET_SETTLEMENT_SOURCE_DEFAULT if the setting row is
+    missing (e.g. a fresh database before the seed migration has run) or
+    holds a value outside WALLET_SETTLEMENT_ATTR, so a missing/bad setting
+    degrades to the previous hardcoded behavior instead of crashing.
+    """
+    setting = (
+        db.query(AppSetting)
+        .filter(AppSetting.key == "wallet_settlement_source")
+        .first()
+    )
+
+    if setting and setting.value in WALLET_SETTLEMENT_ATTR:
+        return setting.value
+
+    return WALLET_SETTLEMENT_SOURCE_DEFAULT
 
 
-def _wallet_settlement_value(review: TripFinanceReview):
-    """Actual datetime value on a loaded review, per WALLET_SETTLEMENT_SOURCE."""
-    return getattr(review, WALLET_SETTLEMENT_ATTR[WALLET_SETTLEMENT_SOURCE])
+def _wallet_settlement_column(source: str):
+    """SQLAlchemy column to filter/order by, for the given settlement source."""
+    return getattr(TripFinanceReview, WALLET_SETTLEMENT_ATTR[source])
+
+
+def _wallet_settlement_value(review: TripFinanceReview, source: str):
+    """Actual datetime value on a loaded review, for the given settlement source."""
+    return getattr(review, WALLET_SETTLEMENT_ATTR[source])
 
 
 # =========================
@@ -1601,11 +1635,13 @@ def get_wallet_cutoffs(
     # purposes even before they've been approved -- the *earnings shown
     # inside* a given period (see get_wallet below) are still gated on
     # an approved TripFinanceReview and its settlement date.
+    settlement_source = get_wallet_settlement_source(db)
+
     log_wallet_event(
         "wallet_cutoffs_request",
         driver_id=current_user.id,
-        settlement_source=WALLET_SETTLEMENT_SOURCE,
-        settlement_attr=WALLET_SETTLEMENT_ATTR[WALLET_SETTLEMENT_SOURCE],
+        settlement_source=settlement_source,
+        settlement_attr=WALLET_SETTLEMENT_ATTR[settlement_source],
     )
 
     first_trip = (
@@ -1676,14 +1712,15 @@ def get_wallet(
 
     start_utc, end_utc, cutoff_value, label = period_bounds(cursor_key)
 
-    settlement_col = _wallet_settlement_column()
+    settlement_source = get_wallet_settlement_source(db)
+    settlement_col = _wallet_settlement_column(settlement_source)
 
     log_wallet_event(
         "wallet_request",
         driver_id=current_user.id,
         cutoff_param=cutoff,
-        settlement_source=WALLET_SETTLEMENT_SOURCE,
-        settlement_attr=WALLET_SETTLEMENT_ATTR[WALLET_SETTLEMENT_SOURCE],
+        settlement_source=settlement_source,
+        settlement_attr=WALLET_SETTLEMENT_ATTR[settlement_source],
         cutoff_value=cutoff_value,
         cutoff_label=label,
         start_utc=start_utc,
@@ -1713,8 +1750,10 @@ def get_wallet(
                 "ticket_no": trip.ticket_no,
                 "review_id": review.id,
                 "review_status": review.status.value,
-                "settlement_date_raw": _wallet_settlement_value(review),
-                "settlement_date_ph": to_ph(_wallet_settlement_value(review)),
+                "settlement_date_raw": _wallet_settlement_value(review, settlement_source),
+                "settlement_date_ph": to_ph(
+                    _wallet_settlement_value(review, settlement_source)
+                ),
                 "has_rate_profile": trip.trip_rate_profile is not None,
             }
             for trip, review in trip_reviews
@@ -1723,7 +1762,7 @@ def get_wallet(
 
     trips_by_day: dict[str, list[tuple[Trip, TripFinanceReview]]] = {}
     for trip, review in trip_reviews:
-        settlement_date = _wallet_settlement_value(review)
+        settlement_date = _wallet_settlement_value(review, settlement_source)
         day_key = to_ph(settlement_date).strftime("%Y-%m-%d")  # group by settlement date's PH day
         trips_by_day.setdefault(day_key, []).append((trip, review))
 
@@ -1749,7 +1788,7 @@ def get_wallet(
                 "trip_label": f"Trip #{idx + 1}",
                 "start_time": trip.start_time,
                 "end_time": trip.end_time,
-                "sort_time": _wallet_settlement_value(review),
+                "sort_time": _wallet_settlement_value(review, settlement_source),
                 "amount": rate,
                 "cutoff": cutoff_value,
             })
@@ -1769,6 +1808,48 @@ def get_wallet(
         for t in raw_transactions
     ]
 
+    # =========================
+    # EXPECTED PAYMENT
+    # =========================
+    # `earnings` above only counts trips whose finance review has been
+    # fully APPROVED and settled within this cutoff -- so a driver who
+    # completed trips in this period sees ₱0 until office/finance review
+    # catches up. `expected_earnings` is a separate, independent estimate:
+    # every trip that *started* in this cutoff, rated the same way
+    # (first-trip-of-day vs next-trip-of-day), regardless of review
+    # status. It intentionally is not reconciled against `earnings` --
+    # the two use different day-groupings (settlement day vs trip day) --
+    # it's purely "what this driver can expect for trips in this period".
+    expected_trips_qs = (
+        db.query(Trip)
+        .filter(
+            Trip.driver_id == current_user.id,
+            Trip.start_time >= start_utc,
+            Trip.start_time <= end_utc,
+        )
+        .order_by(Trip.start_time.asc())
+        .all()
+    )
+
+    expected_by_day: dict[str, list[Trip]] = {}
+    for trip in expected_trips_qs:
+        day_key = to_ph(trip.start_time).strftime("%Y-%m-%d")
+        expected_by_day.setdefault(day_key, []).append(trip)
+
+    expected_earnings = 0.0
+    for day_items in expected_by_day.values():
+        for idx, trip in enumerate(day_items):
+            profile = trip.trip_rate_profile
+            if not profile:
+                continue
+
+            rate = float(
+                profile.driver_first_trip_rate
+                if idx == 0
+                else profile.driver_next_trip_rate
+            )
+            expected_earnings += rate
+
     log_wallet_event(
         "wallet_response",
         driver_id=current_user.id,
@@ -1776,6 +1857,8 @@ def get_wallet(
         cutoff_label=label,
         earnings=round(total_earnings, 2),
         trips=len(trip_reviews),
+        expected_earnings=round(expected_earnings, 2),
+        expected_trips=len(expected_trips_qs),
         transactions=transactions,
     )
 
@@ -1784,5 +1867,7 @@ def get_wallet(
         "cutoff_label": label,
         "earnings": round(total_earnings, 2),
         "trips": len(trip_reviews),
+        "expected_earnings": round(expected_earnings, 2),
+        "expected_trips": len(expected_trips_qs),
         "transactions": transactions,
     })

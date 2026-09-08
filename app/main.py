@@ -18,6 +18,7 @@ from app.api import (
     users,
     map,
     debugger,
+    leave,
 )
 from app.api.payroll import overtime_approval, payroll_deductions
 from app.api import schedule_template as schedule_template_router
@@ -25,6 +26,7 @@ from app.api.driver import trips
 from app.api.admin import trips as admin_trips
 from app.api.admin import stores as stores
 from app.api.admin import dispatch as admin_dispatch
+from app.api.admin import settings as admin_settings
 from app.api.admin.applicants import router as admin_applicants_router
 from app.api.public.public_applicant import router as public_applicant_router
 from app.api.public.applicant_onboarding import router as applicant_onboarding_router
@@ -114,6 +116,7 @@ app.include_router(attendance.router, prefix="/api")
 app.include_router(dashboard.router, prefix="/api")
 app.include_router(reminder.router, prefix="/api")
 app.include_router(users.router, prefix="/api")
+app.include_router(leave.router, prefix="/api")
 app.include_router(overtime_approval.router, prefix="/api")
 app.include_router(payroll_deductions.router, prefix="/api")
 app.include_router(schedule_template_router.router, prefix="/api")
@@ -123,6 +126,7 @@ app.include_router(trip_maintenance_router.router, prefix="/api")
 app.include_router(admin_trips.router, prefix="/api")
 app.include_router(stores.router, prefix="/api")
 app.include_router(admin_dispatch.router, prefix="/api")
+app.include_router(admin_settings.router, prefix="/api")
 app.include_router(admin_applicants_router)
 app.include_router(admin_applicant_questions_router)
 

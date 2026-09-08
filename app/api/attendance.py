@@ -381,6 +381,63 @@ def get_my_attendance_today(
     }
 
 
+@router.get("/my-history")
+def get_my_attendance_history(
+    month: str | None = None,
+    limit: int = 60,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Attendance history for the logged-in user's own employee record.
+
+    `month` is an optional "YYYY-MM" filter; defaults to the current
+    PH-timezone month when omitted.
+    """
+    if not current_user.employee_id:
+        raise HTTPException(
+            status_code=400,
+            detail="User account is not linked to an employee.",
+        )
+
+    if month:
+        try:
+            year_str, month_str = month.split("-")
+            period_start = date(int(year_str), int(month_str), 1)
+        except (ValueError, AttributeError):
+            raise HTTPException(status_code=400, detail="Invalid month format, expected YYYY-MM.")
+    else:
+        period_start = datetime.now(ZoneInfo("Asia/Manila")).date().replace(day=1)
+
+    if period_start.month == 12:
+        period_end = date(period_start.year + 1, 1, 1)
+    else:
+        period_end = date(period_start.year, period_start.month + 1, 1)
+
+    records = (
+        db.query(AttendanceRecord)
+        .filter(
+            AttendanceRecord.employee_id == current_user.employee_id,
+            AttendanceRecord.attendance_date >= period_start,
+            AttendanceRecord.attendance_date < period_end,
+        )
+        .order_by(AttendanceRecord.attendance_date.desc())
+        .limit(limit)
+        .all()
+    )
+
+    return [
+        {
+            "id": record.id,
+            "attendance_date": str(record.attendance_date),
+            "check_in_time": format_attendance_time_only(record.check_in_time),
+            "check_out_time": format_attendance_time_only(record.check_out_time),
+            "status": record.status,
+            "remarks": record.remarks,
+        }
+        for record in records
+    ]
+
+
 @router.post("/", response_model=AttendanceResponse)
 def mark_attendance(
     attendance_in: AttendanceCreate,

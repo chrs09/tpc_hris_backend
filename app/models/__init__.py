@@ -52,3 +52,7 @@ from .holiday import Holiday as Holiday
 from .payroll_deductions import PayrollDeduction as PayrollDeduction
 from .finance_expense import FinanceExpense as FinanceExpense
 from .finance_expense_item import FinanceExpenseItem as FinanceExpenseItem
+from .trip_finance_review import TripFinanceReview as TripFinanceReview
+from .leave_request import LeaveRequest as LeaveRequest
+from .app_setting import AppSetting as AppSetting
+from .user_revision import UserRevision as UserRevision

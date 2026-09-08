@@ -136,3 +136,9 @@ class Employee(Base):
         back_populates="helper",
         cascade="all, delete-orphan",
     )
+
+    leave_requests = relationship(
+        "LeaveRequest",
+        back_populates="employee",
+        cascade="all, delete-orphan",
+    )

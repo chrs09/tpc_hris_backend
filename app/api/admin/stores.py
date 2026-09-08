@@ -57,6 +57,12 @@ class StoreCreateRequest(BaseModel):
     required_helper: int
     trip_rate_profile_id: int          # ADD THIS
     profile: Optional[str] = None      # can stay for now, or remove if you're ready
+    # Marks this store as a hub/origin location (yard, plant, satellite
+    # office) instead of a delivery destination. Required by
+    # app/api/driver/trips.py's get_available_stores() (hides hubs from
+    # the "select store" dropdown) and complete_trip() (a trip can only
+    # be completed near a hub).
+    is_hub: bool = False
 
 class StoreUpdateRequest(BaseModel):
     name: Optional[str] = None
@@ -66,6 +72,7 @@ class StoreUpdateRequest(BaseModel):
     required_helper: Optional[int] = None
     trip_rate_profile_id: Optional[int] = None
     profile: Optional[str] = None
+    is_hub: Optional[bool] = None
 
     class Config:
         orm_mode = True
@@ -113,6 +120,7 @@ def build_store_response(store: Store) -> dict:
         "allowed_radius_meters": store.allowed_radius_meters,
         "required_helper": store.required_helper,
         "profile": store.profile,
+        "is_hub": store.is_hub,
     }
 
 
@@ -350,6 +358,7 @@ def create_store(
         # LEGACY: keep `profile` in sync for now so old code paths
         # (and any lingering references) still work during rollout.
         profile=trip_rate_profile.code,
+        is_hub=payload.is_hub,
     )
 
     db.add(new_store)
@@ -620,6 +629,9 @@ def update_store(
         # LEGACY: keep `profile` in sync for now, same as create_store,
         # until the column is fully removed.
         store.profile = profile.code
+
+    if payload.is_hub is not None:
+        store.is_hub = payload.is_hub
 
     db.commit()
     db.refresh(store)
