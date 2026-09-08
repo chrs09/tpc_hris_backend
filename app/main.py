@@ -19,6 +19,7 @@ from app.api import (
     map,
     debugger,
     leave,
+    overtime_request,
 )
 from app.api.payroll import overtime_approval, payroll_deductions
 from app.api import schedule_template as schedule_template_router
@@ -117,6 +118,7 @@ app.include_router(dashboard.router, prefix="/api")
 app.include_router(reminder.router, prefix="/api")
 app.include_router(users.router, prefix="/api")
 app.include_router(leave.router, prefix="/api")
+app.include_router(overtime_request.router, prefix="/api")
 app.include_router(overtime_approval.router, prefix="/api")
 app.include_router(payroll_deductions.router, prefix="/api")
 app.include_router(schedule_template_router.router, prefix="/api")

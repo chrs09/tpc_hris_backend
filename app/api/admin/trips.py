@@ -12,7 +12,7 @@ from app.core.dependencies import get_current_trip_manager, get_current_user
 from app.models.trips import Trip, TripStatus
 from app.models.notification import Notification
 from app.models.trip_stops import TripStop
-from app.models.user import User
+from app.models.user import User, UserRole
 from app.models.employees import Employee
 from app.models.trip_helper import TripHelper
 from app.models.trip_finance_review import FinanceReviewStatus, TripFinanceReview
@@ -40,6 +40,48 @@ def get_trip_summary(
         .filter(Trip.status == TripStatus.COMPLETED, Trip.end_time >= today)
         .count(),
     }
+
+
+# =========================
+# GET AVAILABLE DRIVERS
+#
+# Drivers a trip manager can start a trip for (see the driver_id bypass
+# on POST /driver/trips/start) -- active accounts with no trip already
+# in progress.
+# =========================
+@router.get("/available-drivers")
+def get_available_drivers(
+    db: Session = Depends(get_db), current_admin=Depends(get_current_trip_manager)
+):
+    drivers_with_active_trip = {
+        row[0]
+        for row in db.query(Trip.driver_id)
+        .filter(Trip.status == TripStatus.ACTIVE)
+        .all()
+    }
+
+    drivers = (
+        db.query(User)
+        .options(joinedload(User.employee))
+        .filter(User.role == UserRole.DRIVER, User.is_active.is_(True))
+        .order_by(User.username.asc())
+        .all()
+    )
+
+    return [
+        {
+            "id": driver.id,
+            "username": driver.username,
+            "employee_id": driver.employee_id,
+            "employee_name": (
+                f"{driver.employee.first_name} {driver.employee.last_name}"
+                if driver.employee
+                else None
+            ),
+        }
+        for driver in drivers
+        if driver.id not in drivers_with_active_trip
+    ]
 
 
 # =========================

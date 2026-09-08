@@ -15,6 +15,7 @@ from app.core.database import get_db
 from app.utils.response import api_response
 from app.schemas.trip import LocationRequest
 from app.core.dependencies import get_current_user
+from app.models.user import User, UserRole
 from app.models.trips import Trip, TripStatus
 from app.models.trip_finance_review import TripFinanceReview, FinanceReviewStatus
 from app.models.trip_stops import TripStop, StopStatus
@@ -40,6 +41,15 @@ from app.services.trip_payroll_service import (
 )
 
 router = APIRouter(prefix="/driver/trips", tags=["Driver Trips"])
+
+# Roles that can start a trip on behalf of a driver instead of themselves
+# (e.g. the driver checks in on their own phone afterward). Mirrors
+# get_current_trip_manager in app/core/dependencies.py.
+TRIP_MANAGER_ROLES = {"admin", "superadmin", "coordinator_admin"}
+
+
+def _role_value(role) -> str:
+    return role.value if hasattr(role, "value") else str(role)
 
 # Hub/origin locations (yard, plant, satellite offices) used to be
 # identified here by a hardcoded set of store names. They're now marked
@@ -170,14 +180,31 @@ class TrackLocationRequest(BaseModel):
 # =========================
 @router.get("/available-helpers")
 def get_available_helpers(
+    driver_id: int | None = Query(None),
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
     # ---------------------------------------
     # 1️⃣ Get Driver Employee Record
+    #
+    # driver_id is only honored for a trip manager looking up helpers on
+    # behalf of a driver (see start_trip's bypass) -- a plain driver always
+    # gets helpers for their own department regardless of what's passed.
     # ---------------------------------------
+    employee_id = current_user.employee_id
+
+    if driver_id and _role_value(current_user.role) in TRIP_MANAGER_ROLES:
+        target_user = (
+            db.query(User)
+            .filter(User.id == driver_id, User.role == UserRole.DRIVER)
+            .first()
+        )
+        if not target_user:
+            raise HTTPException(status_code=400, detail="Selected driver not found.")
+        employee_id = target_user.employee_id
+
     driver_employee = (
-        db.query(Employee).filter(Employee.id == current_user.employee_id).first()
+        db.query(Employee).filter(Employee.id == employee_id).first()
     )
 
     if not driver_employee:
@@ -473,6 +500,7 @@ def start_trip(
     long: float = Form(...),
     photo: UploadFile = File(...),
     helper_ids: str = Form("[]"),
+    driver_id: int | None = Form(None),
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
@@ -484,6 +512,36 @@ def start_trip(
 
     if len(helper_ids) != len(set(helper_ids)):
         raise HTTPException(status_code=400, detail="Duplicate helpers selected.")
+
+    # ---------------------------------------
+    # WHO IS THIS TRIP FOR?
+    #
+    # Normally the caller IS the driver. A trip manager (admin/superadmin/
+    # coordinator_admin) can instead start a trip on behalf of a driver --
+    # e.g. dispatching from the office -- who then just checks in/out from
+    # their own phone for the rest of the trip. Every other field (photo,
+    # vehicle, store, helpers, lat/long) is submitted exactly like the
+    # driver flow; driver_id is the only addition.
+    # ---------------------------------------
+    is_trip_manager = _role_value(current_user.role) in TRIP_MANAGER_ROLES
+
+    if is_trip_manager:
+        if not driver_id:
+            raise HTTPException(
+                status_code=400,
+                detail="Select which driver this trip is being started for.",
+            )
+
+        target_user = (
+            db.query(User)
+            .filter(User.id == driver_id, User.role == UserRole.DRIVER)
+            .first()
+        )
+
+        if not target_user:
+            raise HTTPException(status_code=400, detail="Selected driver not found.")
+    else:
+        target_user = current_user
 
     # ---------------------------------------
     # VEHICLE VALIDATION
@@ -544,12 +602,19 @@ def start_trip(
     # ---------------------------------------
     existing_active = (
         db.query(Trip)
-        .filter(Trip.driver_id == current_user.id, Trip.status == TripStatus.ACTIVE)
+        .filter(Trip.driver_id == target_user.id, Trip.status == TripStatus.ACTIVE)
         .first()
     )
 
     if existing_active:
-        raise HTTPException(status_code=400, detail="You already have an active trip.")
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "This driver already has an active trip."
+                if is_trip_manager
+                else "You already have an active trip."
+            ),
+        )
 
     # ---------------------------------------
     # 2️⃣ Validate shipment number
@@ -574,7 +639,11 @@ def start_trip(
     #
     # Origin is the hub the driver is physically at right now (Yard,
     # Plant, Test Hub, Consolacion, etc.) -- determined by GPS proximity,
-    # independent of the destination store selected above.
+    # independent of the destination store selected above. A trip manager
+    # submits lat/long the same way a driver does, but since they're
+    # dispatching from the office rather than standing at a hub, the
+    # allowed_radius_meters cutoff is bypassed for them -- just pick
+    # whichever hub is nearest to whatever location they sent.
     # ---------------------------------------
     stores = db.query(Store).all()
 
@@ -585,13 +654,24 @@ def start_trip(
 
         distance = calculate_distance_meters(lat, long, store.latitude, store.longitude)
 
-        if distance <= store.allowed_radius_meters and distance < min_distance:
+        if is_trip_manager:
+            if not store.is_hub:
+                continue
+            if distance < min_distance:
+                min_distance = distance
+                closest_store = store
+        elif distance <= store.allowed_radius_meters and distance < min_distance:
             min_distance = distance
             closest_store = store
 
     if not closest_store:
         raise HTTPException(
-            status_code=400, detail="You must start the trip from a valid hub location."
+            status_code=400,
+            detail=(
+                "No hub locations are configured."
+                if is_trip_manager
+                else "You must start the trip from a valid hub location."
+            ),
         )
 
     # ---------------------------------------
@@ -621,7 +701,7 @@ def start_trip(
         raise HTTPException(status_code=400, detail="Maximum of 3 helpers allowed.")
 
     driver_employee = (
-        db.query(Employee).filter(Employee.id == current_user.employee_id).first()
+        db.query(Employee).filter(Employee.id == target_user.employee_id).first()
     )
 
     if not driver_employee:
@@ -666,7 +746,7 @@ def start_trip(
     try:
 
         new_trip = Trip(
-            driver_id=current_user.id,
+            driver_id=target_user.id,
             origin_store_id=closest_store.id,
             ticket_no=shipment_no,
             vehicle_unit_id=vehicle.id,

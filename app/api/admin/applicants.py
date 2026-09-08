@@ -552,10 +552,10 @@ def generate_employment_form(
     if not applicant:
         raise HTTPException(status_code=404, detail="Applicant not found")
 
-    if applicant.status.lower() != "interview":
+    if applicant.status.lower() != "reviewed":
         raise HTTPException(
             status_code=400,
-            detail="Employment form can only be generated for interview applicants",
+            detail="Employment form can only be generated for reviewed applicants",
         )
 
     if applicant.is_converted_to_employee:
@@ -633,7 +633,7 @@ def convert_to_employee(
             status_code=400,
             detail=(
                 "Applicant did not fill the onboarding form yet. "
-                "Move the applicant to Interview status and generate the onboarding form first."
+                "Move the applicant to Reviewed status and generate the onboarding form first."
             ),
         )
 
