@@ -51,6 +51,19 @@ TRIP_MANAGER_ROLES = {"admin", "superadmin", "coordinator_admin"}
 def _role_value(role) -> str:
     return role.value if hasattr(role, "value") else str(role)
 
+
+def _helper_departments_for(driver_department: str | None) -> list[str]:
+    """Which Employee.department values count as eligible helpers for a
+    driver in the given department. CpdcDriver/CdcDriver each draw from
+    their own dedicated helper department; every other driver department
+    (WingvanDriver, Dumptruck, Motorpool, Labor, etc.) shares the combined
+    Cdc/Cpdc helper pool instead of needing a department-specific one."""
+    if driver_department == "CpdcDriver":
+        return ["CpdcHelper"]
+    if driver_department == "CdcDriver":
+        return ["CdcHelper"]
+    return ["CdcHelper", "CpdcHelper"]
+
 # Hub/origin locations (yard, plant, satellite offices) used to be
 # identified here by a hardcoded set of store names. They're now marked
 # with Store.is_hub (see app/models/stores.py) and looked up with a plain
@@ -211,15 +224,9 @@ def get_available_helpers(
         raise HTTPException(status_code=400, detail="Driver employee record not found.")
 
     # ---------------------------------------
-    # 2️⃣ Determine Allowed Helper Department
+    # 2️⃣ Determine Allowed Helper Department(s)
     # ---------------------------------------
-    if driver_employee.department == "CpdcDriver":
-        required_department = "CpdcHelper"
-    elif driver_employee.department == "CdcDriver":
-        required_department = "CdcHelper"
-    else:
-        # Driver not eligible for helpers
-        return []
+    required_departments = _helper_departments_for(driver_employee.department)
 
     # ---------------------------------------
     # 3️⃣ Get Available Helpers
@@ -228,7 +235,7 @@ def get_available_helpers(
         db.query(Employee)
         .filter(
             Employee.position == "HELPER",
-            Employee.department == required_department,
+            Employee.department.in_(required_departments),
             Employee.is_active == 1,
             Employee.is_available == 1,
         )
@@ -707,14 +714,7 @@ def start_trip(
     if not driver_employee:
         raise HTTPException(status_code=400, detail="Driver employee not found.")
 
-    if driver_employee.department == "CpdcDriver":
-        required_department = "CpdcHelper"
-
-    elif driver_employee.department == "CdcDriver":
-        required_department = "CdcHelper"
-
-    else:
-        raise HTTPException(status_code=400, detail="Driver not eligible for helpers.")
+    required_departments = _helper_departments_for(driver_employee.department)
 
     helper_objects = []
 
@@ -730,7 +730,7 @@ def start_trip(
         if helper.position.upper() != "HELPER":
             raise HTTPException(status_code=400, detail="Invalid helper position.")
 
-        if helper.department != required_department:
+        if helper.department not in required_departments:
             raise HTTPException(status_code=400, detail="Helper department mismatch.")
 
         if not helper.is_available:
