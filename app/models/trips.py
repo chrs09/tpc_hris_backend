@@ -2,7 +2,16 @@
 
 import enum
 from datetime import datetime
-from sqlalchemy import Column, Integer, DateTime, ForeignKey, Enum, String, func
+from sqlalchemy import (
+    Column,
+    Integer,
+    DateTime,
+    ForeignKey,
+    Enum,
+    String,
+    Boolean,
+    func,
+)
 from sqlalchemy.orm import relationship
 from app.core.database import Base
 
@@ -62,6 +71,12 @@ class Trip(Base):
     end_time = Column(DateTime, nullable=True)
 
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
+
+    # True when the driver was allowed to start this trip despite not
+    # being within any hub's GPS radius (previously a hard block) -- lets
+    # the trip proceed while flagging it for the trip manager to notice
+    # on the Active Trips Monitoring page.
+    started_outside_hub_range = Column(Boolean, default=False, nullable=False)
 
     driver = relationship("User", back_populates="trips")
 

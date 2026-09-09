@@ -20,6 +20,10 @@ from app.api import (
     debugger,
     leave,
     overtime_request,
+    department_head,
+    employee_module_access,
+    cash_advance_request,
+    cash_advance_settings,
 )
 from app.api.payroll import overtime_approval, payroll_deductions
 from app.api import schedule_template as schedule_template_router
@@ -119,6 +123,10 @@ app.include_router(reminder.router, prefix="/api")
 app.include_router(users.router, prefix="/api")
 app.include_router(leave.router, prefix="/api")
 app.include_router(overtime_request.router, prefix="/api")
+app.include_router(department_head.router, prefix="/api")
+app.include_router(employee_module_access.router, prefix="/api")
+app.include_router(cash_advance_request.router, prefix="/api")
+app.include_router(cash_advance_settings.router, prefix="/api")
 app.include_router(overtime_approval.router, prefix="/api")
 app.include_router(payroll_deductions.router, prefix="/api")
 app.include_router(schedule_template_router.router, prefix="/api")

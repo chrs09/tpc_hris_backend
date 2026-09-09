@@ -52,6 +52,20 @@ def _role_value(role) -> str:
     return role.value if hasattr(role, "value") else str(role)
 
 
+def _geofence_label(store, distance: float | None, outside_range: bool = False) -> str | None:
+    """A short "<place> (<distance>m)" label burned into a photo's
+    watermark alongside the timestamp, so the stored image also carries a
+    rough record of where it was taken."""
+    if not store:
+        return None
+    label = store.name
+    if distance is not None and distance != float("inf"):
+        label += f" ({int(distance)}m)"
+    if outside_range:
+        label += " - outside range"
+    return label
+
+
 def _helper_departments_for(driver_department: str | None) -> list[str]:
     """Which Employee.department values count as eligible helpers for a
     driver in the given department. CpdcDriver/CdcDriver each draw from
@@ -656,10 +670,16 @@ def start_trip(
 
     closest_store = None
     min_distance = float("inf")
+    nearest_hub = None
+    nearest_hub_distance = float("inf")
 
     for store in stores:
 
         distance = calculate_distance_meters(lat, long, store.latitude, store.longitude)
+
+        if store.is_hub and distance < nearest_hub_distance:
+            nearest_hub_distance = distance
+            nearest_hub = store
 
         if is_trip_manager:
             if not store.is_hub:
@@ -671,13 +691,22 @@ def start_trip(
             min_distance = distance
             closest_store = store
 
+    # A driver outside every hub's radius is no longer hard-blocked -- the
+    # trip proceeds against the nearest hub anyway, flagged so the trip
+    # manager notices it on Active Trips Monitoring, since the alternative
+    # (stranding a driver who genuinely needs to start a trip) is worse.
+    started_outside_hub_range = False
+    if not closest_store and not is_trip_manager and nearest_hub:
+        closest_store = nearest_hub
+        started_outside_hub_range = True
+
     if not closest_store:
         raise HTTPException(
             status_code=400,
             detail=(
                 "No hub locations are configured."
                 if is_trip_manager
-                else "You must start the trip from a valid hub location."
+                else "No hub locations are configured. Contact an admin."
             ),
         )
 
@@ -753,19 +782,39 @@ def start_trip(
             trip_rate_profile_id=profile.id,
             status=TripStatus.ACTIVE,
             start_time=datetime.utcnow(),
+            started_outside_hub_range=started_outside_hub_range,
         )
 
         db.add(new_trip)
         db.flush()
+
+        if started_outside_hub_range:
+            create_notification(
+                db,
+                type_="STARTED_OUTSIDE_HUB_RANGE",
+                driver_id=target_user.id,
+                trip_id=new_trip.id,
+                message=(
+                    f"{target_user.username} started trip #{shipment_no} "
+                    f"outside any hub's range (nearest: {closest_store.name})."
+                ),
+            )
 
         vehicle.is_available = False
 
         # Upload start photo
         file_service = FileService()
 
-        photo_url = file_service.upload_trip_start_photo(   
+        start_geofence_label = _geofence_label(
+            closest_store,
+            nearest_hub_distance if started_outside_hub_range else min_distance,
+            outside_range=started_outside_hub_range,
+        )
+
+        photo_url = file_service.upload_trip_start_photo(
             photo,
             new_trip.id,
+            geofence_label=start_geofence_label,
         )
 
         trip_file = FileModel(
@@ -1040,6 +1089,7 @@ def check_out(
         proof_photo,
         trip_id=trip_id,
         stop_id=stop.id,
+        geofence_label=_geofence_label(store, distance),
     )
 
     stop_file = FileModel(
@@ -1319,6 +1369,7 @@ def complete_trip(
     photo_url = file_service.upload_trip_end_photo(
         stamped_invoice_photo,
         trip.id,
+        geofence_label=_geofence_label(valid_hub, min_distance),
     )
 
     trip_file = FileModel(

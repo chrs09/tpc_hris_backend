@@ -1,9 +1,85 @@
 import os
 import uuid
 import mimetypes
+from io import BytesIO
+from datetime import datetime
+
 import boto3
 from azure.storage.blob import BlobServiceClient, ContentSettings
+from PIL import Image, ImageDraw, ImageFont
+
 from app.core.config import settings
+from app.utils.timezone import utc_to_ph
+
+
+def _watermark_timestamp(file, geofence_label: str | None = None):
+    """Burns the current PH timestamp -- and, when available, a geofence
+    line (e.g. "TPC Yard (42m)" or "Outside geofence - nearest: ...") --
+    onto the bottom-right corner of an uploaded photo before storage, so
+    the stored image itself carries proof of when and roughly where it was
+    taken. Matches the same watermarking done on mobile-captured photos.
+    Only touches image uploads; anything else (or any Pillow failure)
+    passes through untouched rather than blocking the action."""
+    try:
+        content_type = getattr(file, "content_type", "") or ""
+        if not content_type.startswith("image/"):
+            return file
+
+        file.file.seek(0)
+        image = Image.open(file.file)
+        image = image.convert("RGB")
+
+        draw = ImageDraw.Draw(image)
+        lines = [
+            utc_to_ph(datetime.utcnow()).strftime("%b %d, %Y %I:%M %p") + " PHT"
+        ]
+        if geofence_label:
+            lines.append(geofence_label)
+
+        try:
+            font = ImageFont.truetype("arial.ttf", size=max(16, image.width // 45))
+        except Exception:
+            font = ImageFont.load_default()
+
+        line_metrics = []
+        max_text_w = 0
+        for line in lines:
+            bbox = draw.textbbox((0, 0), line, font=font)
+            w, h = bbox[2] - bbox[0], bbox[3] - bbox[1]
+            line_metrics.append((line, w, h))
+            max_text_w = max(max_text_w, w)
+
+        padding = 8
+        line_spacing = 4
+        total_text_h = sum(h for _, _, h in line_metrics) + line_spacing * (
+            len(line_metrics) - 1
+        )
+
+        bar_top = image.height - total_text_h - padding * 2
+        draw.rectangle([0, bar_top, image.width, image.height], fill=(0, 0, 0))
+
+        y = bar_top + padding
+        for line, w, h in line_metrics:
+            draw.text(
+                (image.width - w - padding, y),
+                line,
+                fill=(255, 255, 255),
+                font=font,
+            )
+            y += h + line_spacing
+
+        buffer = BytesIO()
+        image.save(buffer, format="JPEG", quality=90)
+        buffer.seek(0)
+
+        file.file = buffer
+        return file
+    except Exception:
+        try:
+            file.file.seek(0)
+        except Exception:
+            pass
+        return file
 
 
 class FileService:
@@ -139,7 +215,7 @@ class FileService:
     # TRIP FILES
     # ===============================
 
-    def upload_trip_start_photo(self, file, trip_id):
+    def upload_trip_start_photo(self, file, trip_id, geofence_label=None):
         """
         Upload photo taken when starting a trip.
 
@@ -147,10 +223,10 @@ class FileService:
         trips/{trip_id}/start/{filename}
         """
         folder = f"trips/{trip_id}/start"
-        return self.upload(file, folder)
+        return self.upload(_watermark_timestamp(file, geofence_label), folder)
 
 
-    def upload_trip_pod_photo(self, file, trip_id, stop_id):
+    def upload_trip_pod_photo(self, file, trip_id, stop_id, geofence_label=None):
         """
         Upload Proof of Delivery (POD) for a specific trip stop.
 
@@ -158,10 +234,10 @@ class FileService:
         trips/{trip_id}/pod/{stop_id}/{filename}
         """
         folder = f"trips/{trip_id}/pod/{stop_id}"
-        return self.upload(file, folder)
+        return self.upload(_watermark_timestamp(file, geofence_label), folder)
 
 
-    def upload_trip_end_photo(self, file, trip_id):
+    def upload_trip_end_photo(self, file, trip_id, geofence_label=None):
         """
         Upload stamped invoice / end-of-trip photo.
 
@@ -169,7 +245,7 @@ class FileService:
         trips/{trip_id}/end/{filename}
         """
         folder = f"trips/{trip_id}/end"
-        return self.upload(file, folder)
+        return self.upload(_watermark_timestamp(file, geofence_label), folder)
 
 
     def upload_gps_log_photo(self, file, trip_id):
@@ -195,3 +271,18 @@ class FileService:
     def upload_employee_photo(self, file, employee_id):
         folder = f"employees/{employee_id}"
         return self.upload(file, folder)
+
+    # ===============================
+    # OVERTIME FILES
+    # ===============================
+
+    def upload_overtime_selfie(self, file, overtime_request_id, geofence_label=None):
+        """
+        Upload the live selfie taken when an employee clocks in to
+        callback overtime.
+
+        Structure:
+        overtime/{overtime_request_id}/selfie/{filename}
+        """
+        folder = f"overtime/{overtime_request_id}/selfie"
+        return self.upload(_watermark_timestamp(file, geofence_label), folder)

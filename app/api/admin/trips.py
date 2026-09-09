@@ -140,6 +140,7 @@ def get_active_trips(
             "status": trip.status.value,
             "start_time": utc_to_ph(trip.start_time).strftime("%Y-%m-%d %I:%M:%S %p"),
             "username": trip.driver.username,  # 👈 THIS IS ALL YOU NEED
+            "started_outside_hub_range": trip.started_outside_hub_range,
         }
         for trip in trips
     ]

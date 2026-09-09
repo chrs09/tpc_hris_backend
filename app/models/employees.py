@@ -1,5 +1,14 @@
 from datetime import datetime
-from sqlalchemy import Column, DateTime, Integer, String, Date, ForeignKey, Numeric
+from sqlalchemy import (
+    Boolean,
+    Column,
+    DateTime,
+    Integer,
+    String,
+    Date,
+    ForeignKey,
+    Numeric,
+)
 from sqlalchemy.orm import relationship
 from app.core.database import Base
 from app.models.user import User
@@ -19,6 +28,13 @@ class Employee(Base):
     department = Column(String(100), nullable=False)
     is_active = Column(Integer, nullable=False, default=1)
     is_available = Column(Integer, nullable=False, default=1)
+
+    # True once superadmin has explicitly saved this employee's module
+    # access (even to an empty set) via Module Assignment -- distinguishes
+    # "never configured, fall back to role defaults" from "deliberately
+    # restricted to nothing" for the same empty module_keys list. See
+    # app/api/employee_module_access.py.
+    has_custom_module_access = Column(Boolean, nullable=False, default=False)
 
     daily_rate = Column(Numeric(10, 2), nullable=True)
     monthly_basic = Column(Numeric(10, 2), nullable=True)

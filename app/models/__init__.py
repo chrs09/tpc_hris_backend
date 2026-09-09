@@ -58,3 +58,13 @@ from .app_setting import AppSetting as AppSetting
 from .user_revision import UserRevision as UserRevision
 from .overtime_approver import OvertimeApprover as OvertimeApprover
 from .overtime_request import OvertimeRequest as OvertimeRequest
+from .department_head import DepartmentHead as DepartmentHead
+from .employee_module_access import EmployeeModuleAccess as EmployeeModuleAccess
+from .cash_advance_deduction_option import (
+    CashAdvanceDeductionOption as CashAdvanceDeductionOption,
+)
+from .cash_advance_terms import CashAdvanceTerms as CashAdvanceTerms
+from .cash_advance_request import CashAdvanceRequest as CashAdvanceRequest
+from .cash_advance_deduction_log import (
+    CashAdvanceDeductionLog as CashAdvanceDeductionLog,
+)
