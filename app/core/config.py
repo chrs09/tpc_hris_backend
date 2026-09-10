@@ -102,6 +102,21 @@ class Settings:
     SMTP_FROM_NAME = os.getenv("SMTP_FROM_NAME", "Tytan Prime Corporation HR")
 
     # ===============================
+    # SLACK ALERTS
+    # ===============================
+    # Incoming Webhook for #production-errors -- posted to whenever the
+    # API throws an unhandled exception (see the global exception
+    # handler in app/main.py / app/services/slack_service.py).
+    SLACK_ERRORS_WEBHOOK_URL = os.getenv("SLACK_ERRORS_WEBHOOK_URL")
+
+    # Incoming Webhook for #server-monitoring -- NOT called by this
+    # backend. It's meant to be pasted into an external uptime pinger
+    # (UptimeRobot, Better Uptime, etc.) configured to hit GET /api/health
+    # and alert this webhook when the server stops responding. Kept here
+    # only for reference/documentation, not read anywhere in code.
+    SLACK_UPTIME_WEBHOOK_URL = os.getenv("SLACK_UPTIME_WEBHOOK_URL")
+
+    # ===============================
     # CORS
     # ===============================
     CORS_ORIGINS = [

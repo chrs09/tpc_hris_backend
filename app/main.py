@@ -2,12 +2,15 @@ import logging
 import os
 import traceback
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.core.config import settings
+from app.services.slack_service import send_error_alert, send_response_alert
 from app.api import (
     health,
     auth,
@@ -59,11 +62,73 @@ app = FastAPI(
 )
 
 
+# Any HTTP error response (4xx/5xx) now triggers a Slack alert -- every
+# status code, not just 400/422. Set this to a specific set of codes
+# instead of `None` if the channel ever gets too noisy and some codes
+# (e.g. 401 wrong-password spam) need to be excluded again.
+ALERT_STATUS_CODES = None
+
+
+def _should_alert(status_code: int) -> bool:
+    if ALERT_STATUS_CODES is None:
+        return status_code >= 400
+    return status_code in ALERT_STATUS_CODES
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    """Replicates FastAPI's default HTTPException handling exactly
+    (same response shape/headers for every status code), but also posts
+    a Slack alert for every error status."""
+    if _should_alert(exc.status_code):
+        send_response_alert(
+            method=request.method,
+            url=str(request.url),
+            status_code=exc.status_code,
+            detail=exc.detail,
+        )
+
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.detail},
+        headers=getattr(exc, "headers", None),
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(
+    request: Request, exc: RequestValidationError
+):
+    """FastAPI/Pydantic request validation failures -- always a 422.
+    Replicates the default response shape, plus a Slack alert."""
+    errors = jsonable_encoder(exc.errors())
+
+    if _should_alert(422):
+        send_response_alert(
+            method=request.method,
+            url=str(request.url),
+            status_code=422,
+            detail=errors,
+        )
+
+    return JSONResponse(status_code=422, content={"detail": errors})
+
+
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
     logger.error("UNHANDLED SERVER ERROR")
     logger.error("URL: %s %s", request.method, request.url)
     traceback.print_exc()
+
+    # Best-effort Slack alert to #production-errors -- send_error_alert
+    # never raises, so a broken/misconfigured webhook can never turn
+    # into a second failure on top of the original error being handled.
+    send_error_alert(
+        method=request.method,
+        url=str(request.url),
+        exc=exc,
+        traceback_text=traceback.format_exc(),
+    )
 
     return JSONResponse(
         status_code=500,
