@@ -88,6 +88,20 @@ class Settings:
     )
 
     # ===============================
+    # EMAIL (SMTP)
+    # ===============================
+    # Used by app/services/email_service.py to send the generated
+    # applicant onboarding/employment form link. SMTP_PASSWORD must be a
+    # Gmail "App Password" (not the account's normal login password) when
+    # SMTP_HOST is Gmail -- see .env for how to generate one.
+    SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
+    SMTP_PORT = int(os.getenv("SMTP_PORT", 587))
+    SMTP_USERNAME = os.getenv("SMTP_USERNAME")
+    SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
+    SMTP_FROM_EMAIL = os.getenv("SMTP_FROM_EMAIL", SMTP_USERNAME)
+    SMTP_FROM_NAME = os.getenv("SMTP_FROM_NAME", "Tytan Prime Corporation HR")
+
+    # ===============================
     # CORS
     # ===============================
     CORS_ORIGINS = [

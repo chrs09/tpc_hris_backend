@@ -66,6 +66,36 @@ def _geofence_label(store, distance: float | None, outside_range: bool = False) 
     return label
 
 
+def _generate_trip_code(db: Session, start_time: datetime) -> str:
+    """Auto-generated, human-readable trip reference: "YYYYMM-00001",
+    sequential per PH-local calendar month (resets to 00001 each new
+    month) -- distinct from Trip.id (the DB primary key) and
+    Trip.ticket_no (freely typed). Reads the highest existing code for
+    the month and increments it; the column's unique index is the real
+    safety net against a collision under concurrent trip starts (would
+    surface as a rare, retryable DB error rather than a silent
+    duplicate) -- trip creation isn't frequent/concurrent enough here to
+    warrant a dedicated counter table."""
+    period = to_ph(start_time).strftime("%Y%m")
+    prefix = f"{period}-"
+
+    last_code = (
+        db.query(Trip.trip_code)
+        .filter(Trip.trip_code.like(f"{prefix}%"))
+        .order_by(Trip.trip_code.desc())
+        .first()
+    )
+
+    next_number = 1
+    if last_code and last_code[0]:
+        try:
+            next_number = int(last_code[0].split("-")[1]) + 1
+        except (IndexError, ValueError):
+            next_number = 1
+
+    return f"{prefix}{next_number:05d}"
+
+
 def _helper_departments_for(driver_department: str | None) -> list[str]:
     """Which Employee.department values count as eligible helpers for a
     driver in the given department. CpdcDriver/CdcDriver each draw from
@@ -788,6 +818,8 @@ def start_trip(
         db.add(new_trip)
         db.flush()
 
+        new_trip.trip_code = _generate_trip_code(db, new_trip.start_time)
+
         if started_outside_hub_range:
             create_notification(
                 db,
@@ -1009,13 +1041,23 @@ def check_out(
             .first()
         )
 
-    # If check-in was an unknown location,
-    # try to identify the store using the CHECKOUT GPS.
+    # If check-in was an unknown location, try to identify the store
+    # using the CHECKOUT GPS -- prefer one within its allowed radius, but
+    # fall back to the nearest store overall (regardless of radius) so a
+    # checkout can still be attributed to *some* store even when GPS has
+    # drifted. This mirrors check_in()'s own fallback (closest_store may
+    # be None there too, checked in with requires_review=True instead of
+    # being blocked) and start_trip()'s started_outside_hub_range fix --
+    # in both cases the driver is allowed to proceed and the discrepancy
+    # is flagged for a trip manager to review instead of hard-blocking,
+    # since stranding a driver mid-delivery is worse than a flagged stop.
     if not store:
         stores = db.query(Store).all()
 
         closest_store = None
         min_distance = float("inf")
+        nearest_any_store = None
+        nearest_any_distance = float("inf")
 
         for candidate in stores:
             # Ignore stores that don't have valid coordinates yet.
@@ -1036,6 +1078,10 @@ def check_out(
                 candidate.longitude,
             )
 
+            if distance < nearest_any_distance:
+                nearest_any_distance = distance
+                nearest_any_store = candidate
+
             if (
                 distance <= candidate.allowed_radius_meters
                 and distance < min_distance
@@ -1047,15 +1093,24 @@ def check_out(
             store = closest_store
             stop.store_id = closest_store.id
             stop.requires_review = False
+        elif nearest_any_store:
+            # Outside every store's radius -- attach the nearest one
+            # anyway rather than blocking checkout entirely.
+            store = nearest_any_store
+            stop.store_id = nearest_any_store.id
+            stop.requires_review = True
 
-    # Still no store found
+    # Only truly impossible when the Store table has no usable rows at
+    # all (no coordinates set up anywhere yet) -- an operational setup
+    # problem, not something GPS drift can cause.
     if not store:
         raise HTTPException(
             status_code=400,
             detail="Checkout location is not within any registered store location.",
         )
 
-    # Validate checkout GPS against the store's coordinates.
+    # Distance from the resolved store -- used for the geofence label
+    # and to flag (not block) an out-of-radius checkout below.
     distance = calculate_distance_meters(
         lat,
         long,
@@ -1063,12 +1118,19 @@ def check_out(
         store.longitude,
     )
 
-    if distance > store.allowed_radius_meters:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Checkout location is too far from {store.name}. "
-                f"Allowed radius is {store.allowed_radius_meters:.0f} meters."
+    outside_range = distance > store.allowed_radius_meters
+    if outside_range:
+        stop.requires_review = True
+        create_notification(
+            db=db,
+            type_="CHECKOUT_OUTSIDE_RANGE",
+            driver_id=current_user.id,
+            trip_id=trip_id,
+            trip_stop_id=stop.id,
+            message=(
+                f"{current_user.username} checked out "
+                f"{distance:.0f}m from {store.name} "
+                f"(allowed {store.allowed_radius_meters:.0f}m)."
             ),
         )
 
@@ -1089,7 +1151,7 @@ def check_out(
         proof_photo,
         trip_id=trip_id,
         stop_id=stop.id,
-        geofence_label=_geofence_label(store, distance),
+        geofence_label=_geofence_label(store, distance, outside_range=outside_range),
     )
 
     stop_file = FileModel(
@@ -1104,7 +1166,11 @@ def check_out(
 
     db.commit()
 
-    return {"message": "Checked out successfully."}
+    return {
+        "message": "Checked out successfully.",
+        "store": store.name,
+        "requires_review": stop.requires_review,
+    }
 
 # =========================
 # TRACK TRIP LOCATION

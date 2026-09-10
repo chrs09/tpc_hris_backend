@@ -9,11 +9,13 @@ from app.core.database import get_db
 from app.core.dependencies import get_current_user, require_superadmin
 from app.models.user import User
 from app.models.employees import Employee
-from app.models.department_head import DepartmentHead
+from app.models.cash_advance_head import CashAdvanceHead
 from app.models.cash_advance_request import CashAdvanceRequest
 from app.models.cash_advance_deduction_option import CashAdvanceDeductionOption
 from app.models.cash_advance_deduction_log import CashAdvanceDeductionLog
 from app.models.cash_advance_terms import CashAdvanceTerms
+from app.models.notification import Notification
+from app.services.notification_service import create_notification
 from app.schemas.cash_advance_request import (
     CashAdvanceRequestCreate,
     CashAdvanceReviewAction,
@@ -73,12 +75,20 @@ def _serialize(req: CashAdvanceRequest, db: Session) -> dict:
 def _can_review(req: CashAdvanceRequest, current_user: User, db: Session) -> bool:
     if req.requested_by_user_id == current_user.id:
         return True
+    if current_user.role == "superadmin":
+        return True
     employee = req.employee
     if not employee or not employee.department:
         return False
+    # Live check against the CURRENT cash-advance head, not just whoever
+    # was recorded as requested_by_user_id at filing time -- so if the
+    # assignment changes after a request is already pending, the new
+    # head can still review it (matches the equivalent DepartmentHead
+    # fallback this used to do, just pointed at the cash-advance-specific
+    # hierarchy now).
     head_entry = (
-        db.query(DepartmentHead)
-        .filter(DepartmentHead.department == employee.department)
+        db.query(CashAdvanceHead)
+        .filter(CashAdvanceHead.department == employee.department)
         .first()
     )
     return bool(head_entry and head_entry.head_user_id == current_user.id)
@@ -152,24 +162,40 @@ def file_cash_advance_request(
             detail="Your account isn't linked to an employee department.",
         )
 
+    # Cash advance requests route to the department's Cash Advance
+    # Immediate Head (a hierarchy separate from the general/overtime
+    # DepartmentHead -- see app/models/cash_advance_head.py). If the
+    # department hasn't had one configured yet, fall back to a
+    # superadmin rather than blocking the request outright -- an
+    # unconfigured hierarchy shouldn't stop an employee from filing.
     head_entry = (
-        db.query(DepartmentHead)
-        .filter(DepartmentHead.department == employee.department)
+        db.query(CashAdvanceHead)
+        .filter(CashAdvanceHead.department == employee.department)
         .first()
     )
-    if not head_entry:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"No immediate head has been set for the {employee.department} "
-                "department yet. Ask an admin to set this up in Reporting Hierarchy."
-            ),
+
+    if head_entry:
+        approver_user_id = head_entry.head_user_id
+    else:
+        fallback_superadmin = (
+            db.query(User).filter(User.role == "superadmin").first()
         )
+        if not fallback_superadmin:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"No cash advance head has been set for the "
+                    f"{employee.department} department yet, and no "
+                    "superadmin account exists to fall back to. Ask an "
+                    "admin to set this up in Reporting Hierarchy."
+                ),
+            )
+        approver_user_id = fallback_superadmin.id
 
     request = CashAdvanceRequest(
         user_id=current_user.id,
         employee_id=current_user.employee_id,
-        requested_by_user_id=head_entry.head_user_id,
+        requested_by_user_id=approver_user_id,
         amount=payload.amount,
         deduction_option_id=option.id,
         deduction_per_pay_amount=option.amount,
@@ -184,6 +210,22 @@ def file_cash_advance_request(
     db.add(request)
     db.commit()
     db.refresh(request)
+
+    # Notify the finance/approver side that a new request needs review --
+    # surfaced via GET /cash-advance-requests/alerts (a bell/notification,
+    # same pattern as the trip "hub alerts" feature). Not targeted at the
+    # specific approver (Notification has no recipient/role column, see
+    # app/models/notification.py) -- alerts.py restricts who can list
+    # these to superadmin, matching who reviews cash advances today.
+    create_notification(
+        db=db,
+        type_="CASH_ADVANCE_REQUESTED",
+        driver_id=current_user.id,
+        message=(
+            f"{current_user.username} requested a cash advance of "
+            f"₱{float(payload.amount):,.2f} (request #{request.id})."
+        ),
+    )
 
     return _serialize(request, db)
 
@@ -419,3 +461,89 @@ def record_deduction(
 
     db.refresh(request)
     return _serialize(request, db)
+
+
+# =========================
+# ALERTS (superadmin/finance) -- new-request notifications
+#
+# Mirrors the trip "hub alerts" pattern (see GET /admin/trips/hub-alerts):
+# CASH_ADVANCE_REQUESTED rows are created at filing time in
+# file_cash_advance_request() above; these two endpoints let the
+# notification bell list and dismiss them.
+# =========================
+
+
+@router.get("/alerts")
+def get_cash_advance_alerts(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_superadmin),
+):
+    alerts = (
+        db.query(Notification)
+        .filter(
+            Notification.type == "CASH_ADVANCE_REQUESTED",
+            Notification.status == "PENDING",
+        )
+        .order_by(Notification.created_at.desc())
+        .all()
+    )
+    return [
+        {
+            "id": alert.id,
+            "message": alert.message,
+            "created_at": alert.created_at,
+        }
+        for alert in alerts
+    ]
+
+
+@router.post("/alerts/{notification_id}/acknowledge")
+def acknowledge_cash_advance_alert(
+    notification_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_superadmin),
+):
+    alert = (
+        db.query(Notification)
+        .filter(
+            Notification.id == notification_id,
+            Notification.type == "CASH_ADVANCE_REQUESTED",
+        )
+        .first()
+    )
+    if not alert:
+        raise HTTPException(status_code=404, detail="Alert not found.")
+
+    alert.status = "ACKNOWLEDGED"
+    alert.reviewed_by_admin_id = current_user.id
+    alert.reviewed_at = datetime.utcnow()
+
+    db.commit()
+
+    return {"message": "Alert acknowledged."}
+
+
+# =========================
+# ALL REQUESTS (superadmin/finance) -- full history, every status
+# =========================
+
+
+@router.get("/all")
+def list_all_cash_advance_requests(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_superadmin),
+):
+    """Every cash advance request regardless of status or who's the
+    approver -- for the Finance module's full-history view, distinct
+    from /for-my-approval (pending + reviewable-by-caller only) and
+    /balances (approved + still-outstanding only)."""
+    requests = (
+        db.query(CashAdvanceRequest)
+        .options(
+            joinedload(CashAdvanceRequest.employee),
+            joinedload(CashAdvanceRequest.requested_by),
+        )
+        .order_by(CashAdvanceRequest.created_at.desc())
+        .all()
+    )
+    return [_serialize(r, db) for r in requests]

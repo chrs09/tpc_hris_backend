@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from app.utils.response import api_response
 
 from app.services.file_service import FileService
+from app.services.email_service import send_employment_form_email
 from app.core.database import get_db
 from app.core.config import Settings
 from app.core.dependencies import get_current_user
@@ -552,6 +553,11 @@ def generate_employment_form(
     if not applicant:
         raise HTTPException(status_code=404, detail="Applicant not found")
 
+    # Form generation is only allowed at "reviewed". The public form-access
+    # check (get_valid_applicant_by_token in
+    # app/api/public/applicant_onboarding.py) must keep "reviewed" in its
+    # own allow-list too, otherwise the applicant can't open the very link
+    # generated here until their status is separately advanced.
     if applicant.status.lower() != "reviewed":
         raise HTTPException(
             status_code=400,
@@ -564,6 +570,9 @@ def generate_employment_form(
             detail="Applicant has already been converted to employee",
         )
 
+    # A fresh random token each time this is called -- re-generating
+    # invalidates any previously issued link/email for this applicant,
+    # since it overwrites the stored token and its expiry.
     token = secrets.token_urlsafe(32)
 
     applicant.onboarding_token = token
@@ -575,10 +584,24 @@ def generate_employment_form(
 
     form_url = f"{Settings.FRONTEND_URL.rstrip('/')}/tytan-onboarding-form/{token}"
 
+    # Best-effort: email the applicant their form link. This must never
+    # fail the request itself -- if SMTP isn't configured yet or the send
+    # errors out, HR still gets the form_url back in the response and can
+    # share it manually (see email_sent in the response below).
+    email_sent = False
+    if applicant.email:
+        email_sent = send_employment_form_email(
+            to_email=applicant.email,
+            applicant_name=f"{applicant.first_name} {applicant.last_name}".strip(),
+            form_url=form_url,
+            expires_at=applicant.onboarding_token_expires_at,
+        )
+
     return {
         "message": "Employment form link generated successfully",
         "form_url": form_url,
         "expires_at": applicant.onboarding_token_expires_at,
+        "email_sent": email_sent,
     }
 
 

@@ -71,7 +71,15 @@ class User(Base):
     )
 
     # 4️⃣ One-to-many: driver has many trips
-    trips = relationship("Trip", back_populates="driver", cascade="all, delete-orphan")
+    # foreign_keys pinned to Trip.driver_id -- Trip now has a second FK to
+    # this table (archived_by_user_id), which makes the join ambiguous
+    # without this.
+    trips = relationship(
+        "Trip",
+        back_populates="driver",
+        cascade="all, delete-orphan",
+        foreign_keys="Trip.driver_id",
+    )
 
     # 5️⃣ One-to-many: user created many reminders
     created_reminders = relationship(

@@ -47,6 +47,18 @@ class Trip(Base):
         Integer, ForeignKey("tpc_users.id", ondelete="CASCADE"), nullable=False
     )
     ticket_no = Column(String(100), nullable=False, unique=True, index=True)
+
+    # Auto-generated, human-readable trip reference -- "YYYYMM-00001",
+    # sequential per PH-local calendar month (resets to 00001 each new
+    # month). Distinct from `id` (the DB primary key) and `ticket_no`
+    # (freely typed by the driver/trip manager, e.g. a shipment number)
+    # -- this one always exists and is assigned by the system, not
+    # entered by anyone. See _generate_trip_code() in
+    # app/api/driver/trips.py. Nullable only because trips created
+    # before this column existed don't have one (backfilled by the
+    # migration that added it, but kept nullable defensively).
+    trip_code = Column(String(20), unique=True, nullable=True, index=True)
+
     origin_store_id = Column(Integer, ForeignKey("tpc_stores.id"), nullable=True)
 
     vehicle_unit_id = Column(
@@ -78,7 +90,23 @@ class Trip(Base):
     # on the Active Trips Monitoring page.
     started_outside_hub_range = Column(Boolean, default=False, nullable=False)
 
-    driver = relationship("User", back_populates="trips")
+    # Soft delete for the Completed Trips list: archiving hides a trip
+    # from that list (see get_completed_trips in app/api/admin/trips.py)
+    # without deleting its row or any related stops/GPS logs/files, so
+    # cleaning up a long completed-trips list never requires touching the
+    # database directly.
+    is_archived = Column(Boolean, default=False, nullable=False)
+    archived_at = Column(DateTime, nullable=True)
+    archived_by_user_id = Column(
+        Integer, ForeignKey("tpc_users.id", ondelete="SET NULL"), nullable=True
+    )
+
+    # foreign_keys is required here now that Trip has a second FK to
+    # tpc_users (archived_by_user_id) -- without it SQLAlchemy can't tell
+    # which column this relationship should join on.
+    driver = relationship(
+        "User", back_populates="trips", foreign_keys=[driver_id]
+    )
 
     stops = relationship(
         "TripStop", back_populates="trip", cascade="all, delete-orphan"

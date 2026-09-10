@@ -94,7 +94,10 @@ def get_pending_trips(
     trips = (
         db.query(Trip)
         .options(joinedload(Trip.driver))
-        .filter(Trip.status == TripStatus.PENDING_APPROVAL)
+        .filter(
+            Trip.status == TripStatus.PENDING_APPROVAL,
+            Trip.is_archived.is_(False),
+        )
         .order_by(Trip.start_time.desc())
         .all()
     )
@@ -102,6 +105,7 @@ def get_pending_trips(
     return [
         {
             "id": trip.id,
+            "trip_code": trip.trip_code,
             "ticket_no": trip.ticket_no,
             "status": trip.status.value,
             "start_time": utc_to_ph(trip.start_time).strftime("%Y-%m-%d %I:%M:%S %p"),
@@ -132,6 +136,7 @@ def get_active_trips(
     return [
         {
             "id": trip.id,
+            "trip_code": trip.trip_code,
             "ticket_no": trip.ticket_no,
             "vehicle_unit": (trip.vehicle_unit.unit_code if trip.vehicle_unit else "-"),
             "trip_profile": (
@@ -635,6 +640,7 @@ def review_trip(
         # TRIP
         # -------------------------
         "trip_id": trip.id,
+        "trip_code": trip.trip_code,
         "ticket_no": trip.ticket_no,
         "status": (
             trip.status.value
@@ -766,7 +772,10 @@ def get_completed_trips(
     trips = (
         db.query(Trip)
         .options(joinedload(Trip.driver))
-        .filter(Trip.status == TripStatus.COMPLETED)
+        .filter(
+            Trip.status == TripStatus.COMPLETED,
+            Trip.is_archived.is_(False),
+        )
         .order_by(Trip.end_time.desc())
         .all()
     )
@@ -774,6 +783,7 @@ def get_completed_trips(
     return [
         {
             "id": trip.id,
+            "trip_code": trip.trip_code,
             "ticket_no": trip.ticket_no,
             "status": trip.status.value,
             "start_time": utc_to_ph(trip.start_time).strftime("%Y-%m-%d %I:%M:%S %p"),
@@ -789,6 +799,48 @@ def get_completed_trips(
         }
         for trip in trips
     ]
+
+
+# =========================
+# ARCHIVE (soft delete)
+#
+# Hides a trip from get_pending_trips()/get_completed_trips() above
+# without deleting the row (or its stops/GPS logs/files) -- an
+# alternative to manually deleting from the database to clean up a long
+# pending/completed-trips list. Reversible in the database if ever
+# needed (is_archived can be flipped back), though there's no
+# "unarchive" endpoint/button yet since nothing asked for one.
+# =========================
+ARCHIVABLE_STATUSES = [TripStatus.PENDING_APPROVAL, TripStatus.COMPLETED]
+
+
+@router.post("/{trip_id}/archive")
+def archive_trip(
+    trip_id: int,
+    db: Session = Depends(get_db),
+    current_admin=Depends(get_current_trip_manager),
+):
+    trip_row = db.query(Trip).filter(Trip.id == trip_id).first()
+
+    if not trip_row:
+        raise HTTPException(status_code=404, detail="Trip not found.")
+
+    if trip_row.status not in ARCHIVABLE_STATUSES:
+        raise HTTPException(
+            status_code=400,
+            detail="Only pending or completed trips can be archived.",
+        )
+
+    if trip_row.is_archived:
+        raise HTTPException(status_code=400, detail="Trip is already archived.")
+
+    trip_row.is_archived = True
+    trip_row.archived_at = datetime.utcnow()
+    trip_row.archived_by_user_id = current_admin.id
+
+    db.commit()
+
+    return {"message": "Trip archived.", "trip_id": trip_row.id}
 
 
 @router.post("/{trip_id}/track-location")
@@ -808,5 +860,97 @@ def track_location(
 
     db.add(gps_log)
     db.commit()
+
+
+# =========================
+# HUB ALERTS (coordinator_admin / superadmin / admin)
+#
+# Surfaces trips that were started away from any hub's GPS range. The
+# underlying event is already recorded at the moment a trip starts --
+# see start_trip() in app/api/driver/trips.py, which sets
+# Trip.started_outside_hub_range and inserts a
+# Notification(type="STARTED_OUTSIDE_HUB_RANGE") row when that happens.
+# These two endpoints just let trip managers list and acknowledge those
+# rows, instead of only seeing the passive "⚠ Outside Hub" badge on the
+# Active Trips Monitoring page.
+# =========================
+@router.get("/hub-alerts")
+def get_hub_alerts(
+    db: Session = Depends(get_db),
+    current_admin=Depends(get_current_trip_manager),
+):
+    """Pending (not yet acknowledged) "started outside hub range" alerts,
+    newest first. The frontend polls this on an interval to drive a
+    notification badge/toast for coordinator_admin and superadmin."""
+
+    alerts = (
+        db.query(Notification)
+        .filter(
+            Notification.type == "STARTED_OUTSIDE_HUB_RANGE",
+            Notification.status == "PENDING",
+        )
+        .order_by(Notification.created_at.desc())
+        .all()
+    )
+
+    # Notification has no ORM relationships to Trip/User (see
+    # app/models/notification.py), so trip/driver details are looked up
+    # in one batch query each rather than per-row, to avoid N+1 queries.
+    trip_ids = [a.trip_id for a in alerts if a.trip_id]
+    trips_by_id = {
+        t.id: t
+        for t in db.query(Trip).filter(Trip.id.in_(trip_ids)).all()
+    }
+
+    return [
+        {
+            "id": alert.id,
+            "trip_id": alert.trip_id,
+            "driver_id": alert.driver_id,
+            "message": alert.message,
+            "ticket_no": (
+                trips_by_id[alert.trip_id].ticket_no
+                if alert.trip_id in trips_by_id
+                else None
+            ),
+            "created_at": (
+                utc_to_ph(alert.created_at).strftime("%Y-%m-%d %I:%M:%S %p")
+                if alert.created_at
+                else None
+            ),
+        }
+        for alert in alerts
+    ]
+
+
+@router.post("/hub-alerts/{notification_id}/acknowledge")
+def acknowledge_hub_alert(
+    notification_id: int,
+    db: Session = Depends(get_db),
+    current_admin=Depends(get_current_trip_manager),
+):
+    """Dismisses one hub alert once a trip manager has seen/handled it,
+    so it stops showing up in get_hub_alerts() and the notification
+    badge count."""
+
+    alert = (
+        db.query(Notification)
+        .filter(
+            Notification.id == notification_id,
+            Notification.type == "STARTED_OUTSIDE_HUB_RANGE",
+        )
+        .first()
+    )
+
+    if not alert:
+        raise HTTPException(status_code=404, detail="Alert not found.")
+
+    alert.status = "ACKNOWLEDGED"
+    alert.reviewed_by_admin_id = current_admin.id
+    alert.reviewed_at = datetime.utcnow()
+
+    db.commit()
+
+    return {"message": "Alert acknowledged."}
 
     return {"message": "Location tracked"}
