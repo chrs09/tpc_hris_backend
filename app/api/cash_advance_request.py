@@ -6,7 +6,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
 from app.core.database import get_db
-from app.core.dependencies import get_current_user, require_superadmin
+from app.core.dependencies import get_current_user, require_role_or_module
 from app.models.user import User
 from app.models.employees import Employee
 from app.models.cash_advance_head import CashAdvanceHead
@@ -390,7 +390,9 @@ def reject_cash_advance_request(
 @router.get("/balances")
 def list_outstanding_balances(
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_superadmin),
+    current_user: User = Depends(
+        require_role_or_module(roles=[], module_key="finance.cash_advance")
+    ),
 ):
     """Every approved request with a remaining balance > 0 -- the
     superadmin page's outstanding-balances list."""
@@ -413,7 +415,9 @@ def record_deduction(
     request_id: int,
     payload: RecordDeductionCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_superadmin),
+    current_user: User = Depends(
+        require_role_or_module(roles=[], module_key="finance.cash_advance")
+    ),
 ):
     """Manually records one deduction event against a request (e.g. once
     per payroll cutoff) -- not yet wired into automatic payslip
@@ -476,7 +480,9 @@ def record_deduction(
 @router.get("/alerts")
 def get_cash_advance_alerts(
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_superadmin),
+    current_user: User = Depends(
+        require_role_or_module(roles=[], module_key="finance.cash_advance")
+    ),
 ):
     alerts = (
         db.query(Notification)
@@ -501,7 +507,9 @@ def get_cash_advance_alerts(
 def acknowledge_cash_advance_alert(
     notification_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_superadmin),
+    current_user: User = Depends(
+        require_role_or_module(roles=[], module_key="finance.cash_advance")
+    ),
 ):
     alert = (
         db.query(Notification)
@@ -531,7 +539,9 @@ def acknowledge_cash_advance_alert(
 @router.get("/all")
 def list_all_cash_advance_requests(
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_superadmin),
+    current_user: User = Depends(
+        require_role_or_module(roles=[], module_key="finance.cash_advance")
+    ),
 ):
     """Every cash advance request regardless of status or who's the
     approver -- for the Finance module's full-history view, distinct

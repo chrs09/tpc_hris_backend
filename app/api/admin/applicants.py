@@ -11,7 +11,7 @@ from app.services.file_service import FileService
 from app.services.email_service import send_employment_form_email
 from app.core.database import get_db
 from app.core.config import Settings
-from app.core.dependencies import get_current_user
+from app.core.dependencies import get_current_user, require_role_or_module
 from app.models.applicant_remarks import ApplicantRemark
 from app.models.applicants import Applicant
 from app.models.employees import Employee
@@ -360,8 +360,9 @@ def get_applicant_onboarding(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    if current_user.role not in ["admin", "superadmin", "hr"]:
-        raise HTTPException(status_code=403, detail="Not authorized")
+    require_role_or_module(
+        roles=["admin", "superadmin", "hr"], module_key="hris.applicants"
+    )(current_user=current_user, db=db)
 
     applicant = db.query(Applicant).filter(Applicant.id == applicant_id).first()
 
@@ -545,8 +546,9 @@ def generate_employment_form(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    if current_user.role not in ["admin", "superadmin", "hr"]:
-        raise HTTPException(status_code=403, detail="Not authorized")
+    require_role_or_module(
+        roles=["admin", "superadmin", "hr"], module_key="hris.applicants"
+    )(current_user=current_user, db=db)
 
     applicant = db.query(Applicant).filter(Applicant.id == applicant_id).first()
 
@@ -612,8 +614,9 @@ def convert_to_employee(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    if current_user.role not in ["admin", "superadmin", "hr"]:
-        raise HTTPException(status_code=403, detail="Not authorized")
+    require_role_or_module(
+        roles=["admin", "superadmin", "hr"], module_key="hris.applicants"
+    )(current_user=current_user, db=db)
 
     applicant = db.query(Applicant).filter(Applicant.id == applicant_id).first()
 

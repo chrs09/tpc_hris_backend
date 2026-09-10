@@ -18,7 +18,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
 from app.core.database import get_db
-from app.core.dependencies import get_current_user
+from app.core.dependencies import get_current_user, require_role_or_module
 from app.models.attendance import AttendanceRecord
 from app.models.employees import Employee
 from app.models.user import User
@@ -190,8 +190,9 @@ def time_in_selfie(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    if current_user.role not in ["admin", "superadmin", "motorpool"]:
-        raise HTTPException(status_code=403, detail="Not authorized")
+    require_role_or_module(
+        roles=["admin", "superadmin", "motorpool"], module_key="hris.attendance"
+    )(current_user=current_user, db=db)
 
     employee_id = current_user.employee_id
 
@@ -1346,15 +1347,11 @@ def adjust_attendance_time(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    # Only Admin and Superadmin can modify attendance
-    if current_user.role not in [
-        "admin",
-        "superadmin",
-    ]:
-        raise HTTPException(
-            status_code=403,
-            detail="Not authorized to adjust attendance.",
-        )
+    # Admin/superadmin by role, or anyone explicitly granted
+    # "hris.attendance" via Module Assignment.
+    require_role_or_module(
+        roles=["admin", "superadmin"], module_key="hris.attendance"
+    )(current_user=current_user, db=db)
 
     attendance = (
         db.query(AttendanceRecord).filter(AttendanceRecord.id == attendance_id).first()

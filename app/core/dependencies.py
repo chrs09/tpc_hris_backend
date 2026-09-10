@@ -82,3 +82,66 @@ def require_superadmin(current_user: User = Depends(get_current_user)):
             detail="Superadmin access required",
         )
     return current_user
+
+
+def require_role_or_module(roles: list[str], module_key: str):
+    """Returns a FastAPI dependency that allows a request through if
+    EITHER the caller's role is in `roles` (superadmin always allowed),
+    OR the caller has been explicitly granted `module_key` on the
+    Administrator -> Module Assignment page -- making a module grant a
+    genuine override of role, not just a Sidebar nav cosmetic.
+
+    A grant only counts once Employee.has_custom_module_access is True
+    (i.e. an admin has actually configured this specific employee via
+    Module Assignment -- see app/api/employee_module_access.py). Until
+    then, role is the only thing that decides access, same as before
+    this function existed.
+
+    Use this in place of get_current_admin / get_current_trip_manager /
+    an inline `if current_user.role not in [...]` check on any endpoint
+    that backs a module listed in MODULE_GROUPS (both here and in
+    tpc_hris_frontend/src/constants/modules.js -- module_key must match
+    exactly, e.g. "hris.leave", "trip_management.stores")."""
+
+    def _dependency(
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+    ) -> User:
+        role_value = (
+            current_user.role.value
+            if hasattr(current_user.role, "value")
+            else current_user.role
+        )
+
+        if role_value == "superadmin" or role_value in roles:
+            return current_user
+
+        if current_user.employee_id:
+            # Local imports to avoid a circular import at module load time
+            # (employees/employee_module_access models import from
+            # elsewhere in app.models, which can chain back here).
+            from app.models.employees import Employee
+            from app.models.employee_module_access import EmployeeModuleAccess
+
+            employee = (
+                db.query(Employee).filter(Employee.id == current_user.employee_id).first()
+            )
+
+            if employee and employee.has_custom_module_access:
+                granted = (
+                    db.query(EmployeeModuleAccess)
+                    .filter(
+                        EmployeeModuleAccess.employee_id == employee.id,
+                        EmployeeModuleAccess.module_key == module_key,
+                    )
+                    .first()
+                )
+                if granted:
+                    return current_user
+
+        raise HTTPException(
+            status_code=403,
+            detail="You don't have access to this module.",
+        )
+
+    return _dependency

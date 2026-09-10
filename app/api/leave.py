@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session, joinedload
 
 from app.core.database import get_db
-from app.core.dependencies import get_current_user, get_current_admin
+from app.core.dependencies import get_current_user, get_current_admin, require_role_or_module
 from app.models.user import User
 from app.models.leave_request import LeaveRequest
 from app.models.attendance import AttendanceRecord
@@ -205,7 +205,7 @@ def cancel_leave_request(
 def list_leave_requests(
     status: str | None = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_admin),
+    current_user: User = Depends(require_role_or_module(roles=["admin", "superadmin"], module_key="hris.leave")),
 ):
     query = db.query(LeaveRequest).options(
         joinedload(LeaveRequest.employee),
@@ -225,7 +225,7 @@ def approve_leave_request(
     leave_id: int,
     payload: LeaveReviewAction,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_admin),
+    current_user: User = Depends(require_role_or_module(roles=["admin", "superadmin"], module_key="hris.leave")),
 ):
     leave = db.query(LeaveRequest).filter(LeaveRequest.id == leave_id).first()
 
@@ -258,7 +258,7 @@ def reject_leave_request(
     leave_id: int,
     payload: LeaveReviewAction,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_admin),
+    current_user: User = Depends(require_role_or_module(roles=["admin", "superadmin"], module_key="hris.leave")),
 ):
     leave = db.query(LeaveRequest).filter(LeaveRequest.id == leave_id).first()
 

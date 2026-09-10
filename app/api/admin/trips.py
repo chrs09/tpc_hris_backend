@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session, joinedload
 from datetime import datetime, date, timedelta
 
 from app.core.database import get_db
-from app.core.dependencies import get_current_trip_manager, get_current_user
+from app.core.dependencies import get_current_trip_manager, get_current_user, require_role_or_module
 from app.models.trips import Trip, TripStatus
 from app.models.notification import Notification
 from app.models.trip_stops import TripStop
@@ -27,7 +27,7 @@ router = APIRouter(prefix="/admin/trips", tags=["Admin Trips"])
 # =========================
 @router.get("/summary")
 def get_trip_summary(
-    db: Session = Depends(get_db), current_admin=Depends(get_current_trip_manager)
+    db: Session = Depends(get_db), current_admin=Depends(require_role_or_module(roles=["admin", "superadmin", "coordinator_admin"], module_key="trip_management.trips"))
 ):
     today = date.today()
 
@@ -51,7 +51,7 @@ def get_trip_summary(
 # =========================
 @router.get("/available-drivers")
 def get_available_drivers(
-    db: Session = Depends(get_db), current_admin=Depends(get_current_trip_manager)
+    db: Session = Depends(get_db), current_admin=Depends(require_role_or_module(roles=["admin", "superadmin", "coordinator_admin"], module_key="trip_management.trips"))
 ):
     drivers_with_active_trip = {
         row[0]
@@ -89,7 +89,7 @@ def get_available_drivers(
 # =========================
 @router.get("/pending")
 def get_pending_trips(
-    db: Session = Depends(get_db), current_admin=Depends(get_current_trip_manager)
+    db: Session = Depends(get_db), current_admin=Depends(require_role_or_module(roles=["admin", "superadmin", "coordinator_admin"], module_key="trip_management.trips"))
 ):
     trips = (
         db.query(Trip)
@@ -123,7 +123,7 @@ def get_pending_trips(
 # =========================
 @router.get("/active")
 def get_active_trips(
-    db: Session = Depends(get_db), current_admin=Depends(get_current_trip_manager)
+    db: Session = Depends(get_db), current_admin=Depends(require_role_or_module(roles=["admin", "superadmin", "coordinator_admin"], module_key="trip_management.trips"))
 ):
     trips = (
         db.query(Trip)
@@ -160,7 +160,7 @@ def approve_trip(
     trip_id: int,
     remarks: str = Body(..., embed=True),
     db: Session = Depends(get_db),
-    current_admin=Depends(get_current_trip_manager),
+    current_admin=Depends(require_role_or_module(roles=["admin", "superadmin", "coordinator_admin"], module_key="trip_management.trips")),
 ):
     # =========================================================
     # 1. GET TRIP
@@ -291,7 +291,7 @@ def approve_trip(
 def reject_trip(
     trip_id: int,
     db: Session = Depends(get_db),
-    current_admin=Depends(get_current_trip_manager),
+    current_admin=Depends(require_role_or_module(roles=["admin", "superadmin", "coordinator_admin"], module_key="trip_management.trips")),
 ):
 
     trip = (
@@ -346,7 +346,7 @@ def reject_trip(
 def review_trip(
     trip_id: int,
     db: Session = Depends(get_db),
-    current_admin=Depends(get_current_trip_manager),
+    current_admin=Depends(require_role_or_module(roles=["admin", "superadmin", "coordinator_admin"], module_key="trip_management.trips")),
 ):
     # =========================================================
     # 1. GET TRIP + RELATED DATA
@@ -767,7 +767,7 @@ def review_trip(
 @router.get("/completed")
 def get_completed_trips(
     db: Session = Depends(get_db),
-    current_admin=Depends(get_current_trip_manager),
+    current_admin=Depends(require_role_or_module(roles=["admin", "superadmin", "coordinator_admin"], module_key="trip_management.trips")),
 ):
     trips = (
         db.query(Trip)
@@ -818,7 +818,7 @@ ARCHIVABLE_STATUSES = [TripStatus.PENDING_APPROVAL, TripStatus.COMPLETED]
 def archive_trip(
     trip_id: int,
     db: Session = Depends(get_db),
-    current_admin=Depends(get_current_trip_manager),
+    current_admin=Depends(require_role_or_module(roles=["admin", "superadmin", "coordinator_admin"], module_key="trip_management.trips")),
 ):
     trip_row = db.query(Trip).filter(Trip.id == trip_id).first()
 
@@ -877,7 +877,7 @@ def track_location(
 @router.get("/hub-alerts")
 def get_hub_alerts(
     db: Session = Depends(get_db),
-    current_admin=Depends(get_current_trip_manager),
+    current_admin=Depends(require_role_or_module(roles=["admin", "superadmin", "coordinator_admin"], module_key="trip_management.trips")),
 ):
     """Pending (not yet acknowledged) "started outside hub range" alerts,
     newest first. The frontend polls this on an interval to drive a
@@ -927,7 +927,7 @@ def get_hub_alerts(
 def acknowledge_hub_alert(
     notification_id: int,
     db: Session = Depends(get_db),
-    current_admin=Depends(get_current_trip_manager),
+    current_admin=Depends(require_role_or_module(roles=["admin", "superadmin", "coordinator_admin"], module_key="trip_management.trips")),
 ):
     """Dismisses one hub alert once a trip manager has seen/handled it,
     so it stops showing up in get_hub_alerts() and the notification

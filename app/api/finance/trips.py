@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session, joinedload
 
 from app.core.database import get_db
-from app.core.dependencies import get_current_admin
+from app.core.dependencies import get_current_admin, require_role_or_module
 from app.models.trips import Trip, TripStatus
 from app.models.trip_finance_review import TripFinanceReview, FinanceReviewStatus
 from app.models.trip_stops import TripStop
@@ -36,7 +36,7 @@ def coordinator_name(review):
 @router.get("/summary")
 def get_finance_trip_summary(
     db: Session = Depends(get_db),
-    current_admin=Depends(get_current_admin),
+    current_admin=Depends(require_role_or_module(roles=["admin", "superadmin"], module_key="finance.finance_trips")),
 ):
     finance_review = (
         db.query(TripFinanceReview)
@@ -69,7 +69,7 @@ def get_finance_trip_summary(
 def get_finance_trips(
     status: str = "finance_review",
     db: Session = Depends(get_db),
-    current_admin=Depends(get_current_admin),
+    current_admin=Depends(require_role_or_module(roles=["admin", "superadmin"], module_key="finance.finance_trips")),
 ):
     try:
         review_status = FinanceReviewStatus(status)
@@ -160,7 +160,7 @@ def get_finance_trips(
 def get_finance_trip_detail(
     trip_id: int,
     db: Session = Depends(get_db),
-    current_admin=Depends(get_current_admin),
+    current_admin=Depends(require_role_or_module(roles=["admin", "superadmin"], module_key="finance.finance_trips")),
 ):
     review = (
         db.query(TripFinanceReview)
@@ -338,7 +338,7 @@ def get_finance_trip_detail(
 def approve_finance_trip(
     trip_id: int,
     db: Session = Depends(get_db),
-    current_admin=Depends(get_current_admin),
+    current_admin=Depends(require_role_or_module(roles=["admin", "superadmin"], module_key="finance.finance_trips")),
 ):
     review = (
         db.query(TripFinanceReview)

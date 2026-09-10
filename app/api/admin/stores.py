@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session, joinedload
 
 from app.core.database import get_db
-from app.core.dependencies import get_current_trip_manager
+from app.core.dependencies import get_current_trip_manager, require_role_or_module
 from app.models.trip_stops import TripStop
 from app.models.TripRate import TripRateProfile
 from app.models.stores import Store, StoreProfile
@@ -129,7 +129,7 @@ def build_store_response(store: Store) -> dict:
 # ==========================================
 @router.get("/unknown-stops")
 def get_unknown_stops(
-    db: Session = Depends(get_db), current_admin=Depends(get_current_trip_manager)
+    db: Session = Depends(get_db), current_admin=Depends(require_role_or_module(roles=["admin", "superadmin", "coordinator_admin"], module_key="trip_management.stores"))
 ):
     """
     Returns all trip stops that were checked-in
@@ -165,7 +165,7 @@ def approve_store_from_stop(
     stop_id: int,
     payload: ApproveStoreRequest,
     db: Session = Depends(get_db),
-    current_admin=Depends(get_current_trip_manager),
+    current_admin=Depends(require_role_or_module(roles=["admin", "superadmin", "coordinator_admin"], module_key="trip_management.stores")),
 ):
     """
     Converts an unknown trip stop into a registered store.
@@ -280,7 +280,7 @@ def approve_store_from_stop(
 # ==========================================
 @router.get("/")
 def get_stores(
-    db: Session = Depends(get_db), current_admin=Depends(get_current_trip_manager)
+    db: Session = Depends(get_db), current_admin=Depends(require_role_or_module(roles=["admin", "superadmin", "coordinator_admin"], module_key="trip_management.stores"))
 ):
     stores = db.query(Store).order_by(Store.name.asc()).all()
     return [build_store_response(store) for store in stores]
@@ -306,7 +306,7 @@ def get_stores(
 def create_store(
     payload: StoreCreateRequest,
     db: Session = Depends(get_db),
-    current_admin=Depends(get_current_trip_manager),
+    current_admin=Depends(require_role_or_module(roles=["admin", "superadmin", "coordinator_admin"], module_key="trip_management.stores")),
 ):
     store_name = payload.name.strip()
     if not store_name:
@@ -373,7 +373,7 @@ def create_store(
 @router.get("/trip-rate-profiles")
 def get_trip_rate_profiles_for_admin(
     db: Session = Depends(get_db),
-    current_admin=Depends(get_current_trip_manager),
+    current_admin=Depends(require_role_or_module(roles=["admin", "superadmin", "coordinator_admin"], module_key="trip_management.stores")),
 ):
     profiles = (
         db.query(TripRateProfile)
@@ -400,7 +400,7 @@ def get_trip_rate_profiles_for_admin(
 def bulk_create_stores(
     payload: BulkStoreCreateRequest,
     db: Session = Depends(get_db),
-    current_admin=Depends(get_current_trip_manager),
+    current_admin=Depends(require_role_or_module(roles=["admin", "superadmin", "coordinator_admin"], module_key="trip_management.stores")),
 ):
     if not payload.stores:
         raise HTTPException(
@@ -553,7 +553,7 @@ def bulk_create_stores(
 def get_store(
     store_id: int,
     db: Session = Depends(get_db),
-    current_admin=Depends(get_current_trip_manager),
+    current_admin=Depends(require_role_or_module(roles=["admin", "superadmin", "coordinator_admin"], module_key="trip_management.stores")),
 ):
     store = db.query(Store).filter(Store.id == store_id).first()
 
@@ -571,7 +571,7 @@ def update_store(
     store_id: int,
     payload: StoreUpdateRequest,
     db: Session = Depends(get_db),
-    current_admin=Depends(get_current_trip_manager),
+    current_admin=Depends(require_role_or_module(roles=["admin", "superadmin", "coordinator_admin"], module_key="trip_management.stores")),
 ):
     store = db.query(Store).filter(Store.id == store_id).first()
 
