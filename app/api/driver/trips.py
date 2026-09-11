@@ -29,7 +29,8 @@ from app.models.vehicle_unit import VehicleUnit
 from app.models.TripRate import TripRateProfile
 from app.models.trip_models import GPSActionType
 from app.models.app_setting import AppSetting
-from app.services.gps_service import calculate_distance_meters
+from app.services.gps_service import calculate_distance_meters, find_nearest_store
+from app.services.shipment_ocr_service import ShipmentOCRService
 from app.services.notification_service import create_notification
 from app.services.trip_payroll_service import (
     to_ph,
@@ -70,12 +71,13 @@ def _generate_trip_code(db: Session, start_time: datetime) -> str:
     """Auto-generated, human-readable trip reference: "YYYYMM-00001",
     sequential per PH-local calendar month (resets to 00001 each new
     month) -- distinct from Trip.id (the DB primary key) and
-    Trip.ticket_no (freely typed). Reads the highest existing code for
-    the month and increments it; the column's unique index is the real
-    safety net against a collision under concurrent trip starts (would
-    surface as a rare, retryable DB error rather than a silent
-    duplicate) -- trip creation isn't frequent/concurrent enough here to
-    warrant a dedicated counter table."""
+    Trip.ticket_no (freely typed, only known after Checkout). Reads the
+    highest existing code for the month and increments it; the column's
+    unique index is the real safety net against a collision under
+    concurrent trip creation (would surface as a rare, retryable DB
+    error rather than a silent duplicate) -- trip creation isn't
+    frequent/concurrent enough here to warrant a dedicated counter
+    table."""
     period = to_ph(start_time).strftime("%Y%m")
     prefix = f"{period}-"
 
@@ -429,8 +431,9 @@ def get_active_trip(
         db.query(Trip)
         .filter(
             Trip.driver_id == current_user.id,
-            Trip.status == TripStatus.ACTIVE,
+            Trip.status.in_([TripStatus.ASSIGNED, TripStatus.ACTIVE]),
         )
+        .order_by(Trip.id.desc())
         .first()
     )
 
@@ -442,9 +445,14 @@ def get_active_trip(
         }
 
     # =========================
-    # 2️⃣ Get Origin Store
+    # 2️⃣ Get Origin / Destination Store
     # =========================
     origin_store = db.query(Store).filter(Store.id == trip.origin_store_id).first()
+    destination_store = (
+        db.query(Store).filter(Store.id == trip.destination_store_id).first()
+        if trip.destination_store_id
+        else None
+    )
 
     # =========================
     # 3️⃣ Get Latest Stop
@@ -456,8 +464,12 @@ def get_active_trip(
         .first()
     )
 
+    # A stop is "open" (blocks starting a new one) until it's been
+    # marked DELIVERED -- CHECKED_IN and UNLOADING are both mid-visit.
     has_open_stop = (
-        True if latest_stop and latest_stop.status == StopStatus.CHECKED_IN else False
+        True
+        if latest_stop and latest_stop.status != StopStatus.DELIVERED
+        else False
     )
 
     # =========================
@@ -500,6 +512,8 @@ def get_active_trip(
         "id": trip.id,
         "driver_id": trip.driver_id,
         "ticket_no": trip.ticket_no,
+        "current_step": trip.current_step,
+        "odometer_reading": trip.odometer_reading,
         "vehicle": (
             {
                 "id": trip.vehicle_unit.id,
@@ -524,6 +538,8 @@ def get_active_trip(
         "status": trip.status.value if hasattr(trip.status, "value") else trip.status,
         "origin_store_id": trip.origin_store_id,
         "origin_name": origin_store.name if origin_store else "N/A",
+        "destination_store_id": trip.destination_store_id,
+        "destination_name": destination_store.name if destination_store else None,
         "start_time": trip.start_time,
         "end_time": trip.end_time,
         "created_at": trip.created_at,
@@ -540,21 +556,26 @@ def get_active_trip(
 
 
 # =========================
-# START TRIP
+# DISPATCH TRIP (coordinator-only -- assigns driver + vehicle + hub)
 # =========================
-@router.post("/start")
-def start_trip(
-    shipment_no: str = Form(...),
+@router.post("/dispatch")
+def dispatch_trip(
+    driver_id: int = Form(...),
     vehicle_unit_id: int = Form(...),
-    store_id: int = Form(...),  # NEW: destination store selected by driver
-    lat: float = Form(...),
-    long: float = Form(...),
-    photo: UploadFile = File(...),
+    origin_store_id: int = Form(...),
     helper_ids: str = Form("[]"),
-    driver_id: int | None = Form(None),
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
+    """The office/coordinator's first step in the new 7-step flow: pick a
+    driver, a vehicle, and the hub they're dispatching from, and (usually)
+    the helpers riding along. No shipment number or destination store yet
+    -- those are only known once the driver photographs the Invoice/LM at
+    Checkout. Creates the Trip in TripStatus.ASSIGNED / current_step
+    "ASSIGNED"; the driver sees it on their dashboard and performs
+    Checkout -> Start Trip from there."""
+    if _role_value(current_user.role) not in TRIP_MANAGER_ROLES:
+        raise HTTPException(status_code=403, detail="Not authorized to dispatch trips.")
 
     try:
         helper_ids = json.loads(helper_ids)
@@ -564,39 +585,29 @@ def start_trip(
     if len(helper_ids) != len(set(helper_ids)):
         raise HTTPException(status_code=400, detail="Duplicate helpers selected.")
 
-    # ---------------------------------------
-    # WHO IS THIS TRIP FOR?
-    #
-    # Normally the caller IS the driver. A trip manager (admin/superadmin/
-    # coordinator_admin) can instead start a trip on behalf of a driver --
-    # e.g. dispatching from the office -- who then just checks in/out from
-    # their own phone for the rest of the trip. Every other field (photo,
-    # vehicle, store, helpers, lat/long) is submitted exactly like the
-    # driver flow; driver_id is the only addition.
-    # ---------------------------------------
-    is_trip_manager = _role_value(current_user.role) in TRIP_MANAGER_ROLES
+    if len(helper_ids) > 3:
+        raise HTTPException(status_code=400, detail="Maximum of 3 helpers allowed.")
 
-    if is_trip_manager:
-        if not driver_id:
-            raise HTTPException(
-                status_code=400,
-                detail="Select which driver this trip is being started for.",
-            )
+    target_user = (
+        db.query(User)
+        .filter(User.id == driver_id, User.role == UserRole.DRIVER)
+        .first()
+    )
+    if not target_user:
+        raise HTTPException(status_code=400, detail="Selected driver not found.")
 
-        target_user = (
-            db.query(User)
-            .filter(User.id == driver_id, User.role == UserRole.DRIVER)
-            .first()
+    existing = (
+        db.query(Trip)
+        .filter(
+            Trip.driver_id == target_user.id,
+            Trip.status.in_([TripStatus.ASSIGNED, TripStatus.ACTIVE]),
         )
-
-        if not target_user:
-            raise HTTPException(status_code=400, detail="Selected driver not found.")
-    else:
-        target_user = current_user
-
-    # ---------------------------------------
-    # VEHICLE VALIDATION
-    # ---------------------------------------
+        .first()
+    )
+    if existing:
+        raise HTTPException(
+            status_code=400, detail="This driver already has a trip in progress."
+        )
 
     vehicle = (
         db.query(VehicleUnit)
@@ -607,23 +618,117 @@ def start_trip(
         )
         .first()
     )
-
     if not vehicle:
         raise HTTPException(status_code=400, detail="Selected vehicle is unavailable.")
 
-    # ---------------------------------------
-    # DESTINATION STORE + TRIP RATE PROFILE
-    #
-    # trip_rate_profile_id is no longer trusted from the client -- it's
-    # derived here from the store the driver actually selected, so a
-    # store that isn't yet linked to a profile fails clearly instead of
-    # silently sending a bad/missing ID from the app.
-    # ---------------------------------------
-    destination_store = db.query(Store).filter(Store.id == store_id).first()
+    origin_store = db.query(Store).filter(Store.id == origin_store_id).first()
+    if not origin_store or not origin_store.is_hub:
+        raise HTTPException(status_code=400, detail="Selected origin is not a valid hub.")
 
+    driver_employee = (
+        db.query(Employee).filter(Employee.id == target_user.employee_id).first()
+    )
+    if not driver_employee:
+        raise HTTPException(status_code=400, detail="Driver employee not found.")
+
+    required_departments = _helper_departments_for(driver_employee.department)
+    helper_objects = []
+    for helper_id in helper_ids:
+        helper = db.query(Employee).filter(Employee.id == helper_id).first()
+        if not helper:
+            raise HTTPException(status_code=404, detail=f"Helper {helper_id} not found.")
+        if helper.position.upper() != "HELPER":
+            raise HTTPException(status_code=400, detail="Invalid helper position.")
+        if helper.department not in required_departments:
+            raise HTTPException(status_code=400, detail="Helper department mismatch.")
+        if not helper.is_available:
+            raise HTTPException(
+                status_code=400, detail=f"{helper.first_name} is unavailable."
+            )
+        helper_objects.append(helper)
+
+    try:
+        new_trip = Trip(
+            driver_id=target_user.id,
+            origin_store_id=origin_store.id,
+            vehicle_unit_id=vehicle.id,
+            status=TripStatus.ASSIGNED,
+            current_step="ASSIGNED",
+        )
+        db.add(new_trip)
+        db.flush()
+
+        new_trip.trip_code = _generate_trip_code(db, new_trip.start_time)
+
+        vehicle.is_available = False
+
+        for helper in helper_objects:
+            helper.is_available = 0
+            db.add(TripHelper(trip_id=new_trip.id, helper_id=helper.id))
+
+        db.commit()
+    except Exception:
+        logger.exception("DISPATCH TRIP ERROR")
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Failed to dispatch trip.")
+
+    return {
+        "message": "Trip dispatched.",
+        "trip_id": new_trip.id,
+        "driver": target_user.username,
+        "origin": origin_store.name,
+        "helpers_assigned": len(helper_objects),
+    }
+
+
+# =========================
+# CHECKOUT (driver's first step -- upload Invoice + LM, OCR-assisted)
+# =========================
+@router.post("/{trip_id}/checkout")
+def checkout_trip(
+    trip_id: int,
+    shipment_no: str = Form(...),
+    destination_store_id: int = Form(...),
+    odometer_reading: int = Form(...),
+    lat: float = Form(...),
+    long: float = Form(...),
+    invoice_photo: UploadFile = File(...),
+    lm_photo: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Confirms the shipment number and destination store (pre-filled by
+    the app from a prior call to /{trip_id}/checkout/ocr-preview, but
+    always submitted explicitly here -- the driver has final say, an OCR
+    misread never gets silently committed)."""
+    trip = (
+        db.query(Trip)
+        .filter(
+            Trip.id == trip_id,
+            Trip.driver_id == current_user.id,
+            Trip.status == TripStatus.ASSIGNED,
+        )
+        .first()
+    )
+    if not trip:
+        raise HTTPException(status_code=404, detail="Assigned trip not found.")
+
+    shipment_no = (shipment_no or "").strip()
+    if not shipment_no:
+        raise HTTPException(status_code=400, detail="Shipment number is required.")
+
+    if odometer_reading < 0:
+        raise HTTPException(status_code=400, detail="Odometer reading is required.")
+
+    existing_ticket = (
+        db.query(Trip).filter(Trip.ticket_no == shipment_no, Trip.id != trip_id).first()
+    )
+    if existing_ticket:
+        raise HTTPException(status_code=400, detail="Shipment number already exists.")
+
+    destination_store = db.query(Store).filter(Store.id == destination_store_id).first()
     if not destination_store:
         raise HTTPException(status_code=400, detail="Selected store not found.")
-
     if not destination_store.trip_rate_profile_id:
         raise HTTPException(
             status_code=400,
@@ -632,7 +737,6 @@ def start_trip(
                 "Please contact an admin to fix this store's setup."
             ),
         )
-
     profile = (
         db.query(TripRateProfile)
         .filter(
@@ -641,247 +745,133 @@ def start_trip(
         )
         .first()
     )
-
     if not profile:
         raise HTTPException(
             status_code=400,
             detail="This store's trip rate profile is invalid or inactive.",
         )
 
-    # ---------------------------------------
-    # 1️⃣ Prevent multiple ACTIVE trips
-    # ---------------------------------------
-    existing_active = (
-        db.query(Trip)
-        .filter(Trip.driver_id == target_user.id, Trip.status == TripStatus.ACTIVE)
-        .first()
-    )
-
-    if existing_active:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "This driver already has an active trip."
-                if is_trip_manager
-                else "You already have an active trip."
-            ),
-        )
-
-    # ---------------------------------------
-    # 2️⃣ Validate shipment number
-    #
-    # NOTE: the Trip table's column is still named `ticket_no` on purpose --
-    # renaming it would require a DB migration and could break existing
-    # reports/finance code that reads Trip.ticket_no. The API now accepts
-    # `shipment_no` from the client and maps it to that same column.
-    # ---------------------------------------
-    if not shipment_no or not shipment_no.strip():
-        raise HTTPException(status_code=400, detail="Shipment number is required.")
-
-    shipment_no = shipment_no.strip()
-
-    existing_ticket = db.query(Trip).filter(Trip.ticket_no == shipment_no).first()
-
-    if existing_ticket:
-        raise HTTPException(status_code=400, detail="Shipment number already exists.")
-
-    # ---------------------------------------
-    # 3️⃣ Validate Origin GPS
-    #
-    # Origin is the hub the driver is physically at right now (Yard,
-    # Plant, Test Hub, Consolacion, etc.) -- determined by GPS proximity,
-    # independent of the destination store selected above. A trip manager
-    # submits lat/long the same way a driver does, but since they're
-    # dispatching from the office rather than standing at a hub, the
-    # allowed_radius_meters cutoff is bypassed for them -- just pick
-    # whichever hub is nearest to whatever location they sent.
-    # ---------------------------------------
-    stores = db.query(Store).all()
-
-    closest_store = None
-    min_distance = float("inf")
-    nearest_hub = None
-    nearest_hub_distance = float("inf")
-
-    for store in stores:
-
-        distance = calculate_distance_meters(lat, long, store.latitude, store.longitude)
-
-        if store.is_hub and distance < nearest_hub_distance:
-            nearest_hub_distance = distance
-            nearest_hub = store
-
-        if is_trip_manager:
-            if not store.is_hub:
-                continue
-            if distance < min_distance:
-                min_distance = distance
-                closest_store = store
-        elif distance <= store.allowed_radius_meters and distance < min_distance:
-            min_distance = distance
-            closest_store = store
-
-    # A driver outside every hub's radius is no longer hard-blocked -- the
-    # trip proceeds against the nearest hub anyway, flagged so the trip
-    # manager notices it on Active Trips Monitoring, since the alternative
-    # (stranding a driver who genuinely needs to start a trip) is worse.
-    started_outside_hub_range = False
-    if not closest_store and not is_trip_manager and nearest_hub:
-        closest_store = nearest_hub
-        started_outside_hub_range = True
-
-    if not closest_store:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "No hub locations are configured."
-                if is_trip_manager
-                else "No hub locations are configured. Contact an admin."
-            ),
-        )
-
-    # ---------------------------------------
-    # 4️⃣ Validate Helpers
-    # ---------------------------------------
-
-    required_helper_count = destination_store.required_helper
-
-    # Stores that require helpers accept anywhere from 1 up to the required
-    # count -- a driver may not always have every helper available.
-    if required_helper_count > 0:
-        if len(helper_ids) < 1 or len(helper_ids) > required_helper_count:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"{destination_store.name} requires up to "
-                    f"{required_helper_count} helper(s). Select at least 1."
-                ),
-            )
-    elif len(helper_ids) != 0:
-        raise HTTPException(
-            status_code=400,
-            detail=f"{destination_store.name} does not require any helpers.",
-        )
-
-    if len(helper_ids) > 3:
-        raise HTTPException(status_code=400, detail="Maximum of 3 helpers allowed.")
-
-    driver_employee = (
-        db.query(Employee).filter(Employee.id == target_user.employee_id).first()
-    )
-
-    if not driver_employee:
-        raise HTTPException(status_code=400, detail="Driver employee not found.")
-
-    required_departments = _helper_departments_for(driver_employee.department)
-
-    helper_objects = []
-
-    for helper_id in helper_ids:
-
-        helper = db.query(Employee).filter(Employee.id == helper_id).first()
-
-        if not helper:
-            raise HTTPException(
-                status_code=404, detail=f"Helper {helper_id} not found."
-            )
-
-        if helper.position.upper() != "HELPER":
-            raise HTTPException(status_code=400, detail="Invalid helper position.")
-
-        if helper.department not in required_departments:
-            raise HTTPException(status_code=400, detail="Helper department mismatch.")
-
-        if not helper.is_available:
-            raise HTTPException(
-                status_code=400, detail=f"{helper.first_name} is unavailable."
-            )
-
-        helper_objects.append(helper)
-
-    # ---------------------------------------
-    # 5️⃣ Create Trip + Upload Photo
-    # ---------------------------------------
     try:
-
-        new_trip = Trip(
-            driver_id=target_user.id,
-            origin_store_id=closest_store.id,
-            ticket_no=shipment_no,
-            vehicle_unit_id=vehicle.id,
-            trip_rate_profile_id=profile.id,
-            status=TripStatus.ACTIVE,
-            start_time=datetime.utcnow(),
-            started_outside_hub_range=started_outside_hub_range,
-        )
-
-        db.add(new_trip)
-        db.flush()
-
-        new_trip.trip_code = _generate_trip_code(db, new_trip.start_time)
-
-        if started_outside_hub_range:
-            create_notification(
-                db,
-                type_="STARTED_OUTSIDE_HUB_RANGE",
-                driver_id=target_user.id,
-                trip_id=new_trip.id,
-                message=(
-                    f"{target_user.username} started trip #{shipment_no} "
-                    f"outside any hub's range (nearest: {closest_store.name})."
-                ),
-            )
-
-        vehicle.is_available = False
-
-        # Upload start photo
         file_service = FileService()
 
-        start_geofence_label = _geofence_label(
-            closest_store,
-            nearest_hub_distance if started_outside_hub_range else min_distance,
-            outside_range=started_outside_hub_range,
+        invoice_url = file_service.upload_trip_checkout_invoice(
+            invoice_photo, trip.id, lat=lat, long=long
+        )
+        db.add(
+            FileModel(
+                entity_type="trip",
+                entity_id=trip.id,
+                document_type="INVOICE_PHOTO",
+                file_url=invoice_url,
+                uploaded_by=current_user.id,
+            )
         )
 
-        photo_url = file_service.upload_trip_start_photo(
-            photo,
-            new_trip.id,
-            geofence_label=start_geofence_label,
+        lm_url = file_service.upload_trip_checkout_lm(
+            lm_photo, trip.id, lat=lat, long=long
+        )
+        db.add(
+            FileModel(
+                entity_type="trip",
+                entity_id=trip.id,
+                document_type="LM_MANIFEST_PHOTO",
+                file_url=lm_url,
+                uploaded_by=current_user.id,
+            )
         )
 
-        trip_file = FileModel(
-            entity_type="trip",
-            entity_id=new_trip.id,
-            document_type="START_TRIP_PHOTO",
-            file_url=photo_url,
-            uploaded_by=current_user.id,
-        )
-
-        db.add(trip_file)
-
-        # Lock helpers
-        for helper in helper_objects:
-
-            helper.is_available = 0
-
-            trip_helper = TripHelper(trip_id=new_trip.id, helper_id=helper.id)
-
-            db.add(trip_helper)
+        trip.ticket_no = shipment_no
+        trip.destination_store_id = destination_store.id
+        trip.trip_rate_profile_id = profile.id
+        trip.odometer_reading = odometer_reading
+        trip.current_step = "CHECKOUT"
 
         db.commit()
-
     except Exception:
-        logger.exception("START TRIP ERROR")
+        logger.exception("CHECKOUT TRIP ERROR")
         db.rollback()
+        raise HTTPException(status_code=500, detail="Failed to checkout trip.")
 
-        raise HTTPException(status_code=500, detail="Failed to start trip.")
+    return {"message": "Checked out. Ready to start trip.", "trip_id": trip.id}
 
-    return {
-        "message": "Trip started successfully.",
-        "trip_id": new_trip.id,
-        "origin": closest_store.name,
-        "helpers_assigned": len(helper_objects),
-    }
+
+# =========================
+# CHECKOUT OCR PREVIEW (non-committing -- extracts candidates for the app
+# to pre-fill; the driver still confirms via POST /{trip_id}/checkout)
+# =========================
+@router.post("/{trip_id}/checkout/ocr-preview")
+async def checkout_ocr_preview(
+    trip_id: int,
+    invoice_photo: UploadFile = File(...),
+    lm_photo: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    trip = (
+        db.query(Trip)
+        .filter(
+            Trip.id == trip_id,
+            Trip.driver_id == current_user.id,
+            Trip.status == TripStatus.ASSIGNED,
+        )
+        .first()
+    )
+    if not trip:
+        raise HTTPException(status_code=404, detail="Assigned trip not found.")
+
+    candidate_stores = (
+        db.query(Store).filter(Store.is_hub.is_(False)).all()
+    )
+
+    invoice_bytes = await invoice_photo.read()
+    lm_bytes = await lm_photo.read()
+    await invoice_photo.seek(0)
+    await lm_photo.seek(0)
+
+    try:
+        result = ShipmentOCRService.extract_checkout_fields(
+            invoice_bytes, lm_bytes, candidate_stores
+        )
+    except Exception:
+        logger.exception("CHECKOUT OCR PREVIEW ERROR")
+        # OCR failing should never block Checkout -- fall back to empty
+        # candidates so the driver can just type everything manually.
+        result = {"shipment_number_candidates": [], "store_candidates": []}
+
+    return result
+
+
+# =========================
+# START TRIP (button only -- begins driving)
+# =========================
+@router.post("/{trip_id}/start")
+def start_trip(
+    trip_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    trip = (
+        db.query(Trip)
+        .filter(
+            Trip.id == trip_id,
+            Trip.driver_id == current_user.id,
+            Trip.status == TripStatus.ASSIGNED,
+        )
+        .first()
+    )
+    if not trip:
+        raise HTTPException(status_code=404, detail="Checked-out trip not found.")
+
+    if trip.current_step != "CHECKOUT":
+        raise HTTPException(status_code=400, detail="Complete Checkout first.")
+
+    trip.status = TripStatus.ACTIVE
+    trip.current_step = "IN_TRANSIT"
+    trip.start_time = datetime.utcnow()
+
+    db.commit()
+
+    return {"message": "Trip started.", "trip_id": trip.id}
 
 # =========================
 # CHECK-IN
@@ -914,7 +904,7 @@ def check_in(
     # ---------------------------------------
     open_stop = (
         db.query(TripStop)
-        .filter(TripStop.trip_id == trip.id, TripStop.status == StopStatus.CHECKED_IN)
+        .filter(TripStop.trip_id == trip.id, TripStop.status != StopStatus.DELIVERED)
         .first()
     )
 
@@ -933,7 +923,7 @@ def check_in(
         .first()
     )
 
-    if last_stop and last_stop.status == StopStatus.CHECKED_OUT:
+    if last_stop and last_stop.status == StopStatus.DELIVERED:
         if last_stop.lat_out is not None and last_stop.long_out is not None:
 
             distance_from_last = calculate_distance_meters(
@@ -949,18 +939,7 @@ def check_in(
     # 4️⃣ Find Closest Registered Store
     # ---------------------------------------
     stores = db.query(Store).all()
-
-    closest_store = None
-    min_distance = float("inf")
-
-    for store in stores:
-        distance = calculate_distance_meters(
-            payload.lat, payload.long, store.latitude, store.longitude
-        )
-
-        if distance <= store.allowed_radius_meters and distance < min_distance:
-            min_distance = distance
-            closest_store = store
+    closest_store, _ = find_nearest_store(stores, payload.lat, payload.long)
 
     # ---------------------------------------
     # 5️⃣ Create Trip Stop
@@ -977,6 +956,8 @@ def check_in(
 
     db.add(stop)
     db.flush()  # Get stop.id before commit
+
+    trip.current_step = "ARRIVED"
 
     # ---------------------------------------
     # 6️⃣ Notify Admin if Unknown Location
@@ -997,7 +978,67 @@ def check_in(
         "message": "Checked in successfully.",
         "store": closest_store.name if closest_store else "Unknown Location",
         "requires_review": stop.requires_review,
+        "stop_id": stop.id,
     }
+
+
+# =========================
+# START UNLOADING
+# =========================
+@router.post("/{trip_id}/stops/{stop_id}/start-unloading")
+def start_unloading(
+    trip_id: int,
+    stop_id: int,
+    lat: float = Form(...),
+    long: float = Form(...),
+    photo: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    trip = (
+        db.query(Trip)
+        .filter(
+            Trip.id == trip_id,
+            Trip.driver_id == current_user.id,
+            Trip.status == TripStatus.ACTIVE,
+        )
+        .first()
+    )
+    if not trip:
+        raise HTTPException(status_code=404, detail="Active trip not found.")
+
+    stop = (
+        db.query(TripStop)
+        .filter(TripStop.id == stop_id, TripStop.trip_id == trip_id)
+        .first()
+    )
+    if not stop:
+        raise HTTPException(status_code=404, detail="Stop not found.")
+    if stop.status != StopStatus.CHECKED_IN:
+        raise HTTPException(status_code=400, detail="Must check in first.")
+
+    stop.status = StopStatus.UNLOADING
+    trip.current_step = "UNLOADING"
+    db.flush()
+
+    file_service = FileService()
+    photo_url = file_service.upload_trip_unloading_photo(
+        photo, trip_id, stop.id, lat=lat, long=long
+    )
+
+    db.add(
+        FileModel(
+            entity_type="trip_stop",
+            entity_id=stop.id,
+            document_type="UNLOADING_PHOTO",
+            file_url=photo_url,
+            uploaded_by=current_user.id,
+        )
+    )
+
+    db.commit()
+
+    return {"message": "Unloading started."}
 
 
 # =========================
@@ -1023,8 +1064,8 @@ def check_out(
     if not stop:
         raise HTTPException(status_code=404, detail="Stop not found")
 
-    if stop.status != StopStatus.CHECKED_IN:
-        raise HTTPException(status_code=400, detail="Must check-in first")
+    if stop.status != StopStatus.UNLOADING:
+        raise HTTPException(status_code=400, detail="Must start unloading first")
 
     # if lat_out and long_out not matches the lat_in and long_in, then reject the check-out
     # ---------------------------------------
@@ -1041,23 +1082,13 @@ def check_out(
             .first()
         )
 
-    # If check-in was an unknown location, try to identify the store
-    # using the CHECKOUT GPS -- prefer one within its allowed radius, but
-    # fall back to the nearest store overall (regardless of radius) so a
-    # checkout can still be attributed to *some* store even when GPS has
-    # drifted. This mirrors check_in()'s own fallback (closest_store may
-    # be None there too, checked in with requires_review=True instead of
-    # being blocked) and start_trip()'s started_outside_hub_range fix --
-    # in both cases the driver is allowed to proceed and the discrepancy
-    # is flagged for a trip manager to review instead of hard-blocking,
-    # since stranding a driver mid-delivery is worse than a flagged stop.
+    # If check-in was an unknown location,
+    # try to identify the store using the CHECKOUT GPS.
     if not store:
         stores = db.query(Store).all()
 
         closest_store = None
         min_distance = float("inf")
-        nearest_any_store = None
-        nearest_any_distance = float("inf")
 
         for candidate in stores:
             # Ignore stores that don't have valid coordinates yet.
@@ -1078,10 +1109,6 @@ def check_out(
                 candidate.longitude,
             )
 
-            if distance < nearest_any_distance:
-                nearest_any_distance = distance
-                nearest_any_store = candidate
-
             if (
                 distance <= candidate.allowed_radius_meters
                 and distance < min_distance
@@ -1093,65 +1120,63 @@ def check_out(
             store = closest_store
             stop.store_id = closest_store.id
             stop.requires_review = False
-        elif nearest_any_store:
-            # Outside every store's radius -- attach the nearest one
-            # anyway rather than blocking checkout entirely.
-            store = nearest_any_store
-            stop.store_id = nearest_any_store.id
-            stop.requires_review = True
 
-    # Only truly impossible when the Store table has no usable rows at
-    # all (no coordinates set up anywhere yet) -- an operational setup
-    # problem, not something GPS drift can cause.
+    # No store matched -- either the driver really is somewhere
+    # unregistered, or (more likely right now) stores just don't have
+    # coordinates configured yet. Neither should hard-block the driver
+    # from delivering: proceed without a geofence check and flag the
+    # stop for office review instead, same as check-in's unregistered-
+    # location handling.
     if not store:
-        raise HTTPException(
-            status_code=400,
-            detail="Checkout location is not within any registered store location.",
-        )
-
-    # Distance from the resolved store -- used for the geofence label
-    # and to flag (not block) an out-of-radius checkout below.
-    distance = calculate_distance_meters(
-        lat,
-        long,
-        store.latitude,
-        store.longitude,
-    )
-
-    outside_range = distance > store.allowed_radius_meters
-    if outside_range:
         stop.requires_review = True
+
         create_notification(
             db=db,
-            type_="CHECKOUT_OUTSIDE_RANGE",
+            type_="UNREGISTERED_STORE",
             driver_id=current_user.id,
             trip_id=trip_id,
             trip_stop_id=stop.id,
-            message=(
-                f"{current_user.username} checked out "
-                f"{distance:.0f}m from {store.name} "
-                f"(allowed {store.allowed_radius_meters:.0f}m)."
-            ),
+            message="Driver delivered at an unregistered/unmatched location.",
+        )
+    else:
+        # Validate checkout GPS against the store's coordinates.
+        distance = calculate_distance_meters(
+            lat,
+            long,
+            store.latitude,
+            store.longitude,
         )
 
-    stop.status = StopStatus.CHECKED_OUT
+        if distance > store.allowed_radius_meters:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Checkout location is too far from {store.name}. "
+                    f"Allowed radius is {store.allowed_radius_meters:.0f} meters."
+                ),
+            )
+
+    stop.status = StopStatus.DELIVERED
     stop.check_out_time = datetime.utcnow()
     stop.lat_out = lat
     stop.long_out = long
 
+    trip = db.query(Trip).filter(Trip.id == trip_id).first()
+    if trip:
+        trip.current_step = "DELIVERED"
+
     db.flush()
 
     # Upload delivery proof photo
-    # TODO: confirm the actual FileService method name -- I've matched
-    # the naming pattern from start_trip's upload_trip_start_photo, but
-    # your FileService may name this differently. Adjust if so.
     file_service = FileService()
 
     photo_url = file_service.upload_trip_pod_photo(
         proof_photo,
         trip_id=trip_id,
         stop_id=stop.id,
-        geofence_label=_geofence_label(store, distance, outside_range=outside_range),
+        geofence_label=_geofence_label(store, distance),
+        lat=lat,
+        long=long,
     )
 
     stop_file = FileModel(
@@ -1166,11 +1191,64 @@ def check_out(
 
     db.commit()
 
-    return {
-        "message": "Checked out successfully.",
-        "store": store.name,
-        "requires_review": stop.requires_review,
-    }
+    return {"message": "Delivered successfully."}
+
+
+# =========================
+# BACK TO SOURCE
+# =========================
+@router.post("/{trip_id}/back-to-source")
+def back_to_source(
+    trip_id: int,
+    lat: float = Form(...),
+    long: float = Form(...),
+    lm_perma_photo: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    trip = (
+        db.query(Trip)
+        .filter(
+            Trip.id == trip_id,
+            Trip.driver_id == current_user.id,
+            Trip.status == TripStatus.ACTIVE,
+        )
+        .first()
+    )
+    if not trip:
+        raise HTTPException(status_code=404, detail="Active trip not found.")
+
+    open_stop = (
+        db.query(TripStop)
+        .filter(TripStop.trip_id == trip.id, TripStop.status != StopStatus.DELIVERED)
+        .first()
+    )
+    if open_stop:
+        raise HTTPException(
+            status_code=400, detail="You must be delivered at your current stop first."
+        )
+
+    trip.current_step = "RETURNING"
+    db.flush()
+
+    file_service = FileService()
+    photo_url = file_service.upload_trip_back_to_source_photo(
+        lm_perma_photo, trip_id, lat=lat, long=long
+    )
+
+    db.add(
+        FileModel(
+            entity_type="trip",
+            entity_id=trip.id,
+            document_type="BACK_TO_SOURCE_LM_PHOTO",
+            file_url=photo_url,
+            uploaded_by=current_user.id,
+        )
+    )
+
+    db.commit()
+
+    return {"message": "Heading back to source."}
 
 # =========================
 # TRACK TRIP LOCATION
@@ -1321,10 +1399,10 @@ def track_trip_location(
 
 
 # =========================
-# COMPLETE TRIP
+# CHECKIN (final step -- back at hub, closes the trip)
 # =========================
-@router.post("/{trip_id}/complete")
-def complete_trip(
+@router.post("/{trip_id}/checkin")
+def checkin_trip(
     trip_id: int,
     lat: float = Form(...),
     long: float = Form(...),
@@ -1348,25 +1426,28 @@ def complete_trip(
     if not trip:
         raise HTTPException(status_code=404, detail="Active trip not found.")
 
+    if trip.current_step != "RETURNING":
+        raise HTTPException(status_code=400, detail="Complete Back to Source first.")
+
     # ---------------------------------------
     # 2️⃣ Prevent Completion If Stop Still Open
     # ---------------------------------------
     open_stop = (
         db.query(TripStop)
-        .filter(TripStop.trip_id == trip.id, TripStop.status == StopStatus.CHECKED_IN)
+        .filter(TripStop.trip_id == trip.id, TripStop.status != StopStatus.DELIVERED)
         .first()
     )
 
     if open_stop:
         raise HTTPException(
             status_code=400,
-            detail="You must check out from current stop before completing trip.",
+            detail="You must be delivered at your current stop before checking in.",
         )
 
     # ---------------------------------------
     # 3️⃣ Validate GPS Against Allowed Hub Locations
     # ---------------------------------------
-    # A trip can only be completed once the driver's GPS is back within
+    # A trip can only be checked in once the driver's GPS is back within
     # range of a hub (Store.is_hub) -- each hub's own latitude/longitude/
     # allowed_radius_meters (from tpc_stores) defines its geofence.
     hub_stores = db.query(Store).filter(Store.is_hub.is_(True)).all()
@@ -1376,23 +1457,13 @@ def complete_trip(
             status_code=500, detail="Hub locations not configured in system."
         )
 
-    valid_hub = None
-    min_distance = float("inf")
-
-    for store in hub_stores:
-        distance = calculate_distance_meters(
-            lat, long, store.latitude, store.longitude
-        )
-
-        if distance <= store.allowed_radius_meters and distance < min_distance:
-            min_distance = distance
-            valid_hub = store
+    valid_hub, min_distance = find_nearest_store(hub_stores, lat, long, hub_only=True)
 
     if not valid_hub:
         hub_names = ", ".join(store.name for store in hub_stores)
         raise HTTPException(
             status_code=400,
-            detail=f"You must return to one of: {hub_names} to complete trip.",
+            detail=f"You must return to one of: {hub_names} to check in.",
         )
 
     # ---------------------------------------
@@ -1402,6 +1473,7 @@ def complete_trip(
     completion_time = datetime.utcnow()
 
     trip.status = TripStatus.PENDING_APPROVAL
+    trip.current_step = "CHECKIN"
     trip.end_time = completion_time
 
     completion_log = GPSLog(
@@ -1436,6 +1508,8 @@ def complete_trip(
         stamped_invoice_photo,
         trip.id,
         geofence_label=_geofence_label(valid_hub, min_distance),
+        lat=lat,
+        long=long,
     )
 
     trip_file = FileModel(
@@ -1660,6 +1734,7 @@ def get_my_trips(
             {
                 "id": trip.id,
                 "ticket_no": trip.ticket_no,
+                "trip_code": trip.trip_code,
                 "vehicle": (trip.vehicle_unit.unit_code if trip.vehicle_unit else None),
                 "trip_profile": (
                     trip.trip_rate_profile.profile_name
@@ -1712,6 +1787,7 @@ def get_trip_detail(
         {
             "id": trip.id,
             "ticket_no": trip.ticket_no,
+            "trip_code": trip.trip_code,
             "vehicle": (trip.vehicle_unit.unit_code if trip.vehicle_unit else None),
             "trip_profile": (
                 trip.trip_rate_profile.profile_name

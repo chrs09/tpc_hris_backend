@@ -1,7 +1,8 @@
-"""Posts messages to Slack via an Incoming Webhook -- currently used
-only to alert #production-errors when the API throws an unhandled
-exception (see the global exception handler in app/main.py). Kept
-generic (just a webhook URL + text) so any future alert can reuse it.
+"""Posts messages to Slack via an Incoming Webhook -- used to alert
+#production-errors whenever the API throws an unhandled exception or
+returns an error status, and to send ad-hoc messages to #server-monitoring
+(see the exception handlers in app/main.py). Kept generic (just a webhook
+URL + text) so any future alert can reuse it.
 """
 
 import logging
@@ -58,12 +59,11 @@ def send_error_alert(method: str, url: str, exc: Exception, traceback_text: str)
 
 
 def send_response_alert(method: str, url: str, status_code: int, detail) -> bool:
-    """The alert posted for a request that finished with a "watched"
-    client-error status (400, 422 -- see ALERT_STATUS_CODES in
-    app/main.py) rather than an unhandled crash. No traceback here since
-    there isn't one -- these are FastAPI/Pydantic validation failures or
-    an endpoint deliberately raising HTTPException, not a Python
-    exception bubbling up."""
+    """The alert posted for a request that finished with an error status
+    (400/401/403/404/422/etc) rather than an unhandled crash. No
+    traceback here since there isn't one -- these are FastAPI/Pydantic
+    validation failures or an endpoint deliberately raising
+    HTTPException, not a Python exception bubbling up."""
 
     # `detail` can be a plain string (HTTPException) or a list of
     # Pydantic error dicts (RequestValidationError) -- stringify either

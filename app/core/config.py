@@ -105,8 +105,8 @@ class Settings:
     # SLACK ALERTS
     # ===============================
     # Incoming Webhook for #production-errors -- posted to whenever the
-    # API throws an unhandled exception (see the global exception
-    # handler in app/main.py / app/services/slack_service.py).
+    # API throws an unhandled exception or returns an error status (see
+    # the exception handlers in app/main.py / app/services/slack_service.py).
     SLACK_ERRORS_WEBHOOK_URL = os.getenv("SLACK_ERRORS_WEBHOOK_URL")
 
     # Incoming Webhook for #server-monitoring -- NOT called by this

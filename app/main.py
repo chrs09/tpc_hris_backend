@@ -62,10 +62,11 @@ app = FastAPI(
 )
 
 
-# Any HTTP error response (4xx/5xx) now triggers a Slack alert -- every
-# status code, not just 400/422. Set this to a specific set of codes
-# instead of `None` if the channel ever gets too noisy and some codes
-# (e.g. 401 wrong-password spam) need to be excluded again.
+# Any HTTP error response (4xx/5xx) triggers a Slack alert to
+# #production-errors -- every status code, not just a curated set. Set
+# this to a specific set of codes instead of `None` if the channel ever
+# gets too noisy and some codes (e.g. 401 wrong-password spam) need to
+# be excluded.
 ALERT_STATUS_CODES = None
 
 
