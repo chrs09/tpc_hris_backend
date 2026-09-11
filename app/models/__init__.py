@@ -42,6 +42,11 @@ from .schedule_template import ScheduleTemplate as ScheduleTemplate
 from .TripRate import TripRateProfile as TripRateProfile
 from .vehicle_unit import VehicleUnit as VehicleUnit
 
+# Fleet Management
+from .customer import Customer as Customer
+from .supplier import Supplier as Supplier
+from .vehicle_maintenance import VehicleMaintenance as VehicleMaintenance
+
 # Administrator related models
 from .holiday import Holiday as Holiday
 from .dispatch import Dispatch as Dispatch

@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from app.utils.response import api_response
 
 from app.services.file_service import FileService
+from app.services.email_service import send_employment_form_email
 from app.core.database import get_db
 from app.core.config import Settings
 from app.core.dependencies import get_current_user
@@ -575,10 +576,24 @@ def generate_employment_form(
 
     form_url = f"{Settings.FRONTEND_URL.rstrip('/')}/tytan-onboarding-form/{token}"
 
+    # Best-effort: email the applicant their form link. This must never
+    # fail the request itself -- if SMTP isn't configured yet or the send
+    # errors out, HR still gets the form_url back in the response and can
+    # share it manually (see email_sent in the response below).
+    email_sent = False
+    if applicant.email:
+        email_sent = send_employment_form_email(
+            to_email=applicant.email,
+            applicant_name=f"{applicant.first_name} {applicant.last_name}".strip(),
+            form_url=form_url,
+            expires_at=applicant.onboarding_token_expires_at,
+        )
+
     return {
         "message": "Employment form link generated successfully",
         "form_url": form_url,
         "expires_at": applicant.onboarding_token_expires_at,
+        "email_sent": email_sent,
     }
 
 

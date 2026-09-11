@@ -30,10 +30,12 @@ MODULE_GROUPS = {
         "trips",
         "office_trip_review",
         "trip_bypass",
-        "maintenance",
-        "stores",
+        "trip_categories",
         "daily_dispatch",
     ],
+    "customers": ["customers"],
+    "suppliers": ["suppliers"],
+    "fleet_management": ["vehicle_list", "vehicle_maintenance"],
     "finance": ["finance_trips", "finance_expenses"],
 }
 

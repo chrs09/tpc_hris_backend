@@ -9,7 +9,8 @@ from app.core.database import Base
 
 class StopStatus(str, enum.Enum):
     CHECKED_IN = "CHECKED_IN"
-    CHECKED_OUT = "CHECKED_OUT"
+    UNLOADING = "UNLOADING"
+    DELIVERED = "DELIVERED"
 
 
 class TripStop(Base):

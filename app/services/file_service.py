@@ -12,14 +12,20 @@ from app.core.config import settings
 from app.utils.timezone import utc_to_ph
 
 
-def _watermark_timestamp(file, geofence_label: str | None = None):
-    """Burns the current PH timestamp -- and, when available, a geofence
-    line (e.g. "TPC Yard (42m)" or "Outside geofence - nearest: ...") --
-    onto the bottom-right corner of an uploaded photo before storage, so
-    the stored image itself carries proof of when and roughly where it was
-    taken. Matches the same watermarking done on mobile-captured photos.
-    Only touches image uploads; anything else (or any Pillow failure)
-    passes through untouched rather than blocking the action."""
+def _watermark_timestamp(
+    file,
+    geofence_label: str | None = None,
+    lat: float | None = None,
+    long: float | None = None,
+):
+    """Burns the current PH timestamp, the raw GPS coordinates (when
+    available), and a geofence/location line (e.g. "TPC Yard (42m)" or
+    "Outside geofence - nearest: ...") onto the bottom-right corner of an
+    uploaded photo before storage, so the stored image itself carries
+    proof of when and exactly where it was taken. Matches the same
+    watermarking done on mobile-captured photos. Only touches image
+    uploads; anything else (or any Pillow failure) passes through
+    untouched rather than blocking the action."""
     try:
         content_type = getattr(file, "content_type", "") or ""
         if not content_type.startswith("image/"):
@@ -33,6 +39,8 @@ def _watermark_timestamp(file, geofence_label: str | None = None):
         lines = [
             utc_to_ph(datetime.utcnow()).strftime("%b %d, %Y %I:%M %p") + " PHT"
         ]
+        if lat is not None and long is not None:
+            lines.append(f"GPS: {lat:.6f}, {long:.6f}")
         if geofence_label:
             lines.append(geofence_label)
 
@@ -215,7 +223,9 @@ class FileService:
     # TRIP FILES
     # ===============================
 
-    def upload_trip_start_photo(self, file, trip_id, geofence_label=None):
+    def upload_trip_start_photo(
+        self, file, trip_id, geofence_label=None, lat=None, long=None
+    ):
         """
         Upload photo taken when starting a trip.
 
@@ -223,10 +233,14 @@ class FileService:
         trips/{trip_id}/start/{filename}
         """
         folder = f"trips/{trip_id}/start"
-        return self.upload(_watermark_timestamp(file, geofence_label), folder)
+        return self.upload(
+            _watermark_timestamp(file, geofence_label, lat, long), folder
+        )
 
 
-    def upload_trip_pod_photo(self, file, trip_id, stop_id, geofence_label=None):
+    def upload_trip_pod_photo(
+        self, file, trip_id, stop_id, geofence_label=None, lat=None, long=None
+    ):
         """
         Upload Proof of Delivery (POD) for a specific trip stop.
 
@@ -234,10 +248,14 @@ class FileService:
         trips/{trip_id}/pod/{stop_id}/{filename}
         """
         folder = f"trips/{trip_id}/pod/{stop_id}"
-        return self.upload(_watermark_timestamp(file, geofence_label), folder)
+        return self.upload(
+            _watermark_timestamp(file, geofence_label, lat, long), folder
+        )
 
 
-    def upload_trip_end_photo(self, file, trip_id, geofence_label=None):
+    def upload_trip_end_photo(
+        self, file, trip_id, geofence_label=None, lat=None, long=None
+    ):
         """
         Upload stamped invoice / end-of-trip photo.
 
@@ -245,12 +263,72 @@ class FileService:
         trips/{trip_id}/end/{filename}
         """
         folder = f"trips/{trip_id}/end"
-        return self.upload(_watermark_timestamp(file, geofence_label), folder)
+        return self.upload(
+            _watermark_timestamp(file, geofence_label, lat, long), folder
+        )
 
 
     def upload_gps_log_photo(self, file, trip_id):
         folder = f"gps_logs/{trip_id}"
         return self.upload(file, folder)
+
+    def upload_trip_checkout_invoice(
+        self, file, trip_id, geofence_label=None, lat=None, long=None
+    ):
+        """
+        Upload the Invoice photo taken during the Checkout step.
+
+        Structure:
+        trips/{trip_id}/checkout/invoice/{filename}
+        """
+        folder = f"trips/{trip_id}/checkout/invoice"
+        return self.upload(
+            _watermark_timestamp(file, geofence_label, lat, long), folder
+        )
+
+    def upload_trip_checkout_lm(
+        self, file, trip_id, geofence_label=None, lat=None, long=None
+    ):
+        """
+        Upload the LM (loading manifest) photo taken during the Checkout
+        step.
+
+        Structure:
+        trips/{trip_id}/checkout/lm/{filename}
+        """
+        folder = f"trips/{trip_id}/checkout/lm"
+        return self.upload(
+            _watermark_timestamp(file, geofence_label, lat, long), folder
+        )
+
+    def upload_trip_unloading_photo(
+        self, file, trip_id, stop_id, geofence_label=None, lat=None, long=None
+    ):
+        """
+        Upload the Start Unloading photo for a specific trip stop.
+
+        Structure:
+        trips/{trip_id}/unloading/{stop_id}/{filename}
+        """
+        folder = f"trips/{trip_id}/unloading/{stop_id}"
+        return self.upload(
+            _watermark_timestamp(file, geofence_label, lat, long), folder
+        )
+
+    def upload_trip_back_to_source_photo(
+        self, file, trip_id, geofence_label=None, lat=None, long=None
+    ):
+        """
+        Upload the LM-with-Perma photo taken during the Back to Source
+        step.
+
+        Structure:
+        trips/{trip_id}/back_to_source/{filename}
+        """
+        folder = f"trips/{trip_id}/back_to_source"
+        return self.upload(
+            _watermark_timestamp(file, geofence_label, lat, long), folder
+        )
 
     # ===============================
     # EMPLOYEE FILES

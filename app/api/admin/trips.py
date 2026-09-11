@@ -103,6 +103,7 @@ def get_pending_trips(
         {
             "id": trip.id,
             "ticket_no": trip.ticket_no,
+            "trip_code": trip.trip_code,
             "status": trip.status.value,
             "start_time": utc_to_ph(trip.start_time).strftime("%Y-%m-%d %I:%M:%S %p"),
             "stops_count": db.query(TripStop)
@@ -133,6 +134,7 @@ def get_active_trips(
         {
             "id": trip.id,
             "ticket_no": trip.ticket_no,
+            "trip_code": trip.trip_code,
             "vehicle_unit": (trip.vehicle_unit.unit_code if trip.vehicle_unit else "-"),
             "trip_profile": (
                 trip.trip_rate_profile.profile_name if trip.trip_rate_profile else "-"
@@ -636,6 +638,7 @@ def review_trip(
         # -------------------------
         "trip_id": trip.id,
         "ticket_no": trip.ticket_no,
+        "trip_code": trip.trip_code,
         "status": (
             trip.status.value
             if hasattr(trip.status, "value")
@@ -775,6 +778,7 @@ def get_completed_trips(
         {
             "id": trip.id,
             "ticket_no": trip.ticket_no,
+            "trip_code": trip.trip_code,
             "status": trip.status.value,
             "start_time": utc_to_ph(trip.start_time).strftime("%Y-%m-%d %I:%M:%S %p"),
             "end_time": (
