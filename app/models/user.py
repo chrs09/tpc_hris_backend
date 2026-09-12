@@ -40,7 +40,10 @@ class User(Base):
     )
 
     is_active = Column(Boolean, default=True, nullable=False)
-    must_change_password = Column(Boolean, default=True, nullable=False)
+    # Off by default -- newly created accounts (see create_user_service)
+    # start with a fixed, known temporary password and are never forced to
+    # change it on first login.
+    must_change_password = Column(Boolean, default=False, nullable=False)
 
     # =============================
     # RELATIONSHIPS

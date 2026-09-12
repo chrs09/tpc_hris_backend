@@ -30,8 +30,12 @@ def create_user_service(data, db: Session):
         username = f"{base_username}{counter}"
         counter += 1
 
-    # Generate temporary password
-    temporary_password = employee.last_name.capitalize() + str(datetime.now().year)
+    # Generate temporary password -- lowercase to keep it easy to type/read
+    # off a printed sheet, and the account is never forced to change it
+    # (must_change_password=False below), since re-issuing a new password
+    # on every first login was adding hassle without a real security need
+    # here.
+    temporary_password = employee.last_name.lower() + str(datetime.now().year)
 
     new_user = User(
         username=username,
@@ -40,6 +44,7 @@ def create_user_service(data, db: Session):
         role=UserRole(data.role.value),
         employee_id=employee.id,
         is_active=True,
+        must_change_password=False,
     )
 
     db.add(new_user)
