@@ -18,7 +18,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
 from app.core.database import get_db
-from app.core.dependencies import get_current_user, require_role_or_module
+from app.core.dependencies import get_current_user, require_role_or_module, require_superadmin
 from app.models.attendance import AttendanceRecord
 from app.models.employees import Employee
 from app.models.user import User
@@ -1296,6 +1296,7 @@ def kiosk_selfie_attendance(
 def approve_attendance(
     attendance_id: int,
     db: Session = Depends(get_db),
+    current_user: User = Depends(require_superadmin),
 ):
     attendance = (
         db.query(AttendanceRecord).filter(AttendanceRecord.id == attendance_id).first()
@@ -1320,6 +1321,7 @@ def approve_attendance(
 def reject_attendance(
     attendance_id: int,
     db: Session = Depends(get_db),
+    current_user: User = Depends(require_superadmin),
 ):
     attendance = (
         db.query(AttendanceRecord).filter(AttendanceRecord.id == attendance_id).first()
@@ -1345,14 +1347,12 @@ def adjust_attendance_time(
     attendance_id: int,
     payload: AttendanceTimeAdjust,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_superadmin),
 ):
-    # Admin/superadmin by role, or anyone explicitly granted
-    # "hris.attendance" via Module Assignment.
-    require_role_or_module(
-        roles=["admin", "superadmin"], module_key="hris.attendance"
-    )(current_user=current_user, db=db)
-
+    # Editing/overriding an already-recorded attendance time is
+    # superadmin-only -- module grants no longer bypass this (see
+    # AttendanceGridReview.jsx / AttendanceTable.jsx on the frontend,
+    # which hide these controls from everyone else).
     attendance = (
         db.query(AttendanceRecord).filter(AttendanceRecord.id == attendance_id).first()
     )

@@ -19,7 +19,14 @@ router = APIRouter(prefix="/employee-module-access", tags=["Employee Module Acce
 # superadmin-only), not part of the assignable set.
 MODULE_GROUPS = {
     "hris": [
-        "attendance",
+        {
+            "key": "attendance",
+            # Sub-permissions within the Attendance page itself -- lets an
+            # employee be granted just one of the two view modes instead
+            # of the whole page (see AttendanceList.jsx's canSeeListView /
+            # canSeeGridView on the frontend).
+            "children": ["attendance_list_view", "attendance_grid_view"],
+        },
         "leave",
         "employees",
         "applicants",
@@ -39,8 +46,26 @@ MODULE_GROUPS = {
     "finance": ["finance_trips", "finance_expenses"],
 }
 
+
+def _flatten_submodule_keys(submodules: list) -> list[str]:
+    """Each entry in a MODULE_GROUPS list is either a plain key string, or
+    a {"key": ..., "children": [...]} dict for a submodule with its own
+    sub-permissions (see "attendance" above) -- flatten both shapes into a
+    single list of assignable key strings."""
+    keys: list[str] = []
+    for sub in submodules:
+        if isinstance(sub, dict):
+            keys.append(sub["key"])
+            keys.extend(sub.get("children", []))
+        else:
+            keys.append(sub)
+    return keys
+
+
 ALL_MODULE_KEYS = {
-    f"{group}.{sub}" for group, subs in MODULE_GROUPS.items() for sub in subs
+    f"{group}.{sub}"
+    for group, subs in MODULE_GROUPS.items()
+    for sub in _flatten_submodule_keys(subs)
 }
 
 DEPARTMENT_ORDER = [
