@@ -73,3 +73,4 @@ from .cash_advance_request import CashAdvanceRequest as CashAdvanceRequest
 from .cash_advance_deduction_log import (
     CashAdvanceDeductionLog as CashAdvanceDeductionLog,
 )
+from .error_log import ErrorLog as ErrorLog

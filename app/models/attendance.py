@@ -38,10 +38,19 @@ class AttendanceRecord(Base):
     time_out_longitude = Column(Float, nullable=True)
     time_out_address = Column(String(500), nullable=True)
 
-    face_match_score = Column(Float, nullable=True)
-    face_review_status = Column(String(50), nullable=True)
-    face_review_reason = Column(Text, nullable=True)
-    face_checked_at = Column(DateTime, nullable=True)
+    # Face verification runs independently for time-in and time-out (see
+    # kiosk_selfie_attendance() in app/api/attendance.py) -- each gets its
+    # own match score/status/reason/timestamp so a review decision on one
+    # never overwrites the other's.
+    time_in_face_match_score = Column(Float, nullable=True)
+    time_in_face_review_status = Column(String(50), nullable=True)
+    time_in_face_review_reason = Column(Text, nullable=True)
+    time_in_face_checked_at = Column(DateTime, nullable=True)
+
+    time_out_face_match_score = Column(Float, nullable=True)
+    time_out_face_review_status = Column(String(50), nullable=True)
+    time_out_face_review_reason = Column(Text, nullable=True)
+    time_out_face_checked_at = Column(DateTime, nullable=True)
 
     reviewed_by_user_id = Column(Integer, ForeignKey("tpc_users.id"), nullable=True)
     reviewed_at = Column(DateTime, nullable=True)

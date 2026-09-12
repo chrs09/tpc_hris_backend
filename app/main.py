@@ -11,6 +11,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.core.config import settings
 from app.services.slack_service import send_error_alert, send_response_alert
+from app.services.error_log_service import log_error
 from app.api import (
     health,
     auth,
@@ -45,6 +46,7 @@ from app.api.office import trips as office_trip_review_router
 from app.api import holidays as holiday_router
 from app.api.finance import trips as finance_trips_router
 from app.api.finance import expenses as finance_expense_router
+from app.api import error_logs as error_logs_router
 
 
 logging.basicConfig(
@@ -88,6 +90,12 @@ async def http_exception_handler(request: Request, exc: HTTPException):
             status_code=exc.status_code,
             detail=exc.detail,
         )
+        log_error(
+            method=request.method,
+            url=str(request.url),
+            status_code=exc.status_code,
+            detail=exc.detail,
+        )
 
     return JSONResponse(
         status_code=exc.status_code,
@@ -111,6 +119,12 @@ async def validation_exception_handler(
             status_code=422,
             detail=errors,
         )
+        log_error(
+            method=request.method,
+            url=str(request.url),
+            status_code=422,
+            detail=errors,
+        )
 
     return JSONResponse(status_code=422, content={"detail": errors})
 
@@ -128,6 +142,14 @@ async def global_exception_handler(request: Request, exc: Exception):
         method=request.method,
         url=str(request.url),
         exc=exc,
+        traceback_text=traceback.format_exc(),
+    )
+    log_error(
+        method=request.method,
+        url=str(request.url),
+        status_code=500,
+        detail=str(exc),
+        error_type=type(exc).__name__,
         traceback_text=traceback.format_exc(),
     )
 
@@ -218,6 +240,8 @@ app.include_router(finance_expense_router.router, prefix="/api")  # Add this lin
 app.include_router(office_trip_review_router.router, prefix="/api")  # Add this line to include the office trip review router
 
 app.include_router(holiday_router.router, prefix="/api")  # Add this line to include the holiday router
+
+app.include_router(error_logs_router.router, prefix="/api")
 
 # debugger
 app.include_router(debugger.router, prefix="/api")

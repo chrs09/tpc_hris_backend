@@ -13,6 +13,7 @@ from fastapi import (
     UploadFile,
     File,
     Form,
+    Query,
 )
 from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
@@ -934,10 +935,23 @@ def get_attendance_records(
                     (record.id, "ATTENDANCE_TIME_OUT")
                 ),
 
-                "face_match_score": record.face_match_score,
-                "face_review_status": record.face_review_status,
-                "face_review_reason": record.face_review_reason,
-                "face_checked_at": record.face_checked_at,
+                "time_in_face_match_score": record.time_in_face_match_score,
+                "time_in_face_review_status": record.time_in_face_review_status,
+                "time_in_face_review_reason": record.time_in_face_review_reason,
+                "time_in_face_checked_at": record.time_in_face_checked_at,
+
+                "time_out_face_match_score": record.time_out_face_match_score,
+                "time_out_face_review_status": record.time_out_face_review_status,
+                "time_out_face_review_reason": record.time_out_face_review_reason,
+                "time_out_face_checked_at": record.time_out_face_checked_at,
+
+                # Kept for any caller still reading the old singular
+                # fields -- mirrors time-in, which is what these always
+                # represented before time-out got its own review.
+                "face_match_score": record.time_in_face_match_score,
+                "face_review_status": record.time_in_face_review_status,
+                "face_review_reason": record.time_in_face_review_reason,
+                "face_checked_at": record.time_in_face_checked_at,
                 "reviewed_by_user_id": record.reviewed_by_user_id,
                 "reviewed_at": record.reviewed_at,
                 "attendance_method": record.attendance_method,
@@ -1231,28 +1245,37 @@ def kiosk_selfie_attendance(
     file_service = FileService()
     photo_url = file_service.upload(photo, upload_folder)
 
+    # Face verification runs for both time-in and time-out now -- each
+    # writes to its own time_in_/time_out_ prefixed fields (see the
+    # AttendanceRecord model) so a review decision on one side never
+    # overwrites the other's.
+    profile_photo = (
+        db.query(FileModel)
+        .filter(
+            FileModel.entity_type == "employee",
+            FileModel.entity_id == employee_id,
+            FileModel.document_type == "PROFILE_IMAGE",
+        )
+        .first()
+    )
+
+    face_service = FaceRecognitionService()
+
+    face_result = face_service.compare_faces(
+        profile_photo_url=profile_photo.file_url if profile_photo else None,
+        attendance_photo_url=photo_url,
+    )
+
     if action == "time_in":
-        profile_photo = (
-            db.query(FileModel)
-            .filter(
-                FileModel.entity_type == "employee",
-                FileModel.entity_id == employee_id,
-                FileModel.document_type == "PROFILE_IMAGE",
-            )
-            .first()
-        )
-
-        face_service = FaceRecognitionService()
-
-        face_result = face_service.compare_faces(
-            profile_photo_url=profile_photo.file_url if profile_photo else None,
-            attendance_photo_url=photo_url,
-        )
-
-        record.face_match_score = face_result["score"]
-        record.face_review_status = face_result["status"]
-        record.face_review_reason = face_result["reason"]
-        record.face_checked_at = face_result["checked_at"]
+        record.time_in_face_match_score = face_result["score"]
+        record.time_in_face_review_status = face_result["status"]
+        record.time_in_face_review_reason = face_result["reason"]
+        record.time_in_face_checked_at = face_result["checked_at"]
+    else:
+        record.time_out_face_match_score = face_result["score"]
+        record.time_out_face_review_status = face_result["status"]
+        record.time_out_face_review_reason = face_result["reason"]
+        record.time_out_face_checked_at = face_result["checked_at"]
 
     logger.info(f"PHOTO URL: {photo_url}")
 
@@ -1285,16 +1308,16 @@ def kiosk_selfie_attendance(
         "distance_meters": round(distance_meters, 2),
         "allowed_radius_meters": nearest_location["radius_meters"],
         "nearest_allowed_location": nearest_location["name"],
-        "face_match_score": record.face_match_score,
-        "face_review_status": record.face_review_status,
-        "face_review_reason": record.face_review_reason,
+        "face_match_score": face_result["score"],
+        "face_review_status": face_result["status"],
+        "face_review_reason": face_result["reason"],
     }
 
 
-# approve and reject endpoint for face review will be created separately
 @router.post("/{attendance_id}/approve")
 def approve_attendance(
     attendance_id: int,
+    side: str = Query("time_in", pattern="^(time_in|time_out)$"),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_superadmin),
 ):
@@ -1305,7 +1328,12 @@ def approve_attendance(
     if not attendance:
         raise HTTPException(status_code=404, detail="Attendance record not found.")
 
-    attendance.face_review_status = "APPROVED"
+    if side == "time_in":
+        attendance.time_in_face_review_status = "APPROVED"
+        new_status = attendance.time_in_face_review_status
+    else:
+        attendance.time_out_face_review_status = "APPROVED"
+        new_status = attendance.time_out_face_review_status
 
     db.commit()
     db.refresh(attendance)
@@ -1313,13 +1341,15 @@ def approve_attendance(
     return {
         "message": "Attendance approved.",
         "attendance_id": attendance.id,
-        "status": attendance.face_review_status,
+        "side": side,
+        "status": new_status,
     }
 
 
 @router.post("/{attendance_id}/reject")
 def reject_attendance(
     attendance_id: int,
+    side: str = Query("time_in", pattern="^(time_in|time_out)$"),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_superadmin),
 ):
@@ -1330,7 +1360,12 @@ def reject_attendance(
     if not attendance:
         raise HTTPException(status_code=404, detail="Attendance record not found.")
 
-    attendance.face_review_status = "REJECTED"
+    if side == "time_in":
+        attendance.time_in_face_review_status = "REJECTED"
+        new_status = attendance.time_in_face_review_status
+    else:
+        attendance.time_out_face_review_status = "REJECTED"
+        new_status = attendance.time_out_face_review_status
 
     db.commit()
     db.refresh(attendance)
@@ -1338,7 +1373,8 @@ def reject_attendance(
     return {
         "message": "Attendance rejected.",
         "attendance_id": attendance.id,
-        "status": attendance.face_review_status,
+        "side": side,
+        "status": new_status,
     }
 
 
