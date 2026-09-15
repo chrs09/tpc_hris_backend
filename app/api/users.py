@@ -9,9 +9,10 @@ from app.schemas.user import (
     UserCreate,
     UserUpdate,
     UserResponse,
+    UserAssignableResponse,
     UserRevisionResponse,
 )
-from app.core.dependencies import require_superadmin, require_role_or_module
+from app.core.dependencies import get_current_user, require_superadmin, require_role_or_module
 from app.core.security import create_access_token
 from app.models.user import User, UserRole
 from app.services.user_service import (
@@ -52,6 +53,23 @@ def get_users(
     current_user=Depends(_require_users_access),
 ):
     users = db.query(User).all()
+    return users
+
+
+@router.get("/assignable", response_model=List[UserAssignableResponse])
+def get_assignable_users(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """A minimal, lower-sensitivity user listing (id/username/role/active,
+    no email) for populating an assignee picker -- e.g. Tickets'
+    "Assign to" select or Hierarchy's immediate-head select. Open to any
+    authenticated user, unlike GET /users/ which requires full Users
+    management access (administrator.users) -- someone granted only
+    administrator.tickets or administrator.hierarchy still needs a user
+    list to actually use those pages, and this exposes far less than the
+    full endpoint."""
+    users = db.query(User).filter(User.is_active.is_(True)).all()
     return users
 
 

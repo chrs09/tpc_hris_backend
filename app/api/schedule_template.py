@@ -10,7 +10,7 @@ from fastapi import (
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.dependencies import get_current_user, get_current_admin
+from app.core.dependencies import get_current_user, require_role_or_module
 from app.models.user import User
 from app.models.schedule_template import ScheduleTemplate
 from app.utils.response import api_response
@@ -18,6 +18,15 @@ from app.utils.response import api_response
 router = APIRouter(
     prefix="/schedule-templates",
     tags=["Schedule Templates"],
+)
+
+# Reads stay open to any authenticated user -- the Employee form's Work
+# Schedule dropdown needs the list regardless of who's editing an
+# employee. Writes (create/edit/delete) are the actual Work Schedules
+# admin page, so those are gated to admin/superadmin or an
+# "hris.schedule_templates" grant.
+_require_schedule_write_access = require_role_or_module(
+    roles=["admin", "superadmin"], module_key="hris.schedule_templates"
 )
 
 
@@ -142,7 +151,7 @@ def create_schedule_template(
     sunday_in: str = Form(None),
     sunday_out: str = Form(None),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_admin),
+    current_user: User = Depends(_require_schedule_write_access),
 ):
     existing = db.query(ScheduleTemplate).filter(ScheduleTemplate.name == name).first()
 
@@ -200,7 +209,7 @@ def update_schedule_template(
     sunday_in: str = Form(None),
     sunday_out: str = Form(None),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_admin),
+    current_user: User = Depends(_require_schedule_write_access),
 ):
     template = get_template_or_404(
         db,
@@ -281,7 +290,7 @@ def update_schedule_template(
 def delete_schedule_template(
     template_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_admin),
+    current_user: User = Depends(_require_schedule_write_access),
 ):
     template = get_template_or_404(
         db,

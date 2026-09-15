@@ -22,7 +22,8 @@ from app.models.employee_education import EmployeeEducation
 from app.models.employee_employment import EmployeeEmploymentHistory
 from app.models.employee_reference import EmployeeReference
 from app.models.files import File as FileModel
-from app.models.user import User
+from app.models.user import User, UserRole
+from app.core.security import hash_password
 from app.models.employee_personal import EmployeePersonalDetails
 from app.models.applicant_onboarding import ApplicantOnboarding
 from app.models.applicant_education import ApplicantEducation
@@ -34,9 +35,36 @@ from app.schemas.applicant import (
     ApplicantRemarkResponse,
     ApplicantStatusUpdate,
     ConvertApplicantRequest,
+    OnboardingBirthdayUpdate,
 )
 
 router = APIRouter(prefix="/api/admin/applicants", tags=["Admin Applicants"])
+
+# Departments that classify a new hire as a driver/helper login role --
+# same department set the rest of the app already uses to tell driver/
+# helper departments apart (see DRIVER_DEPARTMENTS in
+# tpc_hris_frontend/src/components/employees/EmployeeForm.jsx and the
+# CdcHelper/CpdcHelper pairing in app/api/driver/trips.py).
+DRIVER_DEPARTMENTS = {"CdcDriver", "CpdcDriver", "WingvanDriver"}
+HELPER_DEPARTMENTS = {"CdcHelper", "CpdcHelper"}
+
+
+def _infer_user_role(department: str) -> UserRole:
+    if department in DRIVER_DEPARTMENTS:
+        return UserRole.DRIVER
+    if department in HELPER_DEPARTMENTS:
+        return UserRole.HELPER
+    return UserRole.EMPLOYEE
+
+
+def _generate_unique_username(db: Session, last_name: str) -> str:
+    base_username = (last_name or "user").strip().lower().replace(" ", "")
+    username = base_username
+    counter = 1
+    while db.query(User).filter(User.username == username).first():
+        username = f"{base_username}{counter}"
+        counter += 1
+    return username
 
 ALLOWED_STATUSES = [
     "pending",
@@ -450,6 +478,43 @@ def get_applicant_onboarding(
     }
 
 
+@router.patch("/{applicant_id}/onboarding/birthday")
+def update_applicant_onboarding_birthday(
+    applicant_id: int,
+    payload: OnboardingBirthdayUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Lets an admin fill in a birthday the applicant forgot on their
+    onboarding form -- conversion to employee requires it (it's used to
+    generate the new hire's login password), and without this, an
+    otherwise-complete applicant would be permanently stuck."""
+    require_role_or_module(
+        roles=["admin", "superadmin", "hr"], module_key="hris.applicants"
+    )(current_user=current_user, db=db)
+
+    applicant = db.query(Applicant).filter(Applicant.id == applicant_id).first()
+    if not applicant:
+        raise HTTPException(status_code=404, detail="Applicant not found")
+
+    onboarding = (
+        db.query(ApplicantOnboarding)
+        .filter(ApplicantOnboarding.applicant_id == applicant.id)
+        .first()
+    )
+    if not onboarding:
+        raise HTTPException(
+            status_code=404,
+            detail="Applicant onboarding form not found",
+        )
+
+    onboarding.birthday = payload.birthday
+    db.commit()
+    db.refresh(onboarding)
+
+    return {"birthday": onboarding.birthday}
+
+
 @router.patch("/{applicant_id}/status")
 def update_applicant_status(
     applicant_id: int,
@@ -676,6 +741,22 @@ def convert_to_employee(
     if not position:
         raise HTTPException(status_code=400, detail="Position is required")
 
+    if not onboarding.birthday:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Applicant's birthday is missing from their onboarding form -- "
+                "it's needed to generate the new employee's login password."
+            ),
+        )
+
+    new_employee_email = onboarding.email or applicant.email
+    if db.query(User).filter(User.email == new_employee_email).first():
+        raise HTTPException(
+            status_code=400,
+            detail="A user account with this email already exists.",
+        )
+
     education_records = (
         db.query(ApplicantEducation)
         .filter(ApplicantEducation.applicant_id == applicant.id)
@@ -804,13 +885,35 @@ def convert_to_employee(
                     position=record.position,
                 )
             )
-        # 9. Mark applicant as converted
+        # 9. Auto-generate login credentials -- username is the employee's
+        # last name (deduped with a numeric suffix if already taken), and
+        # the temporary password is their birthday as MMDDYY, both pulled
+        # straight from the onboarding form so there's no separate manual
+        # step on the Users page for every new hire. Never forced to
+        # change it on first login (must_change_password=False), matching
+        # the manual-creation flow in create_user_service.
+        username = _generate_unique_username(db, new_employee.last_name)
+        temporary_password = onboarding.birthday.strftime("%m%d%y")
+
+        new_user = User(
+            username=username,
+            email=new_employee_email,
+            hashed_password=hash_password(temporary_password),
+            role=_infer_user_role(department),
+            employee_id=new_employee.id,
+            is_active=True,
+            must_change_password=False,
+        )
+        db.add(new_user)
+
+        # 10. Mark applicant as converted
         applicant.is_converted_to_employee = True
         applicant.employee_id = new_employee.id
         applicant.converted_at = datetime.utcnow()
 
         db.commit()
         db.refresh(new_employee)
+        db.refresh(new_user)
 
         return {
             "message": "Applicant converted to employee successfully",
@@ -822,6 +925,11 @@ def convert_to_employee(
                 "email": new_employee.email,
                 "department": new_employee.department,
                 "position": new_employee.position,
+            },
+            "account": {
+                "username": new_user.username,
+                "temporary_password": temporary_password,
+                "role": new_user.role.value,
             },
         }
 

@@ -8,7 +8,7 @@
 
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel
 from sqlalchemy.orm import Session, joinedload
 
@@ -16,6 +16,9 @@ from app.core.database import get_db
 from app.core.dependencies import require_role_or_module
 from app.models.user import User
 from app.models.ticket import Ticket
+from app.services.file_service import FileService
+
+ALLOWED_IMAGE_CONTENT_TYPES = {"image/png", "image/jpeg", "image/webp", "image/gif"}
 
 router = APIRouter(prefix="/tickets", tags=["Tickets"])
 
@@ -68,6 +71,7 @@ def _serialize(ticket: Ticket) -> dict:
         "assigned_to_username": (
             ticket.assigned_to.username if ticket.assigned_to else None
         ),
+        "image_url": ticket.image_url,
         "created_at": ticket.created_at,
         "updated_at": ticket.updated_at,
     }
@@ -175,3 +179,48 @@ def delete_ticket(
     db.commit()
 
     return {"message": "Ticket deleted."}
+
+
+@router.post("/{ticket_id}/image")
+def upload_ticket_image(
+    ticket_id: int,
+    image: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(_require_tickets_access),
+):
+    ticket = db.query(Ticket).filter(Ticket.id == ticket_id).first()
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Ticket not found.")
+
+    if image.content_type not in ALLOWED_IMAGE_CONTENT_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail="Only PNG, JPEG, WEBP, or GIF images are allowed.",
+        )
+
+    ticket.image_url = FileService().upload_ticket_image(image, ticket.id)
+    ticket.updated_at = datetime.utcnow()
+
+    db.commit()
+    db.refresh(ticket)
+
+    return _serialize(ticket)
+
+
+@router.delete("/{ticket_id}/image")
+def remove_ticket_image(
+    ticket_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(_require_tickets_access),
+):
+    ticket = db.query(Ticket).filter(Ticket.id == ticket_id).first()
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Ticket not found.")
+
+    ticket.image_url = None
+    ticket.updated_at = datetime.utcnow()
+
+    db.commit()
+    db.refresh(ticket)
+
+    return _serialize(ticket)

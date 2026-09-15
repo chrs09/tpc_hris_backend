@@ -53,6 +53,10 @@ class ConvertApplicantRequest(BaseModel):
     position: Optional[str] = None
 
 
+class OnboardingBirthdayUpdate(BaseModel):
+    birthday: date
+
+
 class ApplicantDetailResponse(BaseModel):
     id: int
     first_name: str

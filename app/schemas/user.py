@@ -61,6 +61,19 @@ class UserResponse(BaseModel):
         model_config = {"from_attributes": True}
 
 
+class UserAssignableResponse(BaseModel):
+    """A minimal, lower-sensitivity user shape (no email) for populating
+    an assignee picker -- see GET /users/assignable."""
+
+    id: int
+    username: str
+    role: UserRole
+    is_active: bool
+
+    class Config:
+        model_config = {"from_attributes": True}
+
+
 class UserRevisionResponse(BaseModel):
     id: int
     field_changed: str

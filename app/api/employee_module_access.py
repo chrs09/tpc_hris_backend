@@ -34,6 +34,7 @@ MODULE_GROUPS = {
         "employees",
         "applicants",
         "questionnaire",
+        "schedule_templates",
     ],
     "payroll": ["payroll"],
     "trip_management": [

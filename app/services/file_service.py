@@ -331,6 +331,20 @@ class FileService:
         )
 
     # ===============================
+    # TICKET FILES
+    # ===============================
+
+    def upload_ticket_image(self, file, ticket_id):
+        """
+        Upload a screenshot/reference image attached to a ticket.
+
+        Structure:
+        tickets/{ticket_id}/{filename}
+        """
+        folder = f"tickets/{ticket_id}"
+        return self.upload(file, folder)
+
+    # ===============================
     # EMPLOYEE FILES
     # ===============================
 

@@ -23,6 +23,10 @@ class Ticket(Base):
     # "low" | "medium" | "high" -- nullable, not every ticket needs one.
     priority = Column(String(10), nullable=True)
 
+    # Optional screenshot/reference image, uploaded separately via
+    # POST /tickets/{id}/image (see app/api/tickets.py).
+    image_url = Column(String(500), nullable=True)
+
     created_by_user_id = Column(Integer, ForeignKey("tpc_users.id"), nullable=False)
     # Who's responsible for actually handling this ticket -- nullable,
     # not every ticket needs an owner right away.
