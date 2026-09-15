@@ -11,7 +11,7 @@ from app.schemas.user import (
     UserResponse,
     UserRevisionResponse,
 )
-from app.core.dependencies import require_superadmin
+from app.core.dependencies import require_superadmin, require_role_or_module
 from app.core.security import create_access_token
 from app.models.user import User, UserRole
 from app.services.user_service import (
@@ -24,12 +24,18 @@ router = APIRouter(prefix="/users", tags=["Users"])
 
 logger = logging.getLogger("auth")
 
+# Users list/create/edit can be delegated via Module Assignment
+# (administrator.users). Impersonation stays superadmin-only regardless --
+# it hands out a live session as another account, which is a step beyond
+# what a module grant should cover.
+_require_users_access = require_role_or_module(roles=[], module_key="administrator.users")
+
 
 @router.post("/", status_code=status.HTTP_201_CREATED)
 def create_user(
     data: UserCreate,
     db: Session = Depends(get_db),
-    current_user=Depends(require_superadmin),
+    current_user=Depends(_require_users_access),
 ):
     user, temp_password = create_user_service(data, db)
 
@@ -43,7 +49,7 @@ def create_user(
 @router.get("/", response_model=List[UserResponse])
 def get_users(
     db: Session = Depends(get_db),
-    current_user=Depends(require_superadmin),
+    current_user=Depends(_require_users_access),
 ):
     users = db.query(User).all()
     return users
@@ -54,9 +60,20 @@ def update_user(
     user_id: int,
     data: UserUpdate,
     db: Session = Depends(get_db),
-    current_user=Depends(require_superadmin),
+    current_user=Depends(_require_users_access),
 ):
-    user = update_user_service(user_id, data, db, changed_by_user_id=current_user.id)
+    caller_role = (
+        current_user.role.value
+        if hasattr(current_user.role, "value")
+        else current_user.role
+    )
+    user = update_user_service(
+        user_id,
+        data,
+        db,
+        changed_by_user_id=current_user.id,
+        caller_is_superadmin=(caller_role == "superadmin"),
+    )
 
     return {
         "message": "User updated successfully",
@@ -140,7 +157,7 @@ def impersonate_user(
 def get_user_revisions(
     user_id: int,
     db: Session = Depends(get_db),
-    current_user=Depends(require_superadmin),
+    current_user=Depends(_require_users_access),
 ):
     revisions = get_user_revisions_service(user_id, db)
 

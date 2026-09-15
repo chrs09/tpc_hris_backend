@@ -11,10 +11,14 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.dependencies import require_superadmin
+from app.core.dependencies import require_role_or_module
 from app.models.app_setting import AppSetting
 
 router = APIRouter(prefix="/admin/settings", tags=["Admin Settings"])
+
+_require_settings_access = require_role_or_module(
+    roles=[], module_key="administrator.settings"
+)
 
 
 class SettingUpdateRequest(BaseModel):
@@ -33,7 +37,7 @@ def _serialize(setting: AppSetting) -> dict:
 @router.get("/")
 def list_settings(
     db: Session = Depends(get_db),
-    current_user=Depends(require_superadmin),
+    current_user=Depends(_require_settings_access),
 ):
     """Lists every row in tpc_app_settings, for a superadmin settings screen."""
     settings = db.query(AppSetting).order_by(AppSetting.key.asc()).all()
@@ -44,7 +48,7 @@ def list_settings(
 def get_setting(
     key: str,
     db: Session = Depends(get_db),
-    current_user=Depends(require_superadmin),
+    current_user=Depends(_require_settings_access),
 ):
     """Reads a single setting by key."""
     setting = db.query(AppSetting).filter(AppSetting.key == key).first()
@@ -60,7 +64,7 @@ def update_setting(
     key: str,
     payload: SettingUpdateRequest,
     db: Session = Depends(get_db),
-    current_user=Depends(require_superadmin),
+    current_user=Depends(_require_settings_access),
 ):
     """Updates a setting's value. The row must already exist (created via
     a migration, as with wallet_settlement_source) -- this endpoint does

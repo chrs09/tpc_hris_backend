@@ -337,6 +337,36 @@ def cancel_overtime_request(
     return _serialize(request)
 
 
+@router.get("/approved")
+def get_approved_overtime_requests(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Every head-approved overtime request, listed plainly (employee_id,
+    ot_date, approved_hours) -- Payroll sums whichever of these fall
+    inside its own cutoff period (cutoffs are computed on the frontend,
+    not known here) to pre-fill its existing OT approval step, the same
+    way it already consumes /overtime-approval/list."""
+    rows = (
+        db.query(OvertimeRequest)
+        .filter(
+            OvertimeRequest.status == "approved",
+            OvertimeRequest.employee_id.isnot(None),
+        )
+        .order_by(OvertimeRequest.ot_date.desc())
+        .all()
+    )
+    return [
+        {
+            "id": r.id,
+            "employee_id": r.employee_id,
+            "ot_date": str(r.ot_date),
+            "approved_hours": r.approved_hours or 0,
+        }
+        for r in rows
+    ]
+
+
 @router.get("/for-my-approval")
 def get_requests_for_my_approval(
     db: Session = Depends(get_db),

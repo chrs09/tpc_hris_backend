@@ -2,11 +2,15 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.dependencies import require_superadmin
+from app.core.dependencies import require_role_or_module
 from app.models.error_log import ErrorLog
 from app.models.user import User
 
 router = APIRouter(prefix="/error-logs", tags=["Error Logs"])
+
+_require_error_logs_access = require_role_or_module(
+    roles=[], module_key="administrator.error_logs"
+)
 
 
 @router.get("")
@@ -15,7 +19,7 @@ def list_error_logs(
     offset: int = Query(0, ge=0),
     status_code: int | None = Query(None),
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_superadmin),
+    current_user: User = Depends(_require_error_logs_access),
 ):
     """Same events posted to Slack's #production-errors (see
     send_error_alert/send_response_alert in app/services/slack_service.py

@@ -48,6 +48,7 @@ from app.api import holidays as holiday_router
 from app.api.finance import trips as finance_trips_router
 from app.api.finance import expenses as finance_expense_router
 from app.api import error_logs as error_logs_router
+from app.api import tickets as tickets_router
 
 
 logging.basicConfig(
@@ -68,12 +69,22 @@ app = FastAPI(
 # Any HTTP error response (4xx/5xx) triggers a Slack alert to
 # #production-errors -- every status code, not just a curated set. Set
 # this to a specific set of codes instead of `None` if the channel ever
-# gets too noisy and some codes (e.g. 401 wrong-password spam) need to
-# be excluded.
+# gets too noisy and some codes need to be excluded.
 ALERT_STATUS_CODES = None
+
+# 401 is excluded by default -- the notification bells (HubAlertsBell,
+# CashAdvanceAlertsBell) poll every 20s and, once a session's token
+# expires, keep silently retrying with the stale token forever, so this
+# was the single biggest source of noise in both Slack and the Error
+# Logs table. It's "could not validate credentials", not a real bug to
+# chase, so it isn't worth alerting on. Genuine bad-login-attempt 401s
+# (POST /auth/login) still show up in the app's own auth logs.
+EXCLUDED_ALERT_STATUS_CODES = {401}
 
 
 def _should_alert(status_code: int) -> bool:
+    if status_code in EXCLUDED_ALERT_STATUS_CODES:
+        return False
     if ALERT_STATUS_CODES is None:
         return status_code >= 400
     return status_code in ALERT_STATUS_CODES
@@ -259,6 +270,7 @@ app.include_router(office_trip_review_router.router, prefix="/api")  # Add this 
 app.include_router(holiday_router.router, prefix="/api")  # Add this line to include the holiday router
 
 app.include_router(error_logs_router.router, prefix="/api")
+app.include_router(tickets_router.router, prefix="/api")
 
 # debugger
 app.include_router(debugger.router, prefix="/api")

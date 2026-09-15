@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.dependencies import get_current_user, require_superadmin
+from app.core.dependencies import get_current_user, require_role_or_module
 from app.models.user import User
 from app.models.cash_advance_deduction_option import CashAdvanceDeductionOption
 from app.models.cash_advance_terms import CashAdvanceTerms
@@ -13,6 +13,10 @@ from app.schemas.cash_advance_settings import (
 )
 
 router = APIRouter(prefix="/cash-advance-settings", tags=["Cash Advance Settings"])
+
+_require_cash_advance_settings_access = require_role_or_module(
+    roles=[], module_key="administrator.cash_advance_settings"
+)
 
 
 def _serialize_option(option: CashAdvanceDeductionOption) -> dict:
@@ -51,7 +55,7 @@ def list_active_deduction_options(
 @router.get("/deduction-options/all")
 def list_all_deduction_options(
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_superadmin),
+    current_user: User = Depends(_require_cash_advance_settings_access),
 ):
     """Full list (active + inactive) for the superadmin management page."""
     options = (
@@ -69,7 +73,7 @@ def list_all_deduction_options(
 def create_deduction_option(
     payload: DeductionOptionCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_superadmin),
+    current_user: User = Depends(_require_cash_advance_settings_access),
 ):
     if payload.amount <= 0:
         raise HTTPException(status_code=400, detail="Amount must be greater than 0.")
@@ -90,7 +94,7 @@ def update_deduction_option(
     option_id: int,
     payload: DeductionOptionUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_superadmin),
+    current_user: User = Depends(_require_cash_advance_settings_access),
 ):
     option = (
         db.query(CashAdvanceDeductionOption)
@@ -122,7 +126,7 @@ def update_deduction_option(
 def delete_deduction_option(
     option_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_superadmin),
+    current_user: User = Depends(_require_cash_advance_settings_access),
 ):
     option = (
         db.query(CashAdvanceDeductionOption)
@@ -170,7 +174,7 @@ def get_terms(
 def set_terms(
     payload: TermsUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_superadmin),
+    current_user: User = Depends(_require_cash_advance_settings_access),
 ):
     if payload.max_pay_periods <= 0:
         raise HTTPException(

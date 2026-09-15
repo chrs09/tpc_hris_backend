@@ -14,9 +14,12 @@ router = APIRouter(prefix="/employee-module-access", tags=["Employee Module Acce
 # Canonical assignable module/submodule structure. Keys must match
 # MODULE_GROUPS in tpc_hris_frontend/src/constants/modules.js -- the
 # Sidebar checks these same keys against an employee's granted set instead
-# of the old hardcoded role arrays. "Dashboard" and "Administrator" are
-# intentionally excluded -- those stay as they are today (always visible /
-# superadmin-only), not part of the assignable set.
+# of the old hardcoded role arrays. "Dashboard" is intentionally excluded --
+# it stays always-visible, not part of the assignable set. Within
+# "administrator", "module_assignment" itself is deliberately NOT
+# assignable -- granting it would let a non-superadmin grant themselves (or
+# anyone) further access, a privilege-escalation loop -- it stays hardcoded
+# superadmin-only.
 MODULE_GROUPS = {
     "hris": [
         {
@@ -54,6 +57,16 @@ MODULE_GROUPS = {
     "suppliers": ["suppliers"],
     "fleet_management": ["vehicle_list", "vehicle_maintenance"],
     "finance": ["finance_trips", "finance_expenses"],
+    "administrator": [
+        "users",
+        "hierarchy",
+        "role_access",
+        "cash_advance_settings",
+        "holidays",
+        "error_logs",
+        "tickets",
+        "settings",
+    ],
 }
 
 

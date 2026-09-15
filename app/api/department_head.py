@@ -2,13 +2,17 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session, joinedload
 
 from app.core.database import get_db
-from app.core.dependencies import require_superadmin
+from app.core.dependencies import get_current_user, require_role_or_module
 from app.models.user import User
 from app.models.department_head import DepartmentHead
 from app.models.cash_advance_head import CashAdvanceHead
 from app.schemas.department_head import DepartmentHeadSet
 
 router = APIRouter(prefix="/org-hierarchy", tags=["Org Hierarchy"])
+
+_require_hierarchy_access = require_role_or_module(
+    roles=[], module_key="administrator.hierarchy"
+)
 
 # Canonical department list, matching employeeRoleConvert in
 # tpc_hris_frontend/src/constants/employeeRole.js.
@@ -40,10 +44,30 @@ def _serialize_user(user: User | None) -> dict | None:
     }
 
 
+@router.get("/am-i-head")
+def am_i_department_head(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Whether the logged-in user is set as ANY department's immediate
+    head -- consumed by the frontend to decide whether to show the OT
+    Approvals nav item at all, since only an immediate head (or a
+    request's specifically-designated approver, checked separately per
+    request) can review overtime. Open to any authenticated user, unlike
+    the rest of this router, since it's just checking your own status."""
+    departments = [
+        h.department
+        for h in db.query(DepartmentHead)
+        .filter(DepartmentHead.head_user_id == current_user.id)
+        .all()
+    ]
+    return {"is_department_head": bool(departments), "departments": departments}
+
+
 @router.get("/")
 def list_department_heads(
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_superadmin),
+    current_user: User = Depends(_require_hierarchy_access),
 ):
     heads_by_department = {
         h.department: h
@@ -75,7 +99,7 @@ def set_department_head(
     department: str,
     payload: DepartmentHeadSet,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_superadmin),
+    current_user: User = Depends(_require_hierarchy_access),
 ):
     if department not in DEPARTMENTS:
         raise HTTPException(status_code=400, detail="Unknown department.")
@@ -125,7 +149,7 @@ def set_department_head(
 @router.get("/cash-advance-heads")
 def list_cash_advance_heads(
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_superadmin),
+    current_user: User = Depends(_require_hierarchy_access),
 ):
     heads_by_department = {
         h.department: h
@@ -157,7 +181,7 @@ def set_cash_advance_head(
     department: str,
     payload: DepartmentHeadSet,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_superadmin),
+    current_user: User = Depends(_require_hierarchy_access),
 ):
     if department not in DEPARTMENTS:
         raise HTTPException(status_code=400, detail="Unknown department.")

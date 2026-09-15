@@ -54,7 +54,13 @@ def create_user_service(data, db: Session):
     return new_user, temporary_password
 
 
-def update_user_service(user_id: int, data, db: Session, changed_by_user_id: int = None):
+def update_user_service(
+    user_id: int,
+    data,
+    db: Session,
+    changed_by_user_id: int = None,
+    caller_is_superadmin: bool = True,
+):
     """Applies role/is_active changes to a user and records each change in
     tpc_user_revisions (see app/models/user_revision.py) so it's traceable
     later who changed what, when, and (for deactivation) why.
@@ -67,12 +73,25 @@ def update_user_service(user_id: int, data, db: Session, changed_by_user_id: int
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    # This endpoint is already gated to superadmin callers only (see
-    # require_superadmin on PATCH /users/{user_id} in app/api/users.py),
-    # so allowing the target account to also be a superadmin doesn't open
-    # up access to anyone who couldn't already reach this endpoint -- it
-    # just lets one superadmin manage another's role/status, with the
-    # change fully logged via tpc_user_revisions below.
+    # PATCH /users/{user_id} is reachable either by a real superadmin or by
+    # someone granted "administrator.users" via Module Assignment (see
+    # require_role_or_module in app/api/users.py). A module grant must
+    # never be usable to touch an existing superadmin's account or to
+    # promote anyone to superadmin -- that would let a granted user
+    # escalate themselves or lock out the real superadmin. Only an actual
+    # superadmin caller may do either.
+    if not caller_is_superadmin:
+        if user.role == UserRole.SUPERADMIN:
+            raise HTTPException(
+                status_code=403,
+                detail="Only a superadmin can modify a superadmin account.",
+            )
+        if data.role is not None and UserRole(data.role) == UserRole.SUPERADMIN:
+            raise HTTPException(
+                status_code=403,
+                detail="Only a superadmin can grant the superadmin role.",
+            )
+
     revisions = []
 
     if data.role is not None:
