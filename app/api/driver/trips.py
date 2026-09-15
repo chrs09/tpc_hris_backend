@@ -46,7 +46,7 @@ router = APIRouter(prefix="/driver/trips", tags=["Driver Trips"])
 # Roles that can start a trip on behalf of a driver instead of themselves
 # (e.g. the driver checks in on their own phone afterward). Mirrors
 # get_current_trip_manager in app/core/dependencies.py.
-TRIP_MANAGER_ROLES = {"admin", "superadmin", "coordinator_admin"}
+TRIP_MANAGER_ROLES = {"admin", "superadmin", "coordinator_admin", "coordinator"}
 
 
 def _role_value(role) -> str:

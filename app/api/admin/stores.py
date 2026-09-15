@@ -280,7 +280,7 @@ def approve_store_from_stop(
 # ==========================================
 @router.get("/")
 def get_stores(
-    db: Session = Depends(get_db), current_admin=Depends(require_role_or_module(roles=["admin", "superadmin", "coordinator_admin"], module_key="trip_management.stores"))
+    db: Session = Depends(get_db), current_admin=Depends(require_role_or_module(roles=["admin", "superadmin", "coordinator_admin", "coordinator"], module_key="trip_management.stores"))
 ):
     stores = db.query(Store).order_by(Store.name.asc()).all()
     return [build_store_response(store) for store in stores]

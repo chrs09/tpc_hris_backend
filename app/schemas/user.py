@@ -10,6 +10,7 @@ class CreateUserRole(str, Enum):
     DRIVER = "driver"
     HELPER = "helper"
     EMPLOYEE = "employee"
+    COORDINATOR = "coordinator"
 
 
 class UpdateUserRole(str, Enum):
@@ -25,6 +26,7 @@ class UpdateUserRole(str, Enum):
     HELPER = "helper"
     EMPLOYEE = "employee"
     COORDINATOR_ADMIN = "coordinator_admin"
+    COORDINATOR = "coordinator"
     PAYROLL_ADMIN = "payroll_admin"
     OFFICE_ADMIN = "office_admin"
 

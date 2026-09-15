@@ -36,9 +36,19 @@ MODULE_GROUPS = {
     "trip_management": [
         "trips",
         "office_trip_review",
-        "trip_bypass",
+        # Renamed from "trip_bypass" -- this is dispatch (assigning a
+        # driver/vehicle/hub to start a trip), now called Trip
+        # Assignment. The name "trip_bypass" now belongs to the
+        # separate feature below (acting as a driver on a stuck trip).
+        "trip_assignment",
         "trip_categories",
         "daily_dispatch",
+        # Lets superadmin (always) or a specifically granted employee
+        # perform any step of a driver's trip on their behalf -- e.g.
+        # uploading a forgotten POD photo -- bypassing the ownership and
+        # geofence checks a real driver's own phone would hit (see
+        # app/api/admin/trip_bypass.py).
+        "trip_bypass_actions",
     ],
     "customers": ["customers"],
     "suppliers": ["suppliers"],

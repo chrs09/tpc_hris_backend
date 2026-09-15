@@ -33,6 +33,7 @@ from app.api.payroll import overtime_approval, payroll_deductions
 from app.api import schedule_template as schedule_template_router
 from app.api.driver import trips
 from app.api.admin import trips as admin_trips
+from app.api.admin import trip_bypass as admin_trip_bypass
 from app.api.admin import stores as stores
 from app.api.admin import dispatch as admin_dispatch
 from app.api.admin import settings as admin_settings
@@ -222,6 +223,7 @@ app.include_router(trips.router, prefix="/api")
 app.include_router(trip_maintenance_router.router, prefix="/api")
 
 app.include_router(admin_trips.router, prefix="/api")
+app.include_router(admin_trip_bypass.router, prefix="/api")
 app.include_router(stores.router, prefix="/api")
 app.include_router(admin_dispatch.router, prefix="/api")
 app.include_router(admin_settings.router, prefix="/api")

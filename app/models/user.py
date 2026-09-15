@@ -12,6 +12,9 @@ class UserRole(str, enum.Enum):
     HELPER = "helper"
     EMPLOYEE = "employee"
     COORDINATOR_ADMIN = "coordinator_admin"
+    # Narrower than coordinator_admin -- trip assignment/dispatch only
+    # (see "Trip Assignment", the renamed Start Trip Bypass page).
+    COORDINATOR = "coordinator"
     PAYROLL_ADMIN = "payroll_admin"
     OFFICE_ADMIN = "office_admin"
 

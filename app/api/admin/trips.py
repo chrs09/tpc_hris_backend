@@ -51,7 +51,7 @@ def get_trip_summary(
 # =========================
 @router.get("/available-drivers")
 def get_available_drivers(
-    db: Session = Depends(get_db), current_admin=Depends(require_role_or_module(roles=["admin", "superadmin", "coordinator_admin"], module_key="trip_management.trips"))
+    db: Session = Depends(get_db), current_admin=Depends(require_role_or_module(roles=["admin", "superadmin", "coordinator_admin", "coordinator"], module_key="trip_management.trips"))
 ):
     drivers_with_active_trip = {
         row[0]
