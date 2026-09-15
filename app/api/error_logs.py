@@ -46,6 +46,8 @@ def list_error_logs(
                 "error_type": row.error_type,
                 "detail": row.detail,
                 "traceback": row.traceback,
+                "user_id": row.user_id,
+                "username": row.username,
                 "created_at": row.created_at,
             }
             for row in rows

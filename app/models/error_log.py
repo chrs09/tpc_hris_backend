@@ -25,4 +25,13 @@ class ErrorLog(Base):
     detail = Column(Text, nullable=True)
     traceback = Column(Text, nullable=True)
 
+    # Best-effort "who sent this request" (see get_request_user() in
+    # error_log_service.py) -- null for an unauthenticated request, or
+    # one whose token had already expired/was missing by the time it
+    # errored. username is denormalized here (not a live join to
+    # tpc_users) so the log still shows who it was even if that account
+    # is later renamed or deleted.
+    user_id = Column(Integer, nullable=True, index=True)
+    username = Column(String(50), nullable=True)
+
     created_at = Column(DateTime, default=datetime.utcnow, index=True)

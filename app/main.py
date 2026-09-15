@@ -11,7 +11,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.core.config import settings
 from app.services.slack_service import send_error_alert, send_response_alert
-from app.services.error_log_service import log_error
+from app.services.error_log_service import log_error, get_request_user
 from app.api import (
     health,
     auth,
@@ -85,17 +85,22 @@ async def http_exception_handler(request: Request, exc: HTTPException):
     (same response shape/headers for every status code), but also posts
     a Slack alert for every error status."""
     if _should_alert(exc.status_code):
+        user_id, username = get_request_user(request)
         send_response_alert(
             method=request.method,
             url=str(request.url),
             status_code=exc.status_code,
             detail=exc.detail,
+            user_id=user_id,
+            username=username,
         )
         log_error(
             method=request.method,
             url=str(request.url),
             status_code=exc.status_code,
             detail=exc.detail,
+            user_id=user_id,
+            username=username,
         )
 
     return JSONResponse(
@@ -114,17 +119,22 @@ async def validation_exception_handler(
     errors = jsonable_encoder(exc.errors())
 
     if _should_alert(422):
+        user_id, username = get_request_user(request)
         send_response_alert(
             method=request.method,
             url=str(request.url),
             status_code=422,
             detail=errors,
+            user_id=user_id,
+            username=username,
         )
         log_error(
             method=request.method,
             url=str(request.url),
             status_code=422,
             detail=errors,
+            user_id=user_id,
+            username=username,
         )
 
     return JSONResponse(status_code=422, content={"detail": errors})
@@ -139,11 +149,14 @@ async def global_exception_handler(request: Request, exc: Exception):
     # Best-effort Slack alert to #production-errors -- send_error_alert
     # never raises, so a broken/misconfigured webhook can never turn
     # into a second failure on top of the original error being handled.
+    user_id, username = get_request_user(request)
     send_error_alert(
         method=request.method,
         url=str(request.url),
         exc=exc,
         traceback_text=traceback.format_exc(),
+        user_id=user_id,
+        username=username,
     )
     log_error(
         method=request.method,
@@ -152,6 +165,8 @@ async def global_exception_handler(request: Request, exc: Exception):
         detail=str(exc),
         error_type=type(exc).__name__,
         traceback_text=traceback.format_exc(),
+        user_id=user_id,
+        username=username,
     )
 
     return JSONResponse(

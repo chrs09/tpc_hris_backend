@@ -39,7 +39,26 @@ def send_slack_alert(webhook_url: str | None, text: str) -> bool:
         return False
 
 
-def send_error_alert(method: str, url: str, exc: Exception, traceback_text: str) -> bool:
+def _requester_line(user_id: int | None, username: str | None) -> str:
+    """Formats the "who sent this request" line for a Slack alert --
+    user_id/username come from get_request_user() in
+    error_log_service.py, best-effort decoded from the request's own
+    Bearer token (None/None for an unauthenticated request)."""
+    if username:
+        return f"*User:* {username} (#{user_id})\n"
+    if user_id:
+        return f"*User:* #{user_id} (account not found)\n"
+    return "*User:* unauthenticated\n"
+
+
+def send_error_alert(
+    method: str,
+    url: str,
+    exc: Exception,
+    traceback_text: str,
+    user_id: int | None = None,
+    username: str | None = None,
+) -> bool:
     """The specific alert posted for an unhandled server error (always a
     500) -- kept as its own function so the message formatting lives in
     one place instead of being built inline in the exception handler."""
@@ -51,6 +70,7 @@ def send_error_alert(method: str, url: str, exc: Exception, traceback_text: str)
     text = (
         f":rotating_light: *Unhandled server error (500)*\n"
         f"*Request:* `{method} {url}`\n"
+        f"{_requester_line(user_id, username)}"
         f"*Error:* `{type(exc).__name__}: {exc}`\n"
         f"```{trimmed_traceback}```"
     )
@@ -58,7 +78,14 @@ def send_error_alert(method: str, url: str, exc: Exception, traceback_text: str)
     return send_slack_alert(Settings.SLACK_ERRORS_WEBHOOK_URL, text)
 
 
-def send_response_alert(method: str, url: str, status_code: int, detail) -> bool:
+def send_response_alert(
+    method: str,
+    url: str,
+    status_code: int,
+    detail,
+    user_id: int | None = None,
+    username: str | None = None,
+) -> bool:
     """The alert posted for a request that finished with an error status
     (400/401/403/404/422/etc) rather than an unhandled crash. No
     traceback here since there isn't one -- these are FastAPI/Pydantic
@@ -73,6 +100,7 @@ def send_response_alert(method: str, url: str, status_code: int, detail) -> bool
     text = (
         f":warning: *Request failed ({status_code})*\n"
         f"*Request:* `{method} {url}`\n"
+        f"{_requester_line(user_id, username)}"
         f"*Detail:* ```{detail_text}```"
     )
 
