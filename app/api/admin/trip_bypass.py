@@ -32,6 +32,7 @@ from app.models.trip_bypass_log import TripBypassLog
 from app.services.file_service import FileService
 from app.services.gps_service import calculate_distance_meters
 from app.services.notification_service import create_notification
+from app.api.driver.trips import _load_planned_store_ids, _delivered_store_ids
 
 router = APIRouter(prefix="/admin/trips/bypass", tags=["Trip Bypass"])
 
@@ -129,6 +130,17 @@ def get_bypass_trip_detail(
         .all()
     )
 
+    planned_ids = _load_planned_store_ids(trip)
+    delivered_ids = _delivered_store_ids(db, trip.id) if planned_ids else set()
+    planned_stores_by_id = (
+        {
+            store.id: store
+            for store in db.query(Store).filter(Store.id.in_(planned_ids)).all()
+        }
+        if planned_ids
+        else {}
+    )
+
     return {
         "trip_id": trip.id,
         "driver_id": trip.driver_id,
@@ -142,6 +154,18 @@ def get_bypass_trip_detail(
         "destination_store": (
             trip.destination_store.name if trip.destination_store else None
         ),
+        "planned_stores": [
+            {
+                "store_id": sid,
+                "store_name": (
+                    planned_stores_by_id[sid].name
+                    if sid in planned_stores_by_id
+                    else None
+                ),
+                "delivered": sid in delivered_ids,
+            }
+            for sid in planned_ids
+        ],
         "odometer_reading": trip.odometer_reading,
         "stops": [
             {
@@ -165,30 +189,21 @@ def get_bypass_trip_detail(
 def bypass_checkout(
     trip_id: int,
     reason: str = Form(...),
-    shipment_no: str = Form(...),
-    destination_store_id: int = Form(...),
     odometer_reading: int = Form(0),
     invoice_photo: UploadFile | None = File(None),
     lm_photo: UploadFile | None = File(None),
+    lm_checkout_stamped_photo: UploadFile | None = File(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(_require_bypass_access),
 ):
+    """Destination store(s) are already set on the trip from dispatch
+    (Trip.planned_store_ids) -- this bypass step only needs the odometer
+    reading and the same three photos the real Checkout step collects."""
     trip = _get_trip(db, trip_id)
     if trip.status != TripStatus.ASSIGNED:
         raise HTTPException(status_code=400, detail="Trip is not in ASSIGNED status.")
 
-    shipment_no = (shipment_no or "").strip()
-    if not shipment_no:
-        raise HTTPException(status_code=400, detail="Shipment number is required.")
-
-    destination_store = db.query(Store).filter(Store.id == destination_store_id).first()
-    if not destination_store:
-        raise HTTPException(status_code=400, detail="Selected store not found.")
-    if not destination_store.trip_rate_profile_id:
-        raise HTTPException(
-            status_code=400,
-            detail=f"'{destination_store.name}' has no trip rate profile linked.",
-        )
+    destination_store = trip.destination_store
 
     file_service = FileService()
 
@@ -196,7 +211,8 @@ def bypass_checkout(
         invoice_url = file_service.upload_trip_checkout_invoice(
             invoice_photo, trip.id,
             geofence_label=_geofence_label(destination_store),
-            lat=destination_store.latitude, long=destination_store.longitude,
+            lat=destination_store.latitude if destination_store else None,
+            long=destination_store.longitude if destination_store else None,
         )
         db.add(FileModel(
             entity_type="trip", entity_id=trip.id, document_type="INVOICE_PHOTO",
@@ -207,49 +223,36 @@ def bypass_checkout(
         lm_url = file_service.upload_trip_checkout_lm(
             lm_photo, trip.id,
             geofence_label=_geofence_label(destination_store),
-            lat=destination_store.latitude, long=destination_store.longitude,
+            lat=destination_store.latitude if destination_store else None,
+            long=destination_store.longitude if destination_store else None,
         )
         db.add(FileModel(
             entity_type="trip", entity_id=trip.id, document_type="LM_MANIFEST_PHOTO",
             file_url=lm_url, uploaded_by=current_user.id,
         ))
 
-    trip.ticket_no = shipment_no
-    trip.destination_store_id = destination_store.id
-    trip.trip_rate_profile_id = destination_store.trip_rate_profile_id
+    if lm_checkout_stamped_photo is not None:
+        lm_stamped_url = file_service.upload_trip_checkout_lm_stamped(
+            lm_checkout_stamped_photo, trip.id,
+            geofence_label=_geofence_label(destination_store),
+            lat=destination_store.latitude if destination_store else None,
+            long=destination_store.longitude if destination_store else None,
+        )
+        db.add(FileModel(
+            entity_type="trip", entity_id=trip.id,
+            document_type="LM_CHECKOUT_STAMPED_PHOTO",
+            file_url=lm_stamped_url, uploaded_by=current_user.id,
+        ))
+
     trip.odometer_reading = odometer_reading
-    trip.current_step = "CHECKOUT"
-
-    _log_bypass(db, trip.id, "checkout", current_user.id, reason)
-    db.commit()
-
-    return {"message": "Checkout completed (bypass)."}
-
-
-# =========================
-# START TRIP
-# =========================
-@router.post("/{trip_id}/start")
-def bypass_start(
-    trip_id: int,
-    reason: str = Form(...),
-    db: Session = Depends(get_db),
-    current_user: User = Depends(_require_bypass_access),
-):
-    trip = _get_trip(db, trip_id)
-    if trip.status != TripStatus.ASSIGNED:
-        raise HTTPException(status_code=400, detail="Trip is not in ASSIGNED status.")
-    if trip.current_step != "CHECKOUT":
-        raise HTTPException(status_code=400, detail="Checkout must be completed first.")
-
     trip.status = TripStatus.ACTIVE
     trip.current_step = "IN_TRANSIT"
     trip.start_time = datetime.utcnow()
 
-    _log_bypass(db, trip.id, "start", current_user.id, reason)
+    _log_bypass(db, trip.id, "checkout", current_user.id, reason)
     db.commit()
 
-    return {"message": "Trip started (bypass)."}
+    return {"message": "Checkout completed (bypass). Trip started."}
 
 
 # =========================
@@ -411,47 +414,6 @@ def bypass_check_out(
     db.commit()
 
     return {"message": "Delivered (bypass)."}
-
-
-# =========================
-# BACK TO SOURCE
-# =========================
-@router.post("/{trip_id}/back-to-source")
-def bypass_back_to_source(
-    trip_id: int,
-    reason: str = Form(...),
-    photo: UploadFile | None = File(None),
-    db: Session = Depends(get_db),
-    current_user: User = Depends(_require_bypass_access),
-):
-    trip = _get_trip(db, trip_id)
-    if trip.status != TripStatus.ACTIVE:
-        raise HTTPException(status_code=400, detail="Trip is not ACTIVE.")
-
-    if _get_open_stop(db, trip.id):
-        raise HTTPException(
-            status_code=400, detail="Current stop must be delivered first."
-        )
-
-    trip.current_step = "RETURNING"
-    db.flush()
-
-    if photo is not None:
-        file_service = FileService()
-        photo_url = file_service.upload_trip_back_to_source_photo(
-            photo, trip_id,
-            lat=trip.origin_store.latitude if trip.origin_store else None,
-            long=trip.origin_store.longitude if trip.origin_store else None,
-        )
-        db.add(FileModel(
-            entity_type="trip", entity_id=trip.id, document_type="BACK_TO_SOURCE_LM_PHOTO",
-            file_url=photo_url, uploaded_by=current_user.id,
-        ))
-
-    _log_bypass(db, trip.id, "back-to-source", current_user.id, reason)
-    db.commit()
-
-    return {"message": "Marked as heading back to source (bypass)."}
 
 
 # =========================

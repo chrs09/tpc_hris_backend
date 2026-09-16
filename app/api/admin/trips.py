@@ -17,7 +17,9 @@ from app.models.employees import Employee
 from app.models.trip_helper import TripHelper
 from app.models.trip_finance_review import FinanceReviewStatus, TripFinanceReview
 from app.models.files import File
+from app.models.stores import Store
 from app.utils.timezone import utc_to_ph
+from app.api.driver.trips import _load_planned_store_ids, _delivered_store_ids
 
 router = APIRouter(prefix="/admin/trips", tags=["Admin Trips"])
 
@@ -586,10 +588,18 @@ def review_trip(
                 "id": stop.id,
 
                 # Store information
+                "store_id": stop.store_id,
                 "store_name": (
                     stop.store.name
                     if stop.store
                     else "Unknown"
+                ),
+
+                # CHECKED_IN / UNLOADING / DELIVERED
+                "status": (
+                    stop.status.value
+                    if hasattr(stop.status, "value")
+                    else stop.status
                 ),
 
                 # Check-in / Check-out
@@ -635,6 +645,33 @@ def review_trip(
         )
 
     # =========================================================
+    # 11.5 PLANNED STOPS (the coordinator's full route, set at dispatch --
+    # like a parcel tracker, shows every stop on the itinerary, not just
+    # the ones already visited).
+    # =========================================================
+    planned_ids = _load_planned_store_ids(trip)
+    delivered_ids = _delivered_store_ids(db, trip.id) if planned_ids else set()
+    planned_stores_data = []
+    next_store = None
+    if planned_ids:
+        stores_by_id = {
+            store.id: store
+            for store in db.query(Store).filter(Store.id.in_(planned_ids)).all()
+        }
+        planned_stores_data = [
+            {
+                "store_id": sid,
+                "store_name": stores_by_id[sid].name if sid in stores_by_id else None,
+                "delivered": sid in delivered_ids,
+            }
+            for sid in planned_ids
+        ]
+        next_store = next(
+            (s["store_name"] for s in planned_stores_data if not s["delivered"]),
+            None,
+        )
+
+    # =========================================================
     # 12. RETURN COMPLETE TRIP REVIEW DATA
     # =========================================================
     return {
@@ -645,6 +682,7 @@ def review_trip(
         "trip_code": trip.trip_code,
         "ticket_no": trip.ticket_no,
         "trip_code": trip.trip_code,
+        "current_step": trip.current_step,
         "status": (
             trip.status.value
             if hasattr(trip.status, "value")
@@ -757,9 +795,18 @@ def review_trip(
         ),
 
         # -------------------------
-        # STOPS + POD
+        # STOPS + POD (actual TripStop rows visited so far)
         # -------------------------
         "stops": stops_data,
+
+        # -------------------------
+        # PLANNED ROUTE (parcel-tracker style -- every stop the
+        # coordinator picked at dispatch, delivered or not)
+        # -------------------------
+        "planned_stores": planned_stores_data,
+        "total_stops": len(planned_ids) if planned_ids else None,
+        "completed_stops": len(delivered_ids) if planned_ids else None,
+        "next_store": next_store,
 
         # -------------------------
         # GPS ROUTE
@@ -871,7 +918,7 @@ def track_location(
 #
 # Surfaces trips that were started away from any hub's GPS range. The
 # underlying event is already recorded at the moment a trip starts --
-# see start_trip() in app/api/driver/trips.py, which sets
+# see checkout_trip() in app/api/driver/trips.py, which sets
 # Trip.started_outside_hub_range and inserts a
 # Notification(type="STARTED_OUTSIDE_HUB_RANGE") row when that happens.
 # These two endpoints just let trip managers list and acknowledge those

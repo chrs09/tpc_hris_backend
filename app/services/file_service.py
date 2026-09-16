@@ -301,6 +301,21 @@ class FileService:
             _watermark_timestamp(file, geofence_label, lat, long), folder
         )
 
+    def upload_trip_checkout_lm_stamped(
+        self, file, trip_id, geofence_label=None, lat=None, long=None
+    ):
+        """
+        Upload the LM photo physically stamped/marked "checkout" -- proof
+        the checkout step happened, separate from the plain LM photo.
+
+        Structure:
+        trips/{trip_id}/checkout/lm_stamped/{filename}
+        """
+        folder = f"trips/{trip_id}/checkout/lm_stamped"
+        return self.upload(
+            _watermark_timestamp(file, geofence_label, lat, long), folder
+        )
+
     def upload_trip_unloading_photo(
         self, file, trip_id, stop_id, geofence_label=None, lat=None, long=None
     ):

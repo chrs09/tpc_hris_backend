@@ -10,6 +10,7 @@ from sqlalchemy import (
     Enum,
     String,
     Boolean,
+    Text,
     func,
 )
 from sqlalchemy.orm import relationship
@@ -47,18 +48,31 @@ class Trip(Base):
         Integer, ForeignKey("tpc_users.id", ondelete="CASCADE"), nullable=False
     )
 
-    # Nullable now -- a dispatched trip has no shipment number until the
-    # driver completes the Checkout step and it's filled in (OCR-assisted
-    # or manually). MySQL unique indexes allow multiple NULLs, so this is
-    # safe pre-Checkout.
+    # The shipment number -- entered by the coordinator at dispatch time
+    # now (not by the driver at Checkout, which dropped this field). One
+    # shipment number per trip, even if the trip covers multiple
+    # destination stores.
     ticket_no = Column(String(100), nullable=True, unique=True, index=True)
     origin_store_id = Column(Integer, ForeignKey("tpc_stores.id"), nullable=True)
 
-    # Destination store for this trip, confirmed at Checkout (auto-matched
-    # from the uploaded Invoice/LM via OCR, editable by the driver).
+    # The trip's PRIMARY destination store -- always planned_store_ids[0],
+    # kept as its own column (rather than only living inside the JSON list)
+    # since most of the app (payroll, office/finance review, trip tables)
+    # already reads this single column for display and for deriving
+    # trip_rate_profile_id. Set at dispatch time now, not at Checkout.
     destination_store_id = Column(
         Integer, ForeignKey("tpc_stores.id"), nullable=True
     )
+
+    # The full ordered list of destination stores the coordinator selected
+    # at dispatch (JSON-encoded list of store ids, 1-20 entries -- see
+    # MAX_PLANNED_STOPS in app/api/driver/trips.py). destination_store_id
+    # above is always planned_store_ids[0]. The driver's "Arrived at
+    # Store" step resolves each stop against whichever of these stores
+    # haven't been delivered to yet (see check-in in
+    # app/api/driver/trips.py), so this is the trip's actual multi-stop
+    # route, not just a label.
+    planned_store_ids = Column(Text, nullable=True)
 
     vehicle_unit_id = Column(
         Integer,
