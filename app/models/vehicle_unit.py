@@ -4,6 +4,7 @@ from sqlalchemy.orm import relationship
 from sqlalchemy import (
     Boolean,
     Column,
+    Date,
     DateTime,
     Integer,
     String,
@@ -34,6 +35,20 @@ class VehicleUnit(Base):
         String(255),
         nullable=True,
     )
+
+    # CR (Certificate of Registration) and OR (Official Receipt) are two
+    # separate physical documents, tracked separately here -- each has its
+    # own live link to the actual scanned document (uploaded via
+    # FileService.upload_vehicle_cr / upload_vehicle_or) and its own
+    # renewal/expiration date, so the Vehicle List can flag either one
+    # coming up for renewal independently.
+    cr_number = Column(String(100), nullable=True)
+    cr_document_url = Column(String(500), nullable=True)
+    cr_expiration_date = Column(Date, nullable=True)
+
+    or_number = Column(String(100), nullable=True)
+    or_document_url = Column(String(500), nullable=True)
+    or_expiration_date = Column(Date, nullable=True)
 
     is_active = Column(
         Boolean,

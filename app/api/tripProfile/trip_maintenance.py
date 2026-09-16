@@ -1,5 +1,5 @@
-from fastapi import APIRouter, Depends, HTTPException, Form
-from datetime import datetime
+from fastapi import APIRouter, Depends, File, HTTPException, Form, UploadFile
+from datetime import date, datetime
 from sqlalchemy.orm import Session, joinedload
 
 from app.core.database import get_db
@@ -11,7 +11,27 @@ from app.models.TripRate import TripRateProfile
 from app.models.customer import Customer
 from app.models.supplier import Supplier
 from app.models.vehicle_maintenance import VehicleMaintenance
+from app.services.file_service import FileService
 from app.utils.response import api_response
+
+ALLOWED_CR_OR_CONTENT_TYPES = {
+    "image/png",
+    "image/jpeg",
+    "image/webp",
+    "application/pdf",
+}
+
+
+def _parse_expiration_date(value: str | None) -> date | None:
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").date()
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid expiration date: {value}. Use YYYY-MM-DD.",
+        )
 
 router = APIRouter(
     prefix="/trip-maintenance",
@@ -34,6 +54,12 @@ def get_vehicle_units(
             "plate_number": unit.plate_number,
             "description": unit.description,
             "is_active": unit.is_active,
+            "cr_number": unit.cr_number,
+            "cr_document_url": unit.cr_document_url,
+            "cr_expiration_date": unit.cr_expiration_date,
+            "or_number": unit.or_number,
+            "or_document_url": unit.or_document_url,
+            "or_expiration_date": unit.or_expiration_date,
         }
         for unit in units
     ]
@@ -59,6 +85,12 @@ def get_active_vehicle_units(
             "unit_code": unit.unit_code,
             "plate_number": unit.plate_number,
             "description": unit.description,
+            "cr_number": unit.cr_number,
+            "cr_document_url": unit.cr_document_url,
+            "cr_expiration_date": unit.cr_expiration_date,
+            "or_number": unit.or_number,
+            "or_document_url": unit.or_document_url,
+            "or_expiration_date": unit.or_expiration_date,
         }
         for unit in units
     ]
@@ -71,6 +103,12 @@ def create_vehicle_unit(
     unit_code: str = Form(None),
     plate_number: str = Form(...),
     description: str = Form(None),
+    cr_number: str = Form(None),
+    cr_expiration_date: str = Form(None),
+    cr_document: UploadFile = File(None),
+    or_number: str = Form(None),
+    or_expiration_date: str = Form(None),
+    or_document: UploadFile = File(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -95,16 +133,43 @@ def create_vehicle_unit(
                 detail="Unit code already exists",
             )
 
+    if cr_document and cr_document.content_type not in ALLOWED_CR_OR_CONTENT_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail="CR document must be a PNG, JPEG, WEBP image, or PDF.",
+        )
+
+    if or_document and or_document.content_type not in ALLOWED_CR_OR_CONTENT_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail="OR document must be a PNG, JPEG, WEBP image, or PDF.",
+        )
+
     vehicle_unit = VehicleUnit(
         unit_code=unit_code,
         plate_number=plate_number,
         description=description,
+        cr_number=cr_number,
+        cr_expiration_date=_parse_expiration_date(cr_expiration_date),
+        or_number=or_number,
+        or_expiration_date=_parse_expiration_date(or_expiration_date),
         created_by=current_user.id,
     )
 
     db.add(vehicle_unit)
     db.commit()
     db.refresh(vehicle_unit)
+
+    if cr_document or or_document:
+        if cr_document:
+            vehicle_unit.cr_document_url = FileService().upload_vehicle_cr(
+                cr_document, vehicle_unit.id
+            )
+        if or_document:
+            vehicle_unit.or_document_url = FileService().upload_vehicle_or(
+                or_document, vehicle_unit.id
+            )
+        db.commit()
 
     return api_response(
         {
@@ -121,6 +186,12 @@ def update_vehicle_unit(
     plate_number: str = Form(None),
     description: str = Form(None),
     is_active: bool = Form(None),
+    cr_number: str = Form(None),
+    cr_expiration_date: str = Form(None),
+    cr_document: UploadFile = File(None),
+    or_number: str = Form(None),
+    or_expiration_date: str = Form(None),
+    or_document: UploadFile = File(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -173,6 +244,42 @@ def update_vehicle_unit(
 
     if is_active is not None:
         vehicle_unit.is_active = is_active
+
+    if cr_number is not None:
+        vehicle_unit.cr_number = cr_number
+
+    if cr_expiration_date is not None:
+        vehicle_unit.cr_expiration_date = _parse_expiration_date(
+            cr_expiration_date
+        )
+
+    if cr_document:
+        if cr_document.content_type not in ALLOWED_CR_OR_CONTENT_TYPES:
+            raise HTTPException(
+                status_code=400,
+                detail="CR document must be a PNG, JPEG, WEBP image, or PDF.",
+            )
+        vehicle_unit.cr_document_url = FileService().upload_vehicle_cr(
+            cr_document, vehicle_unit.id
+        )
+
+    if or_number is not None:
+        vehicle_unit.or_number = or_number
+
+    if or_expiration_date is not None:
+        vehicle_unit.or_expiration_date = _parse_expiration_date(
+            or_expiration_date
+        )
+
+    if or_document:
+        if or_document.content_type not in ALLOWED_CR_OR_CONTENT_TYPES:
+            raise HTTPException(
+                status_code=400,
+                detail="OR document must be a PNG, JPEG, WEBP image, or PDF.",
+            )
+        vehicle_unit.or_document_url = FileService().upload_vehicle_or(
+            or_document, vehicle_unit.id
+        )
 
     vehicle_unit.updated_by = current_user.id
     vehicle_unit.updated_at = datetime.utcnow()

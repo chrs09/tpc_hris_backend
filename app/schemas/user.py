@@ -63,10 +63,13 @@ class UserResponse(BaseModel):
 
 class UserAssignableResponse(BaseModel):
     """A minimal, lower-sensitivity user shape (no email) for populating
-    an assignee picker -- see GET /users/assignable."""
+    an assignee picker -- see GET /users/assignable. employee_name is the
+    linked employee's full name, for display in place of the raw
+    username (None if this account has no linked employee record)."""
 
     id: int
     username: str
+    employee_name: str | None = None
     role: UserRole
     is_active: bool
 

@@ -3,7 +3,7 @@ from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from typing import List
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from app.core.database import get_db
 from app.schemas.user import (
     UserCreate,
@@ -69,8 +69,26 @@ def get_assignable_users(
     administrator.tickets or administrator.hierarchy still needs a user
     list to actually use those pages, and this exposes far less than the
     full endpoint."""
-    users = db.query(User).filter(User.is_active.is_(True)).all()
-    return users
+    users = (
+        db.query(User)
+        .options(joinedload(User.employee))
+        .filter(User.is_active.is_(True))
+        .all()
+    )
+    return [
+        {
+            "id": u.id,
+            "username": u.username,
+            "employee_name": (
+                f"{u.employee.first_name} {u.employee.last_name}"
+                if u.employee
+                else None
+            ),
+            "role": u.role,
+            "is_active": u.is_active,
+        }
+        for u in users
+    ]
 
 
 @router.patch("/{user_id}", status_code=status.HTTP_200_OK)

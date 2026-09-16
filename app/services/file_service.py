@@ -345,6 +345,33 @@ class FileService:
         return self.upload(file, folder)
 
     # ===============================
+    # VEHICLE FILES
+    # ===============================
+
+    def upload_vehicle_cr(self, file, vehicle_unit_id):
+        """
+        Upload a vehicle's CR (Certificate of Registration) document -- a
+        live link to the actual scanned document. CR and OR are two
+        separate physical documents, uploaded/stored separately.
+
+        Structure:
+        vehicles/{vehicle_unit_id}/cr/{filename}
+        """
+        folder = f"vehicles/{vehicle_unit_id}/cr"
+        return self.upload(file, folder)
+
+    def upload_vehicle_or(self, file, vehicle_unit_id):
+        """
+        Upload a vehicle's OR (Official Receipt) document -- a live link
+        to the actual scanned document.
+
+        Structure:
+        vehicles/{vehicle_unit_id}/or/{filename}
+        """
+        folder = f"vehicles/{vehicle_unit_id}/or"
+        return self.upload(file, folder)
+
+    # ===============================
     # EMPLOYEE FILES
     # ===============================
 

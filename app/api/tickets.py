@@ -56,6 +56,16 @@ def _require_valid_assignee(db: Session, user_id: int) -> None:
         raise HTTPException(status_code=400, detail="Assignee not found.")
 
 
+def _display_name(user: User | None) -> str | None:
+    """The linked employee's full name, falling back to the username if
+    this account has no linked employee record."""
+    if not user:
+        return None
+    if user.employee:
+        return f"{user.employee.first_name} {user.employee.last_name}"
+    return user.username
+
+
 def _serialize(ticket: Ticket) -> dict:
     return {
         "id": ticket.id,
@@ -64,13 +74,9 @@ def _serialize(ticket: Ticket) -> dict:
         "status": ticket.status,
         "priority": ticket.priority,
         "created_by_user_id": ticket.created_by_user_id,
-        "created_by_username": (
-            ticket.created_by.username if ticket.created_by else None
-        ),
+        "created_by_username": _display_name(ticket.created_by),
         "assigned_to_user_id": ticket.assigned_to_user_id,
-        "assigned_to_username": (
-            ticket.assigned_to.username if ticket.assigned_to else None
-        ),
+        "assigned_to_username": _display_name(ticket.assigned_to),
         "image_url": ticket.image_url,
         "created_at": ticket.created_at,
         "updated_at": ticket.updated_at,
@@ -84,7 +90,10 @@ def list_tickets(
 ):
     tickets = (
         db.query(Ticket)
-        .options(joinedload(Ticket.created_by), joinedload(Ticket.assigned_to))
+        .options(
+            joinedload(Ticket.created_by).joinedload(User.employee),
+            joinedload(Ticket.assigned_to).joinedload(User.employee),
+        )
         .order_by(Ticket.created_at.desc())
         .all()
     )
