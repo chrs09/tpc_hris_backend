@@ -19,6 +19,7 @@ from app.models.trip_finance_review import FinanceReviewStatus, TripFinanceRevie
 from app.models.files import File
 from app.models.stores import Store
 from app.utils.timezone import utc_to_ph
+from app.utils.user_display import display_name as _display_name
 from app.api.driver.trips import _load_planned_store_ids, _delivered_store_ids
 
 router = APIRouter(prefix="/admin/trips", tags=["Admin Trips"])
@@ -278,14 +279,18 @@ def approve_trip(
     # 10. RESPONSE
     # =========================================================
 
+    coordinator_name = _display_name(current_admin)
+
     return {
         "message": (
-            "Trip approved by coordinator "
+            f"Trip approved by {coordinator_name} "
             "and sent for office review"
         ),
         "trip_id": trip.id,
         "trip_status": trip.status.value,
         "review_status": review.status.value,
+        "coordinator_id": review.coordinator_id,
+        "coordinator_name": coordinator_name,
         "coordinator_settlement_date": (
             review.coordinator_settlement_date
         ),

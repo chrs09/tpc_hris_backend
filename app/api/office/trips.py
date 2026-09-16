@@ -21,6 +21,7 @@ from app.models.trips import Trip, TripStatus
 from app.models.user import User
 
 from app.utils.timezone import utc_to_ph
+from app.utils.user_display import display_name as _display_name
 
 
 router = APIRouter(
@@ -68,7 +69,9 @@ def get_pending_office_review_trips(
         db.query(TripFinanceReview)
         .options(
             joinedload(TripFinanceReview.trip)
-            .joinedload(Trip.driver)
+            .joinedload(Trip.driver),
+            joinedload(TripFinanceReview.coordinator)
+            .joinedload(User.employee),
         )
         .join(
             Trip,
@@ -142,6 +145,8 @@ def get_pending_office_review_trips(
 
                 "stops_count": stops_count,
 
+                "coordinator_id": review.coordinator_id,
+                "coordinator_name": _display_name(review.coordinator),
                 "coordinator_remarks": review.coordinator_remarks,
 
                 "coordinator_settlement_date": (
@@ -222,6 +227,9 @@ def review_office_trip(
     # =====================================================
     finance_review = (
         db.query(TripFinanceReview)
+        .options(
+            joinedload(TripFinanceReview.coordinator).joinedload(User.employee)
+        )
         .filter(TripFinanceReview.trip_id == trip_id)
         .order_by(TripFinanceReview.id.desc())
         .first()
@@ -262,17 +270,35 @@ def review_office_trip(
     ]
 
     # =====================================================
-    # 4. GET START TRIP PHOTO
+    # 4. GET CHECKOUT PHOTOS (Invoice + LM -- each may have multiple
+    # pages, plus the single LM stamped/marked "checkout")
     # =====================================================
-    start_photo = (
+    checkout_photos = (
         db.query(File)
         .filter(
             File.entity_type == "trip",
             File.entity_id == trip_id,
-            File.document_type == "START_TRIP_PHOTO",
+            File.document_type.in_(
+                ["INVOICE_PHOTO", "LM_MANIFEST_PHOTO", "LM_CHECKOUT_STAMPED_PHOTO"]
+            ),
         )
-        .order_by(File.id.desc())
-        .first()
+        .order_by(File.id.asc())
+        .all()
+    )
+
+    invoice_photos = [
+        f.file_url for f in checkout_photos if f.document_type == "INVOICE_PHOTO"
+    ]
+    lm_photos = [
+        f.file_url for f in checkout_photos if f.document_type == "LM_MANIFEST_PHOTO"
+    ]
+    lm_checkout_stamped_photo = next(
+        (
+            f.file_url
+            for f in reversed(checkout_photos)
+            if f.document_type == "LM_CHECKOUT_STAMPED_PHOTO"
+        ),
+        None,
     )
 
     # =====================================================
@@ -360,14 +386,37 @@ def review_office_trip(
         )
 
     # =====================================================
-    # 10. CREATE POD LOOKUP
-    # Only the newest POD for each stop is returned.
+    # 9.5 GET UNLOADING PHOTOS
+    # =====================================================
+    unloading_photos = []
+
+    if stop_ids:
+        unloading_photos = (
+            db.query(File)
+            .filter(
+                File.entity_type == "trip_stop",
+                File.entity_id.in_(stop_ids),
+                File.document_type == "UNLOADING_PHOTO",
+            )
+            .order_by(File.id.desc())
+            .all()
+        )
+
+    # =====================================================
+    # 10. CREATE POD + UNLOADING LOOKUPS
+    # Only the newest photo for each stop is returned.
     # =====================================================
     delivery_proof_by_stop_id = {}
 
     for photo in delivery_proof_photos:
         if photo.entity_id not in delivery_proof_by_stop_id:
             delivery_proof_by_stop_id[photo.entity_id] = photo.file_url
+
+    unloading_photo_by_stop_id = {}
+
+    for photo in unloading_photos:
+        if photo.entity_id not in unloading_photo_by_stop_id:
+            unloading_photo_by_stop_id[photo.entity_id] = photo.file_url
 
     # =====================================================
     # 11. BUILD STOPS DATA
@@ -404,6 +453,7 @@ def review_office_trip(
                     if stop.store
                     else None
                 ),
+                "unloading_photo": unloading_photo_by_stop_id.get(stop.id),
                 "delivery_proof_photo": (
                     delivery_proof_by_stop_id.get(stop.id)
                 ),
@@ -421,6 +471,7 @@ def review_office_trip(
             else finance_review.status
         ),
         "coordinator_id": finance_review.coordinator_id,
+        "coordinator_name": _display_name(finance_review.coordinator),
         "coordinator_remarks": finance_review.coordinator_remarks,
         "coordinator_settlement_date": to_ph(
             finance_review.coordinator_settlement_date
@@ -492,11 +543,9 @@ def review_office_trip(
         "start_time": to_ph(trip.start_time),
         "end_time": to_ph(trip.end_time),
 
-        "start_photo": (
-            start_photo.file_url
-            if start_photo
-            else None
-        ),
+        "invoice_photos": invoice_photos,
+        "lm_photos": lm_photos,
+        "lm_checkout_stamped_photo": lm_checkout_stamped_photo,
         "stamped_invoice_photo": (
             stamped_invoice_photo.file_url
             if stamped_invoice_photo

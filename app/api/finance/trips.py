@@ -188,15 +188,34 @@ def get_finance_trip_detail(
         .all()
     )
 
-    start_photo = (
+    # CHECKOUT PHOTOS (Invoice + LM -- each may have multiple pages,
+    # plus the single LM stamped/marked "checkout")
+    checkout_photos = (
         db.query(File)
         .filter(
             File.entity_type == "trip",
             File.entity_id == trip_id,
-            File.document_type == "START_TRIP_PHOTO",
+            File.document_type.in_(
+                ["INVOICE_PHOTO", "LM_MANIFEST_PHOTO", "LM_CHECKOUT_STAMPED_PHOTO"]
+            ),
         )
-        .order_by(File.id.desc())
-        .first()
+        .order_by(File.id.asc())
+        .all()
+    )
+
+    invoice_photos = [
+        f.file_url for f in checkout_photos if f.document_type == "INVOICE_PHOTO"
+    ]
+    lm_photos = [
+        f.file_url for f in checkout_photos if f.document_type == "LM_MANIFEST_PHOTO"
+    ]
+    lm_checkout_stamped_photo = next(
+        (
+            f.file_url
+            for f in reversed(checkout_photos)
+            if f.document_type == "LM_CHECKOUT_STAMPED_PHOTO"
+        ),
+        None,
     )
 
     # END TRIP / STAMPED INVOICE PHOTO
@@ -261,6 +280,29 @@ def get_finance_trip_detail(
         if photo.entity_id not in delivery_proof_by_stop_id:
             delivery_proof_by_stop_id[photo.entity_id] = photo.file_url
 
+    # =========================
+    # UNLOADING PHOTOS
+    # =========================
+    unloading_photos = []
+
+    if stop_ids:
+        unloading_photos = (
+            db.query(File)
+            .filter(
+                File.entity_type == "trip_stop",
+                File.entity_id.in_(stop_ids),
+                File.document_type == "UNLOADING_PHOTO",
+            )
+            .order_by(File.id.desc())
+            .all()
+        )
+
+    unloading_photo_by_stop_id = {}
+
+    for photo in unloading_photos:
+        if photo.entity_id not in unloading_photo_by_stop_id:
+            unloading_photo_by_stop_id[photo.entity_id] = photo.file_url
+
     return {
         "id": trip.id,
         "trip_id": trip.id,
@@ -277,7 +319,9 @@ def get_finance_trip_detail(
             {"id": h.id, "first_name": h.first_name, "last_name": h.last_name}
             for h in trip_helpers
         ],
-        "start_photo": start_photo.file_url if start_photo else None,
+        "invoice_photos": invoice_photos,
+        "lm_photos": lm_photos,
+        "lm_checkout_stamped_photo": lm_checkout_stamped_photo,
         "stamped_invoice_photo": end_photo.file_url if end_photo else None,
         # origin — needed for the map's origin marker
         "origin_store": trip.origin_store.name if trip.origin_store else "-",
@@ -299,6 +343,7 @@ def get_finance_trip_detail(
                 "long_in": stop.long_in,
                 "lat_out": stop.lat_out,
                 "long_out": stop.long_out,
+                "unloading_photo": unloading_photo_by_stop_id.get(stop.id),
                 "delivery_proof_photo": (
                     delivery_proof_by_stop_id.get(stop.id)
                 ),

@@ -17,6 +17,7 @@ from app.core.dependencies import require_role_or_module
 from app.models.user import User
 from app.models.ticket import Ticket
 from app.services.file_service import FileService
+from app.utils.user_display import display_name as _display_name
 
 ALLOWED_IMAGE_CONTENT_TYPES = {"image/png", "image/jpeg", "image/webp", "image/gif"}
 
@@ -54,16 +55,6 @@ def _require_valid_assignee(db: Session, user_id: int) -> None:
     assignee = db.query(User).filter(User.id == user_id).first()
     if not assignee:
         raise HTTPException(status_code=400, detail="Assignee not found.")
-
-
-def _display_name(user: User | None) -> str | None:
-    """The linked employee's full name, falling back to the username if
-    this account has no linked employee record."""
-    if not user:
-        return None
-    if user.employee:
-        return f"{user.employee.first_name} {user.employee.last_name}"
-    return user.username
 
 
 def _serialize(ticket: Ticket) -> dict:
