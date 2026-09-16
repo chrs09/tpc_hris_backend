@@ -49,6 +49,7 @@ from app.api.finance import trips as finance_trips_router
 from app.api.finance import expenses as finance_expense_router
 from app.api import error_logs as error_logs_router
 from app.api import tickets as tickets_router
+from app.api import mobile_crash as mobile_crash_router
 
 
 logging.basicConfig(
@@ -271,6 +272,7 @@ app.include_router(holiday_router.router, prefix="/api")  # Add this line to inc
 
 app.include_router(error_logs_router.router, prefix="/api")
 app.include_router(tickets_router.router, prefix="/api")
+app.include_router(mobile_crash_router.router, prefix="/api")
 
 # debugger
 app.include_router(debugger.router, prefix="/api")

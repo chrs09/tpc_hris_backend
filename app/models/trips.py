@@ -48,11 +48,22 @@ class Trip(Base):
         Integer, ForeignKey("tpc_users.id", ondelete="CASCADE"), nullable=False
     )
 
-    # The shipment number -- entered by the coordinator at dispatch time
-    # now (not by the driver at Checkout, which dropped this field). One
-    # shipment number per trip, even if the trip covers multiple
-    # destination stores.
-    ticket_no = Column(String(100), nullable=True, unique=True, index=True)
+    # A comma-joined display string of every shipment number entered by
+    # the coordinator at dispatch time (see shipment_numbers below for
+    # the actual list) -- kept as its own column since most of the app
+    # (payroll, office/finance review, trip tables, mobile) already reads
+    # this single column to display "the shipment number(s)" for a trip.
+    # Widened to fit up to 10 joined numbers (see MAX_SHIPMENT_NUMBERS in
+    # app/api/driver/trips.py). Not by the driver at Checkout, which
+    # dropped this field.
+    ticket_no = Column(String(500), nullable=True, unique=True, index=True)
+
+    # The full list of shipment numbers the coordinator entered at
+    # dispatch (JSON-encoded list of strings, 1-10 entries -- a single
+    # trip can cover multiple shipments, e.g. one truck carrying several
+    # DRs/manifests). ticket_no above is always ", ".join(shipment_numbers).
+    shipment_numbers = Column(Text, nullable=True)
+
     origin_store_id = Column(Integer, ForeignKey("tpc_stores.id"), nullable=True)
 
     # The trip's PRIMARY destination store -- always planned_store_ids[0],

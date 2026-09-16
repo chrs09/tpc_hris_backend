@@ -399,25 +399,41 @@ def review_trip(
     ]
 
     # =========================================================
-    # 3. GET START TRIP PHOTO
+    # 3. GET CHECKOUT PHOTOS (Invoice + LM -- each may have multiple
+    # pages, plus the single LM stamped/marked "checkout")
     #
     # Expected:
     # entity_type   = trip
     # entity_id     = trip_id
-    # document_type = START_TRIP_PHOTO
-    #
-    # Example path:
-    # /uploads/trips/49/start/xxx.jpg
+    # document_type = INVOICE_PHOTO / LM_MANIFEST_PHOTO /
+    #                  LM_CHECKOUT_STAMPED_PHOTO
     # =========================================================
-    start_photo = (
+    checkout_photos = (
         db.query(File)
         .filter(
             File.entity_type == "trip",
             File.entity_id == trip_id,
-            File.document_type == "START_TRIP_PHOTO",
+            File.document_type.in_(
+                ["INVOICE_PHOTO", "LM_MANIFEST_PHOTO", "LM_CHECKOUT_STAMPED_PHOTO"]
+            ),
         )
-        .order_by(File.id.desc())
-        .first()
+        .order_by(File.id.asc())
+        .all()
+    )
+
+    invoice_photos = [
+        f.file_url for f in checkout_photos if f.document_type == "INVOICE_PHOTO"
+    ]
+    lm_photos = [
+        f.file_url for f in checkout_photos if f.document_type == "LM_MANIFEST_PHOTO"
+    ]
+    lm_checkout_stamped_photo = next(
+        (
+            f.file_url
+            for f in reversed(checkout_photos)
+            if f.document_type == "LM_CHECKOUT_STAMPED_PHOTO"
+        ),
+        None,
     )
 
     # =========================================================
@@ -553,7 +569,29 @@ def review_trip(
         )
 
     # =========================================================
-    # 10. CREATE POD LOOKUP
+    # 9.5 GET ALL UNLOADING PHOTOS
+    #
+    # Expected:
+    # entity_type   = trip_stop
+    # entity_id     = stop.id
+    # document_type = UNLOADING_PHOTO
+    # =========================================================
+    unloading_photos = []
+
+    if stop_ids:
+        unloading_photos = (
+            db.query(File)
+            .filter(
+                File.entity_type == "trip_stop",
+                File.entity_id.in_(stop_ids),
+                File.document_type == "UNLOADING_PHOTO",
+            )
+            .order_by(File.id.desc())
+            .all()
+        )
+
+    # =========================================================
+    # 10. CREATE POD + UNLOADING LOOKUPS
     #
     # Example:
     #
@@ -575,6 +613,12 @@ def review_trip(
             delivery_proof_by_stop_id[
                 photo.entity_id
             ] = photo.file_url
+
+    unloading_photo_by_stop_id = {}
+
+    for photo in unloading_photos:
+        if photo.entity_id not in unloading_photo_by_stop_id:
+            unloading_photo_by_stop_id[photo.entity_id] = photo.file_url
 
     # =========================================================
     # 11. BUILD STOPS DATA
@@ -634,6 +678,9 @@ def review_trip(
                     if stop.store
                     else None
                 ),
+
+                # Unloading photo
+                "unloading_photo": unloading_photo_by_stop_id.get(stop.id),
 
                 # POD / Delivery Proof
                 "delivery_proof_photo": (
@@ -782,11 +829,10 @@ def review_trip(
         # -------------------------
         # TRIP PHOTOS
         # -------------------------
-        "start_photo": (
-            start_photo.file_url
-            if start_photo
-            else None
-        ),
+        # Checkout photos (may be multiple pages each for Invoice/LM)
+        "invoice_photos": invoice_photos,
+        "lm_photos": lm_photos,
+        "lm_checkout_stamped_photo": lm_checkout_stamped_photo,
 
         "stamped_invoice_photo": (
             stamped_invoice_photo.file_url

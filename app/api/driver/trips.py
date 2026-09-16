@@ -51,6 +51,22 @@ TRIP_MANAGER_ROLES = {"admin", "superadmin", "coordinator_admin", "coordinator"}
 # all at dispatch time) -- capped to keep a single trip/route sane.
 MAX_PLANNED_STOPS = 20
 
+# A single truck/trip can carry multiple shipments (e.g. several
+# DRs/manifests loaded together) -- capped for the same reason.
+MAX_SHIPMENT_NUMBERS = 10
+
+
+def _load_shipment_numbers(trip: Trip) -> list[str]:
+    """A trip's shipment numbers, parsed from Trip.shipment_numbers (JSON
+    list) when present, falling back to Trip.ticket_no as a single-item
+    list for legacy trips dispatched before multi-shipment support."""
+    if trip.shipment_numbers:
+        try:
+            return [str(x) for x in json.loads(trip.shipment_numbers)]
+        except Exception:
+            pass
+    return [trip.ticket_no] if trip.ticket_no else []
+
 
 def _load_planned_store_ids(trip: Trip) -> list[int]:
     if not trip.planned_store_ids:
@@ -624,9 +640,10 @@ def dispatch_trip(
     current_user=Depends(get_current_user),
 ):
     """The office/coordinator's first step in the driver flow: pick a
-    driver, a vehicle, the hub they're dispatching from, the shipment
-    number, the trip category (rate profile -- decides driver/helper pay
-    for this trip, chosen explicitly here rather than derived from the
+    driver, a vehicle, the hub they're dispatching from, one or more
+    shipment numbers (a single truck/trip can carry multiple shipments),
+    the trip category (rate profile -- decides driver/helper pay for
+    this trip, chosen explicitly here rather than derived from the
     destination store), the destination store(s) for this trip (a trip
     can cover multiple stores under one dispatch -- the driver visits
     each in turn), and (usually) the helpers riding along. Creates the
@@ -636,13 +653,45 @@ def dispatch_trip(
     if _role_value(current_user.role) not in TRIP_MANAGER_ROLES:
         raise HTTPException(status_code=403, detail="Not authorized to dispatch trips.")
 
-    shipment_no = (shipment_no or "").strip()
-    if not shipment_no:
-        raise HTTPException(status_code=400, detail="Shipment number is required.")
+    try:
+        shipment_numbers = [
+            str(x).strip() for x in json.loads(shipment_no) if str(x).strip()
+        ]
+    except Exception:
+        # Backward compatible with a plain single string, in case an
+        # older client still sends shipment_no as one value.
+        shipment_numbers = [shipment_no.strip()] if shipment_no.strip() else []
 
-    existing_ticket = db.query(Trip).filter(Trip.ticket_no == shipment_no).first()
-    if existing_ticket:
-        raise HTTPException(status_code=400, detail="Shipment number already exists.")
+    if not shipment_numbers:
+        raise HTTPException(status_code=400, detail="At least one shipment number is required.")
+    if len(shipment_numbers) != len(set(shipment_numbers)):
+        raise HTTPException(status_code=400, detail="Duplicate shipment numbers entered.")
+    if len(shipment_numbers) > MAX_SHIPMENT_NUMBERS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Maximum of {MAX_SHIPMENT_NUMBERS} shipment numbers allowed.",
+        )
+
+    # No individual shipment number may already be in use on another
+    # trip -- check across every trip's parsed shipment number list, not
+    # just an exact match on the joined ticket_no string.
+    all_used_numbers = set()
+    for other_trip in db.query(Trip.ticket_no, Trip.shipment_numbers).all():
+        if other_trip.shipment_numbers:
+            try:
+                all_used_numbers.update(json.loads(other_trip.shipment_numbers))
+            except Exception:
+                pass
+        elif other_trip.ticket_no:
+            all_used_numbers.add(other_trip.ticket_no)
+
+    duplicate = next((n for n in shipment_numbers if n in all_used_numbers), None)
+    if duplicate:
+        raise HTTPException(
+            status_code=400, detail=f'Shipment number "{duplicate}" already exists.'
+        )
+
+    shipment_no_display = ", ".join(shipment_numbers)
 
     try:
         helper_ids = json.loads(helper_ids)
@@ -765,7 +814,8 @@ def dispatch_trip(
             destination_store_id=primary_store.id,
             planned_store_ids=json.dumps(destination_store_ids),
             trip_rate_profile_id=trip_category.id,
-            ticket_no=shipment_no,
+            ticket_no=shipment_no_display,
+            shipment_numbers=json.dumps(shipment_numbers),
             status=TripStatus.ASSIGNED,
             current_step="ASSIGNED",
         )
@@ -792,7 +842,8 @@ def dispatch_trip(
         "driver": target_user.username,
         "origin": origin_store.name,
         "destinations": [stores_by_id[sid].name for sid in destination_store_ids],
-        "shipment_no": shipment_no,
+        "shipment_numbers": shipment_numbers,
+        "shipment_no": shipment_no_display,
         "trip_category": trip_category.profile_name,
         "helpers_assigned": len(helper_objects),
     }
