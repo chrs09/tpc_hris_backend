@@ -53,6 +53,11 @@ MODULE_GROUPS = {
         # separate feature below (acting as a driver on a stuck trip).
         "trip_assignment",
         "trip_categories",
+        # Origins (hubs/yards a driver dispatches from) -- see
+        # app/api/admin/origins.py. Still Store rows (Store.is_hub =
+        # True), just given their own management page here instead of
+        # being a buried checkbox on the Customers page.
+        "origins",
         "daily_dispatch",
         # Lets superadmin (always) or a specifically granted employee
         # perform any step of a driver's trip on their behalf -- e.g.
