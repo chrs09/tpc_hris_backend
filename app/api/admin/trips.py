@@ -877,6 +877,8 @@ def review_trip(
         "ticket_no": trip.ticket_no,
         "trip_code": trip.trip_code,
         "current_step": trip.current_step,
+        "current_step_label": _current_step_label(trip.current_step),
+        "current_stop": _current_stop_name(db, trip),
         "status": (
             trip.status.value
             if hasattr(trip.status, "value")
