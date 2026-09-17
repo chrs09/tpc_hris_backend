@@ -52,7 +52,7 @@ class UserLogin(BaseModel):
 class UserResponse(BaseModel):
     id: int
     username: str
-    email: EmailStr
+    email: EmailStr | None = None
     role: UserRole
     is_active: bool
 

@@ -25,7 +25,10 @@ class User(Base):
     id = Column(Integer, primary_key=True, index=True)
 
     username = Column(String(50), unique=True, nullable=False, index=True)
-    email = Column(String(100), unique=True, nullable=False, index=True)
+    # Nullable -- login is by username, not email, and some employees
+    # (e.g. field/labor staff) have no email on file. Still unique when
+    # present; MySQL allows multiple NULLs under a unique index.
+    email = Column(String(100), unique=True, nullable=True, index=True)
 
     hashed_password = Column(String(255), nullable=False)
 

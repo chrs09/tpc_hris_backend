@@ -17,6 +17,7 @@ from app.core.security import create_access_token
 from app.models.user import User, UserRole
 from app.services.user_service import (
     create_user_service,
+    bulk_create_users_service,
     update_user_service,
     get_user_revisions_service,
 )
@@ -45,6 +46,20 @@ def create_user(
         "username": user.username,
         "temporary_password": temp_password,
     }
+
+
+@router.post("/bulk-create")
+def bulk_create_users(
+    db: Session = Depends(get_db),
+    current_user=Depends(_require_users_access),
+):
+    """Creates a login account (role=employee, same username/password
+    convention as a single manual create) for every active employee who
+    doesn't already have one. Returns the full credential list once --
+    same as the single-create flow, nothing is emailed/stored anywhere
+    else, so the admin needs to copy/print this response before leaving
+    the page."""
+    return bulk_create_users_service(db)
 
 
 @router.get("/", response_model=List[UserResponse])

@@ -54,6 +54,108 @@ def create_user_service(data, db: Session):
     return new_user, temporary_password
 
 
+def bulk_create_users_service(db: Session):
+    """Creates a User account for every active employee that doesn't
+    already have one, following the exact username/password conventions
+    of create_user_service above (lastname-based username, deduped with a
+    counter; lastname+year temporary password). Every new account is
+    role=EMPLOYEE -- anyone who needs a different role gets it changed
+    afterward via the existing Edit User flow, same as a single manual
+    create would require if the admin picked the wrong role.
+
+    Email is optional -- login is by username, not email, so an employee
+    with no email on file still gets an account (email left null). Never
+    raises for a single bad employee record (missing last name, or an
+    email already claimed by another account) -- those are collected
+    into `failed` and reported back instead, so one bad row can't block
+    everyone else's account from being created.
+    """
+    candidates = (
+        db.query(Employee)
+        .outerjoin(User, User.employee_id == Employee.id)
+        .filter(Employee.is_active == 1, User.id.is_(None))
+        .order_by(Employee.last_name.asc())
+        .all()
+    )
+
+    # Tracked in memory (not just re-queried per row) because new users
+    # created earlier in this same loop aren't committed/visible to the
+    # DB yet.
+    existing_usernames = {row[0] for row in db.query(User.username).all()}
+    existing_emails = {row[0] for row in db.query(User.email).all() if row[0]}
+
+    current_year = str(datetime.now().year)
+
+    created = []
+    failed = []
+
+    for employee in candidates:
+        full_name = f"{employee.first_name} {employee.last_name}".strip()
+
+        if not employee.last_name or not employee.last_name.strip():
+            failed.append({
+                "employee_id": employee.id,
+                "name": full_name,
+                "reason": "Employee has no last name on file.",
+            })
+            continue
+
+        if employee.email and employee.email in existing_emails:
+            failed.append({
+                "employee_id": employee.id,
+                "name": full_name,
+                "reason": "Email already used by another account.",
+            })
+            continue
+
+        base_username = employee.last_name.lower().strip()
+        username = base_username
+        counter = 1
+        while username in existing_usernames:
+            username = f"{base_username}{counter}"
+            counter += 1
+
+        temporary_password = base_username + current_year
+
+        new_user = User(
+            username=username,
+            email=employee.email,
+            hashed_password=hash_password(temporary_password),
+            role=UserRole.EMPLOYEE,
+            employee_id=employee.id,
+            is_active=True,
+            must_change_password=False,
+        )
+        db.add(new_user)
+
+        existing_usernames.add(username)
+        if employee.email:
+            existing_emails.add(employee.email)
+
+        created.append({
+            "employee_id": employee.id,
+            "name": full_name,
+            "username": username,
+            "temporary_password": temporary_password,
+        })
+
+    if created:
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to save bulk-created accounts.",
+            )
+
+    return {
+        "total_candidates": len(candidates),
+        "created": created,
+        "failed": failed,
+    }
+
+
 def update_user_service(
     user_id: int,
     data,
