@@ -99,7 +99,7 @@ def _current_stop_name(db: Session, trip: Trip) -> str | None:
 # =========================
 @router.get("/summary")
 def get_trip_summary(
-    db: Session = Depends(get_db), current_admin=Depends(require_role_or_module(roles=["admin", "superadmin", "coordinator_admin"], module_key="trip_management.trips"))
+    db: Session = Depends(get_db), current_admin=Depends(require_role_or_module(roles=["admin", "superadmin", "coordinator_admin", "coordinator"], module_key="trip_management.trips"))
 ):
     today = date.today()
 
@@ -199,7 +199,7 @@ def get_pending_trips(
 # =========================
 @router.get("/active")
 def get_active_trips(
-    db: Session = Depends(get_db), current_admin=Depends(require_role_or_module(roles=["admin", "superadmin", "coordinator_admin"], module_key="trip_management.trip_dashboard"))
+    db: Session = Depends(get_db), current_admin=Depends(require_role_or_module(roles=["admin", "superadmin", "coordinator_admin", "coordinator"], module_key="trip_management.trip_dashboard"))
 ):
     trips = (
         db.query(Trip)
@@ -243,7 +243,7 @@ def get_active_trips(
 # =========================
 @router.get("/assigned")
 def get_assigned_trips(
-    db: Session = Depends(get_db), current_admin=Depends(require_role_or_module(roles=["admin", "superadmin", "coordinator_admin"], module_key="trip_management.trip_dashboard"))
+    db: Session = Depends(get_db), current_admin=Depends(require_role_or_module(roles=["admin", "superadmin", "coordinator_admin", "coordinator"], module_key="trip_management.trip_dashboard"))
 ):
     trips = (
         db.query(Trip)
