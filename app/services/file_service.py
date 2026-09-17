@@ -387,6 +387,20 @@ class FileService:
         return self.upload(file, folder)
 
     # ===============================
+    # STORE FILES
+    # ===============================
+
+    def upload_store_photo(self, file, store_id):
+        """
+        Upload a photo of the actual physical store.
+
+        Structure:
+        stores/{store_id}/photo/{filename}
+        """
+        folder = f"stores/{store_id}/photo"
+        return self.upload(file, folder)
+
+    # ===============================
     # EMPLOYEE FILES
     # ===============================
 

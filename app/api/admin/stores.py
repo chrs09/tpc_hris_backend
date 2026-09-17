@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session, joinedload
 
@@ -15,6 +15,9 @@ from app.models.stores import Store, StoreProfile
 from app.models.notification import Notification
 from app.models.trips import Trip
 from app.services.gps_service import calculate_distance_meters
+from app.services.file_service import FileService
+
+ALLOWED_STORE_PHOTO_CONTENT_TYPES = {"image/png", "image/jpeg", "image/webp"}
 
 router = APIRouter(prefix="/admin/stores", tags=["Admin Stores"])
 
@@ -51,6 +54,8 @@ class ApproveStoreRequest(BaseModel):
 
 class StoreCreateRequest(BaseModel):
     name: str
+    address: Optional[str] = None
+    outlet_number: Optional[str] = None
     latitude: float
     longitude: float
     allowed_radius_meters: int
@@ -66,6 +71,8 @@ class StoreCreateRequest(BaseModel):
 
 class StoreUpdateRequest(BaseModel):
     name: Optional[str] = None
+    address: Optional[str] = None
+    outlet_number: Optional[str] = None
     latitude: Optional[float] = None
     longitude: Optional[float] = None
     allowed_radius_meters: Optional[int] = None
@@ -115,6 +122,9 @@ def build_store_response(store: Store) -> dict:
     return {
         "id": store.id,
         "name": store.name,
+        "address": store.address,
+        "outlet_number": store.outlet_number,
+        "photo_url": store.photo_url,
         "latitude": store.latitude,
         "longitude": store.longitude,
         "allowed_radius_meters": store.allowed_radius_meters,
@@ -350,6 +360,8 @@ def create_store(
 
     new_store = Store(
         name=store_name,
+        address=payload.address,
+        outlet_number=payload.outlet_number,
         latitude=payload.latitude,
         longitude=payload.longitude,
         allowed_radius_meters=payload.allowed_radius_meters,
@@ -593,6 +605,11 @@ def update_store(
 
         store.name = name
 
+    if payload.address is not None:
+        store.address = payload.address
+    if payload.outlet_number is not None:
+        store.outlet_number = payload.outlet_number
+
     if payload.latitude is not None:
         store.latitude = payload.latitude
     if payload.longitude is not None:
@@ -635,5 +652,47 @@ def update_store(
 
     db.commit()
     db.refresh(store)
+
+    return build_store_response(store)
+
+
+# ==========================================
+# STORE PHOTO (a picture of the actual physical store)
+# ==========================================
+@router.post("/{store_id}/photo")
+def upload_store_photo(
+    store_id: int,
+    photo: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_admin=Depends(require_role_or_module(roles=["admin", "superadmin", "coordinator_admin"], module_key="customers.customers")),
+):
+    store = db.query(Store).filter(Store.id == store_id).first()
+    if not store:
+        raise HTTPException(status_code=404, detail="Store not found.")
+
+    if photo.content_type not in ALLOWED_STORE_PHOTO_CONTENT_TYPES:
+        raise HTTPException(
+            status_code=400, detail="Photo must be a PNG, JPEG, or WEBP image."
+        )
+
+    store.photo_url = FileService().upload_store_photo(photo, store.id)
+    db.commit()
+    db.refresh(store)
+
+    return build_store_response(store)
+
+
+@router.delete("/{store_id}/photo")
+def remove_store_photo(
+    store_id: int,
+    db: Session = Depends(get_db),
+    current_admin=Depends(require_role_or_module(roles=["admin", "superadmin", "coordinator_admin"], module_key="customers.customers")),
+):
+    store = db.query(Store).filter(Store.id == store_id).first()
+    if not store:
+        raise HTTPException(status_code=404, detail="Store not found.")
+
+    store.photo_url = None
+    db.commit()
 
     return build_store_response(store)

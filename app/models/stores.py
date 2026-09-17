@@ -28,6 +28,16 @@ class Store(Base):
 
     name = Column(String(150), nullable=False)
 
+    # Physical/mailing address of the store, and the customer's own
+    # outlet number/code (distinct from Store.id) -- both just
+    # informational, shown on the Customers page.
+    address = Column(String(255), nullable=True)
+    outlet_number = Column(String(50), nullable=True)
+
+    # A live link to a photo of the actual physical store, uploaded via
+    # FileService.upload_store_photo().
+    photo_url = Column(String(500), nullable=True)
+
     latitude = Column(Float, nullable=False)
     longitude = Column(Float, nullable=False)
 

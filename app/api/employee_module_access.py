@@ -38,6 +38,13 @@ MODULE_GROUPS = {
     ],
     "payroll": ["payroll"],
     "trip_management": [
+        # Assigned/Active trip monitoring, with each active trip's live
+        # driver-triggered step (Checkout, Arrived, Unloading,
+        # Delivered, Checkin) -- see app/api/admin/trips.py's
+        # /assigned and /active endpoints (module_key
+        # trip_management.trip_dashboard). Distinct from the always-
+        # visible top-level "Dashboard" nav group (Overview/home page).
+        "trip_dashboard",
         "trips",
         "office_trip_review",
         # Renamed from "trip_bypass" -- this is dispatch (assigning a
