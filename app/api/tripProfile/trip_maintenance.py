@@ -8,6 +8,7 @@ from app.core.database import get_db
 from app.core.dependencies import get_current_user
 from app.models.user import User
 from app.models.vehicle_unit import VehicleUnit
+from app.models.truck_type import TruckType
 from app.models.vehicle_or_history import VehicleUnitORHistory
 from app.models.vehicle_unit_checklist import VehicleUnitChecklist
 from app.models.TripRate import TripRateProfile
@@ -48,7 +49,12 @@ def get_vehicle_units(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    units = db.query(VehicleUnit).order_by(VehicleUnit.plate_number.asc()).all()
+    units = (
+        db.query(VehicleUnit)
+        .options(joinedload(VehicleUnit.truck_type))
+        .order_by(VehicleUnit.plate_number.asc())
+        .all()
+    )
 
     response = [
         {
@@ -63,6 +69,9 @@ def get_vehicle_units(
             "or_number": unit.or_number,
             "or_document_url": unit.or_document_url,
             "or_expiration_date": unit.or_expiration_date,
+            "truck_type_id": unit.truck_type_id,
+            "truck_type_name": unit.truck_type.name if unit.truck_type else None,
+            "truck_type_size": unit.truck_type.size if unit.truck_type else None,
         }
         for unit in units
     ]
@@ -77,6 +86,7 @@ def get_active_vehicle_units(
 ):
     units = (
         db.query(VehicleUnit)
+        .options(joinedload(VehicleUnit.truck_type))
         .filter(VehicleUnit.is_active.is_(True), VehicleUnit.is_available.is_(True))
         .order_by(VehicleUnit.unit_code.asc())
         .all()
@@ -94,6 +104,9 @@ def get_active_vehicle_units(
             "or_number": unit.or_number,
             "or_document_url": unit.or_document_url,
             "or_expiration_date": unit.or_expiration_date,
+            "truck_type_id": unit.truck_type_id,
+            "truck_type_name": unit.truck_type.name if unit.truck_type else None,
+            "truck_type_size": unit.truck_type.size if unit.truck_type else None,
         }
         for unit in units
     ]
@@ -106,6 +119,7 @@ def create_vehicle_unit(
     unit_code: str = Form(None),
     plate_number: str = Form(...),
     description: str = Form(None),
+    truck_type_id: int = Form(None),
     cr_number: str = Form(None),
     cr_expiration_date: str = Form(None),
     cr_document: UploadFile = File(None),
@@ -115,6 +129,15 @@ def create_vehicle_unit(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    if truck_type_id is not None:
+        truck_type = (
+            db.query(TruckType)
+            .filter(TruckType.id == truck_type_id, TruckType.is_active.is_(True))
+            .first()
+        )
+        if not truck_type:
+            raise HTTPException(status_code=400, detail="Invalid truck type.")
+
     existing_plate = (
         db.query(VehicleUnit).filter(VehicleUnit.plate_number == plate_number).first()
     )
@@ -152,6 +175,7 @@ def create_vehicle_unit(
         unit_code=unit_code,
         plate_number=plate_number,
         description=description,
+        truck_type_id=truck_type_id,
         cr_number=cr_number,
         cr_expiration_date=_parse_expiration_date(cr_expiration_date),
         or_number=or_number,
@@ -189,6 +213,7 @@ def update_vehicle_unit(
     plate_number: str = Form(None),
     description: str = Form(None),
     is_active: bool = Form(None),
+    truck_type_id: str = Form(None),
     cr_number: str = Form(None),
     cr_expiration_date: str = Form(None),
     cr_document: UploadFile = File(None),
@@ -247,6 +272,22 @@ def update_vehicle_unit(
 
     if is_active is not None:
         vehicle_unit.is_active = is_active
+
+    if truck_type_id is not None:
+        if truck_type_id.strip() == "":
+            vehicle_unit.truck_type_id = None
+        else:
+            truck_type = (
+                db.query(TruckType)
+                .filter(
+                    TruckType.id == int(truck_type_id),
+                    TruckType.is_active.is_(True),
+                )
+                .first()
+            )
+            if not truck_type:
+                raise HTTPException(status_code=400, detail="Invalid truck type.")
+            vehicle_unit.truck_type_id = truck_type.id
 
     if cr_number is not None:
         vehicle_unit.cr_number = cr_number

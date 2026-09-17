@@ -6,6 +6,7 @@ from sqlalchemy import (
     Column,
     Date,
     DateTime,
+    ForeignKey,
     Integer,
     String,
 )
@@ -33,6 +34,12 @@ class VehicleUnit(Base):
 
     description = Column(
         String(255),
+        nullable=True,
+    )
+
+    truck_type_id = Column(
+        Integer,
+        ForeignKey("tpc_truck_types.id"),
         nullable=True,
     )
 
@@ -86,6 +93,8 @@ class VehicleUnit(Base):
         Integer,
         nullable=True,
     )
+
+    truck_type = relationship("TruckType", back_populates="vehicle_units")
 
     trips = relationship(
         "Trip",

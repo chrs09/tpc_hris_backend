@@ -68,7 +68,7 @@ MODULE_GROUPS = {
     ],
     "customers": ["customers"],
     "suppliers": ["suppliers"],
-    "fleet_management": ["vehicle_list", "vehicle_maintenance"],
+    "fleet_management": ["vehicle_list", "vehicle_maintenance", "truck_types"],
     "finance": ["finance_trips", "finance_expenses"],
     "administrator": [
         "users",

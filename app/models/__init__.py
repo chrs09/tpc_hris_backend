@@ -40,6 +40,7 @@ from .schedule_template import ScheduleTemplate as ScheduleTemplate
 
 # Trip Module
 from .TripRate import TripRateProfile as TripRateProfile
+from .truck_type import TruckType as TruckType
 from .vehicle_unit import VehicleUnit as VehicleUnit
 from .vehicle_or_history import VehicleUnitORHistory as VehicleUnitORHistory
 from .vehicle_unit_checklist import VehicleUnitChecklist as VehicleUnitChecklist
