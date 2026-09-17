@@ -11,7 +11,7 @@ from app.core.database import get_db
 from app.core.dependencies import get_current_trip_manager, get_current_user, require_role_or_module
 from app.models.trips import Trip, TripStatus
 from app.models.notification import Notification
-from app.models.trip_stops import TripStop
+from app.models.trip_stops import TripStop, StopStatus
 from app.models.user import User, UserRole
 from app.models.employees import Employee
 from app.models.trip_helper import TripHelper
@@ -25,6 +25,75 @@ from app.api.driver.trips import _load_planned_store_ids, _delivered_store_ids
 router = APIRouter(prefix="/admin/trips", tags=["Admin Trips"])
 
 
+# Human-readable label for each Trip.current_step value -- shown on the
+# Trip Dashboard's Active Trips list so a coordinator can see exactly
+# which driver-triggered step a trip is on right now (e.g. the driver
+# tapping "Checkout" on their phone moves current_step straight to
+# IN_TRANSIT, since Checkout now starts the trip in one action -- see
+# checkout_trip() in app/api/driver/trips.py). RETURNING is a legacy
+# fallback for trips stuck there from before "Back to Source" was
+# removed.
+CURRENT_STEP_LABELS = {
+    "ASSIGNED": "Assigned (Not Started)",
+    "IN_TRANSIT": "Checked Out (In Transit)",
+    "ARRIVED": "Arrived at Store",
+    "UNLOADING": "Unloading",
+    "DELIVERED": "Delivered",
+    "RETURNING": "Returning to Hub",
+    "CHECKIN": "Checked In (At Hub)",
+}
+
+
+def _current_step_label(current_step: str | None) -> str:
+    return CURRENT_STEP_LABELS.get(current_step, current_step or "-")
+
+
+def _current_stop_name(db: Session, trip: Trip) -> str | None:
+    """Best-effort "where is this trip right now" label: the open stop's
+    store while ARRIVED/UNLOADING, the last delivered store while
+    DELIVERED, or the next undelivered planned store otherwise (e.g.
+    IN_TRANSIT, heading there)."""
+    if trip.current_step in ("ARRIVED", "UNLOADING"):
+        open_stop = (
+            db.query(TripStop)
+            .filter(
+                TripStop.trip_id == trip.id,
+                TripStop.status != StopStatus.DELIVERED,
+            )
+            .order_by(TripStop.id.desc())
+            .first()
+        )
+        if open_stop and open_stop.store:
+            return open_stop.store.name
+
+    planned_ids = _load_planned_store_ids(trip)
+    if not planned_ids:
+        return None
+
+    delivered_ids = _delivered_store_ids(db, trip.id)
+
+    if trip.current_step == "DELIVERED":
+        last_delivered = (
+            db.query(TripStop)
+            .filter(
+                TripStop.trip_id == trip.id,
+                TripStop.status == StopStatus.DELIVERED,
+            )
+            .order_by(TripStop.id.desc())
+            .first()
+        )
+        if last_delivered and last_delivered.store:
+            return last_delivered.store.name
+
+    remaining_ids = [sid for sid in planned_ids if sid not in delivered_ids]
+    if remaining_ids:
+        next_store = db.query(Store).filter(Store.id == remaining_ids[0]).first()
+        if next_store:
+            return next_store.name
+
+    return None
+
+
 # =========================
 # SUMMARY
 # =========================
@@ -35,6 +104,9 @@ def get_trip_summary(
     today = date.today()
 
     return {
+        "assigned_trips": db.query(Trip)
+        .filter(Trip.status == TripStatus.ASSIGNED)
+        .count(),
         "pending_trips": db.query(Trip)
         .filter(Trip.status == TripStatus.PENDING_APPROVAL)
         .count(),
@@ -127,7 +199,7 @@ def get_pending_trips(
 # =========================
 @router.get("/active")
 def get_active_trips(
-    db: Session = Depends(get_db), current_admin=Depends(require_role_or_module(roles=["admin", "superadmin", "coordinator_admin"], module_key="trip_management.trips"))
+    db: Session = Depends(get_db), current_admin=Depends(require_role_or_module(roles=["admin", "superadmin", "coordinator_admin"], module_key="trip_management.trip_dashboard"))
 ):
     trips = (
         db.query(Trip)
@@ -137,23 +209,93 @@ def get_active_trips(
         .all()
     )
 
-    return [
-        {
-            "id": trip.id,
-            "trip_code": trip.trip_code,
-            "ticket_no": trip.ticket_no,
-            "trip_code": trip.trip_code,
-            "vehicle_unit": (trip.vehicle_unit.unit_code if trip.vehicle_unit else "-"),
-            "trip_profile": (
-                trip.trip_rate_profile.profile_name if trip.trip_rate_profile else "-"
-            ),
-            "status": trip.status.value,
-            "start_time": utc_to_ph(trip.start_time).strftime("%Y-%m-%d %I:%M:%S %p"),
-            "username": trip.driver.username,  # 👈 THIS IS ALL YOU NEED
-            "started_outside_hub_range": trip.started_outside_hub_range,
-        }
-        for trip in trips
-    ]
+    result = []
+    for trip in trips:
+        planned_ids = _load_planned_store_ids(trip)
+        delivered_ids = _delivered_store_ids(db, trip.id) if planned_ids else set()
+
+        result.append(
+            {
+                "id": trip.id,
+                "trip_code": trip.trip_code,
+                "ticket_no": trip.ticket_no,
+                "vehicle_unit": (trip.vehicle_unit.unit_code if trip.vehicle_unit else "-"),
+                "trip_profile": (
+                    trip.trip_rate_profile.profile_name if trip.trip_rate_profile else "-"
+                ),
+                "status": trip.status.value,
+                "current_step": trip.current_step,
+                "current_step_label": _current_step_label(trip.current_step),
+                "current_stop": _current_stop_name(db, trip),
+                "total_stops": len(planned_ids) if planned_ids else None,
+                "completed_stops": len(delivered_ids) if planned_ids else None,
+                "start_time": utc_to_ph(trip.start_time).strftime("%Y-%m-%d %I:%M:%S %p"),
+                "username": trip.driver.username,
+                "started_outside_hub_range": trip.started_outside_hub_range,
+            }
+        )
+
+    return result
+
+
+# =========================
+# GET ASSIGNED (dispatched, driver hasn't checked out yet)
+# =========================
+@router.get("/assigned")
+def get_assigned_trips(
+    db: Session = Depends(get_db), current_admin=Depends(require_role_or_module(roles=["admin", "superadmin", "coordinator_admin"], module_key="trip_management.trip_dashboard"))
+):
+    trips = (
+        db.query(Trip)
+        .options(joinedload(Trip.driver).joinedload(User.employee))
+        .filter(Trip.status == TripStatus.ASSIGNED)
+        .order_by(Trip.created_at.desc())
+        .all()
+    )
+
+    result = []
+    for trip in trips:
+        planned_ids = _load_planned_store_ids(trip)
+        destination_names = (
+            [
+                store.name
+                for store in db.query(Store)
+                .filter(Store.id.in_(planned_ids))
+                .all()
+            ]
+            if planned_ids
+            else []
+        )
+
+        result.append(
+            {
+                "id": trip.id,
+                "trip_code": trip.trip_code,
+                "ticket_no": trip.ticket_no,
+                "driver_name": _display_name(trip.driver),
+                "vehicle_unit": (
+                    trip.vehicle_unit.unit_code if trip.vehicle_unit else "-"
+                ),
+                "trip_profile": (
+                    trip.trip_rate_profile.profile_name
+                    if trip.trip_rate_profile
+                    else "-"
+                ),
+                "origin_store": (
+                    trip.origin_store.name if trip.origin_store else "-"
+                ),
+                "destinations": destination_names,
+                "current_step": trip.current_step,
+                "current_step_label": _current_step_label(trip.current_step),
+                "dispatched_at": (
+                    utc_to_ph(trip.created_at).strftime("%Y-%m-%d %I:%M:%S %p")
+                    if trip.created_at
+                    else None
+                ),
+            }
+        )
+
+    return result
 
 
 # =========================

@@ -634,7 +634,6 @@ def dispatch_trip(
     origin_store_id: int = Form(...),
     destination_store_ids: str = Form(...),
     shipment_no: str = Form(...),
-    trip_rate_profile_id: int = Form(...),
     helper_ids: str = Form("[]"),
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
@@ -642,14 +641,14 @@ def dispatch_trip(
     """The office/coordinator's first step in the driver flow: pick a
     driver, a vehicle, the hub they're dispatching from, one or more
     shipment numbers (a single truck/trip can carry multiple shipments),
-    the trip category (rate profile -- decides driver/helper pay for
-    this trip, chosen explicitly here rather than derived from the
-    destination store), the destination store(s) for this trip (a trip
-    can cover multiple stores under one dispatch -- the driver visits
-    each in turn), and (usually) the helpers riding along. Creates the
-    Trip in TripStatus.ASSIGNED / current_step "ASSIGNED"; the driver
-    sees it on their dashboard and performs Checkout -> Start Trip from
-    there."""
+    and the destination store(s) for this trip (a trip can cover
+    multiple stores under one dispatch -- the driver visits each in
+    turn), and (usually) the helpers riding along. The trip category
+    (rate profile -- decides driver/helper pay) is derived automatically
+    from the first destination store's own trip_rate_profile_id, not
+    picked explicitly here. Creates the Trip in TripStatus.ASSIGNED /
+    current_step "ASSIGNED"; the driver sees it on their dashboard and
+    performs Checkout -> Start Trip from there."""
     if _role_value(current_user.role) not in TRIP_MANAGER_ROLES:
         raise HTTPException(status_code=403, detail="Not authorized to dispatch trips.")
 
@@ -733,10 +732,16 @@ def dispatch_trip(
 
     primary_store = stores_by_id[destination_store_ids[0]]
 
+    if not primary_store.trip_rate_profile_id:
+        raise HTTPException(
+            status_code=400,
+            detail=f'"{primary_store.name}" has no trip rate profile configured. Set one on the store before dispatching to it.',
+        )
+
     trip_category = (
         db.query(TripRateProfile)
         .filter(
-            TripRateProfile.id == trip_rate_profile_id,
+            TripRateProfile.id == primary_store.trip_rate_profile_id,
             TripRateProfile.is_active.is_(True),
         )
         .first()
@@ -744,7 +749,7 @@ def dispatch_trip(
     if not trip_category:
         raise HTTPException(
             status_code=400,
-            detail="Selected trip category is invalid or inactive.",
+            detail=f'"{primary_store.name}"\'s trip rate profile is inactive. Update the store or reactivate the profile.',
         )
 
     target_user = (

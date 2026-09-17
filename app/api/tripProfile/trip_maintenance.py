@@ -1,5 +1,6 @@
-from fastapi import APIRouter, Depends, File, HTTPException, Form, UploadFile
+from fastapi import APIRouter, Body, Depends, File, HTTPException, Form, UploadFile
 from datetime import date, datetime
+import json
 from sqlalchemy.orm import Session, joinedload
 
 from app.core.database import get_db
@@ -7,6 +8,8 @@ from app.core.database import get_db
 from app.core.dependencies import get_current_user
 from app.models.user import User
 from app.models.vehicle_unit import VehicleUnit
+from app.models.vehicle_or_history import VehicleUnitORHistory
+from app.models.vehicle_unit_checklist import VehicleUnitChecklist
 from app.models.TripRate import TripRateProfile
 from app.models.customer import Customer
 from app.models.supplier import Supplier
@@ -263,6 +266,37 @@ def update_vehicle_unit(
             cr_document, vehicle_unit.id
         )
 
+    if or_document and or_document.content_type not in ALLOWED_CR_OR_CONTENT_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail="OR document must be a PNG, JPEG, WEBP image, or PDF.",
+        )
+
+    touches_or = (
+        or_number is not None or or_expiration_date is not None or or_document
+    )
+    has_existing_or = bool(
+        vehicle_unit.or_number
+        or vehicle_unit.or_document_url
+        or vehicle_unit.or_expiration_date
+    )
+
+    # A renewal -- snapshot the OR as it stood right before this update
+    # overwrites it, so the Vehicle List can show "previous OR number(s)"
+    # instead of losing the old one. Only when there's something to
+    # preserve (not the first time an OR is ever entered).
+    if touches_or and has_existing_or:
+        db.add(
+            VehicleUnitORHistory(
+                vehicle_unit_id=vehicle_unit.id,
+                or_number=vehicle_unit.or_number,
+                or_document_url=vehicle_unit.or_document_url,
+                or_expiration_date=vehicle_unit.or_expiration_date,
+                replaced_at=datetime.utcnow(),
+                replaced_by=current_user.id,
+            )
+        )
+
     if or_number is not None:
         vehicle_unit.or_number = or_number
 
@@ -272,11 +306,6 @@ def update_vehicle_unit(
         )
 
     if or_document:
-        if or_document.content_type not in ALLOWED_CR_OR_CONTENT_TYPES:
-            raise HTTPException(
-                status_code=400,
-                detail="OR document must be a PNG, JPEG, WEBP image, or PDF.",
-            )
         vehicle_unit.or_document_url = FileService().upload_vehicle_or(
             or_document, vehicle_unit.id
         )
@@ -288,6 +317,105 @@ def update_vehicle_unit(
     db.refresh(vehicle_unit)
 
     return api_response({"message": "Vehicle unit updated successfully"})
+
+
+@router.get("/vehicle-units/{unit_id}/or-history")
+def get_vehicle_or_history(
+    unit_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Every previous OR (Official Receipt) this vehicle unit has had,
+    newest first -- each row is a snapshot taken right before that OR
+    was overwritten by a renewal. See VehicleUnitORHistory."""
+    vehicle_unit = db.query(VehicleUnit).filter(VehicleUnit.id == unit_id).first()
+    if not vehicle_unit:
+        raise HTTPException(status_code=404, detail="Vehicle unit not found")
+
+    history = (
+        db.query(VehicleUnitORHistory)
+        .filter(VehicleUnitORHistory.vehicle_unit_id == unit_id)
+        .order_by(VehicleUnitORHistory.replaced_at.desc())
+        .all()
+    )
+
+    return [
+        {
+            "id": row.id,
+            "or_number": row.or_number,
+            "or_document_url": row.or_document_url,
+            "or_expiration_date": row.or_expiration_date,
+            "replaced_at": row.replaced_at,
+        }
+        for row in history
+    ]
+
+
+@router.get("/vehicle-units/{unit_id}/checklist")
+def get_vehicle_checklist(
+    unit_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """The vehicle's compliance/documentation checklist (Documentation,
+    Provisional Authority, Certificate of Public Convenience, Renewal,
+    Grab, Vehicle Details, Loan Agency, LTMS). The section/item
+    structure lives on the frontend (CHECKLIST_SCHEMA); this just
+    returns whatever's been saved as one JSON object, or {} if nothing
+    has been filled in yet."""
+    vehicle_unit = db.query(VehicleUnit).filter(VehicleUnit.id == unit_id).first()
+    if not vehicle_unit:
+        raise HTTPException(status_code=404, detail="Vehicle unit not found")
+
+    checklist = (
+        db.query(VehicleUnitChecklist)
+        .filter(VehicleUnitChecklist.vehicle_unit_id == unit_id)
+        .first()
+    )
+
+    if not checklist or not checklist.data:
+        return {}
+
+    try:
+        return json.loads(checklist.data)
+    except Exception:
+        return {}
+
+
+@router.put("/vehicle-units/{unit_id}/checklist")
+def save_vehicle_checklist(
+    unit_id: int,
+    payload: dict = Body(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Overwrites the vehicle's checklist with the given JSON object --
+    the frontend sends the whole thing each save (small enough, and
+    avoids a partial-merge endpoint for what's really one form)."""
+    vehicle_unit = db.query(VehicleUnit).filter(VehicleUnit.id == unit_id).first()
+    if not vehicle_unit:
+        raise HTTPException(status_code=404, detail="Vehicle unit not found")
+
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Checklist data must be an object.")
+
+    checklist = (
+        db.query(VehicleUnitChecklist)
+        .filter(VehicleUnitChecklist.vehicle_unit_id == unit_id)
+        .first()
+    )
+
+    if not checklist:
+        checklist = VehicleUnitChecklist(vehicle_unit_id=unit_id)
+        db.add(checklist)
+
+    checklist.data = json.dumps(payload)
+    checklist.updated_by = current_user.id
+    checklist.updated_at = datetime.utcnow()
+
+    db.commit()
+
+    return api_response({"message": "Checklist saved."})
 
 
 @router.delete("/vehicle-units/{unit_id}")
