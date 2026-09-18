@@ -18,6 +18,13 @@ class FinanceReviewStatus(str, enum.Enum):
     OFFICE_REVIEW = "office_review"
     FINANCE_REVIEW = "finance_review"
     APPROVED = "approved"
+    # Office found a problem with the trip and sent it back to the
+    # coordinator's Trip Approval queue with a reason (see return_reason
+    # below) instead of forwarding it to Finance. The coordinator
+    # re-approves from here, which reuses this same review row (see
+    # approve_trip in app/api/admin/trips.py) rather than creating a
+    # second one -- trip_id is unique on this table.
+    RETURNED = "returned"
 
 
 class TripFinanceReview(Base):
@@ -122,6 +129,26 @@ class TripFinanceReview(Base):
     )
 
     # =====================================================
+    # RETURNED TO COORDINATOR (correction requested by office)
+    # =====================================================
+
+    returned_by_user_id = Column(
+        Integer,
+        ForeignKey("tpc_users.id"),
+        nullable=True,
+    )
+
+    return_reason = Column(
+        String(1000),
+        nullable=True,
+    )
+
+    returned_at = Column(
+        DateTime,
+        nullable=True,
+    )
+
+    # =====================================================
     # FINANCE REVIEW
     # =====================================================
 
@@ -158,4 +185,9 @@ class TripFinanceReview(Base):
     finance_reviewer = relationship(
         "User",
         foreign_keys=[finance_reviewer_id],
+    )
+
+    returned_by = relationship(
+        "User",
+        foreign_keys=[returned_by_user_id],
     )

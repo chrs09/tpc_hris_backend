@@ -665,6 +665,84 @@ def forward_trip_to_finance(
 
 
 # =========================================================
+# RETURN TO TRIP APPROVAL (correction requested)
+#
+# Office found a problem while reviewing the trip (missing/wrong
+# photos, a discrepancy, etc.) and sends it back to the coordinator's
+# Trip Approval queue with a reason, instead of forwarding it to
+# Finance. Reuses the same TripFinanceReview row rather than deleting
+# it -- trip_id is unique on that table, and approve_trip (see
+# app/api/admin/trips.py) knows to reuse a RETURNED review instead of
+# rejecting the re-approval as a duplicate.
+# =========================================================
+@router.post("/{trip_id}/return-to-approval")
+def return_trip_to_approval(
+    trip_id: int,
+    remarks: str = Body(..., embed=True),
+    db: Session = Depends(get_db),
+    current_user=Depends(
+        require_role_or_module(
+            roles=["admin", "superadmin", "coordinator_admin", "office_admin"],
+            module_key="trip_management.office_trip_review",
+        )
+    ),
+):
+    if not remarks or not remarks.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="A reason is required to send this trip back for correction.",
+        )
+
+    trip = db.query(Trip).filter(Trip.id == trip_id).first()
+
+    if not trip:
+        raise HTTPException(status_code=404, detail="Trip not found.")
+
+    if trip.status != TripStatus.PENDING_OFFICE_REVIEW:
+        raise HTTPException(
+            status_code=400,
+            detail="Trip is not pending office review.",
+        )
+
+    finance_review = (
+        db.query(TripFinanceReview)
+        .filter(TripFinanceReview.trip_id == trip_id)
+        .first()
+    )
+
+    if not finance_review:
+        raise HTTPException(
+            status_code=404,
+            detail="Finance review record not found.",
+        )
+
+    if finance_review.status != FinanceReviewStatus.OFFICE_REVIEW:
+        raise HTTPException(
+            status_code=400,
+            detail="Trip has already been processed.",
+        )
+
+    trip.status = TripStatus.PENDING_APPROVAL
+
+    finance_review.status = FinanceReviewStatus.RETURNED
+    finance_review.return_reason = remarks.strip()
+    finance_review.returned_by_user_id = current_user.id
+    finance_review.returned_at = datetime.utcnow()
+
+    db.commit()
+    db.refresh(finance_review)
+
+    return {
+        "message": "Trip sent back to Trip Approval.",
+        "trip_id": trip.id,
+        "trip_status": trip.status.value,
+        "review_status": finance_review.status.value,
+        "return_reason": finance_review.return_reason,
+        "returned_at": to_ph(finance_review.returned_at),
+    }
+
+
+# =========================================================
 # ARCHIVE (soft delete)
 #
 # Lets office staff clean up test/junk trips out of the pending review

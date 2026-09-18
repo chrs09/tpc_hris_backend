@@ -177,6 +177,22 @@ def get_pending_trips(
         .all()
     )
 
+    # Batched lookup (not per-row) of return reasons, so trips office
+    # sent back for correction show a badge in the list without
+    # requiring the coordinator to open each one first.
+    trip_ids = [trip.id for trip in trips]
+    return_reasons = {}
+    if trip_ids:
+        returned_reviews = (
+            db.query(TripFinanceReview)
+            .filter(
+                TripFinanceReview.trip_id.in_(trip_ids),
+                TripFinanceReview.status == FinanceReviewStatus.RETURNED,
+            )
+            .all()
+        )
+        return_reasons = {r.trip_id: r.return_reason for r in returned_reviews}
+
     return [
         {
             "id": trip.id,
@@ -189,6 +205,7 @@ def get_pending_trips(
             .filter(TripStop.trip_id == trip.id)
             .count(),
             "username": trip.driver.username,
+            "return_reason": return_reasons.get(trip.id),
         }
         for trip in trips
     ]
@@ -346,7 +363,14 @@ def approve_trip(
         )
 
     # =========================================================
-    # 4. PREVENT DUPLICATE REVIEW RECORD
+    # 4. PREVENT DUPLICATE REVIEW RECORD -- UNLESS OFFICE SENT IT BACK
+    #
+    # trip_id is unique on tpc_trip_finance_reviews, so a trip that has
+    # already been through the review cycle once still has a row here.
+    # If office sent it back for correction (status RETURNED), this is
+    # a legitimate re-approval -- reuse that same row instead of
+    # blocking. Any other existing status means the trip shouldn't be
+    # PENDING_APPROVAL at all (data inconsistency), so still block.
     # =========================================================
 
     existing_review = (
@@ -357,7 +381,7 @@ def approve_trip(
         .first()
     )
 
-    if existing_review:
+    if existing_review and existing_review.status != FinanceReviewStatus.RETURNED:
         raise HTTPException(
             status_code=400,
             detail="Trip already has a review record",
@@ -376,18 +400,24 @@ def approve_trip(
     trip.status = TripStatus.PENDING_OFFICE_REVIEW
 
     # =========================================================
-    # 7. CREATE REVIEW RECORD
+    # 7. CREATE OR REUSE REVIEW RECORD
     # =========================================================
 
-    review = TripFinanceReview(
-        trip_id=trip.id,
-        coordinator_id=current_admin.id,
-        coordinator_remarks=remarks.strip(),
-        coordinator_settlement_date=now,
-        status=FinanceReviewStatus.OFFICE_REVIEW,
-    )
-
-    db.add(review)
+    if existing_review:
+        review = existing_review
+        review.coordinator_id = current_admin.id
+        review.coordinator_remarks = remarks.strip()
+        review.coordinator_settlement_date = now
+        review.status = FinanceReviewStatus.OFFICE_REVIEW
+    else:
+        review = TripFinanceReview(
+            trip_id=trip.id,
+            coordinator_id=current_admin.id,
+            coordinator_remarks=remarks.strip(),
+            coordinator_settlement_date=now,
+            status=FinanceReviewStatus.OFFICE_REVIEW,
+        )
+        db.add(review)
 
     # =========================================================
     # 8. UPDATE EXISTING TRIP COMPLETION NOTIFICATION
@@ -520,6 +550,14 @@ def review_trip(
             status_code=404,
             detail="Trip not found.",
         )
+
+    # If office sent this trip back with a reason, surface it here so
+    # the coordinator sees why before re-reviewing/re-approving.
+    finance_review = (
+        db.query(TripFinanceReview)
+        .filter(TripFinanceReview.trip_id == trip_id)
+        .first()
+    )
 
     # =========================================================
     # 2. GET TRIP HELPERS
@@ -1007,6 +1045,23 @@ def review_trip(
         # GPS ROUTE
         # -------------------------
         "gps_logs": gps_logs_data,
+
+        # -------------------------
+        # RETURNED-FOR-CORRECTION (set only if office sent this trip
+        # back -- see return_trip_to_approval in app/api/office/trips.py)
+        # -------------------------
+        "return_reason": (
+            finance_review.return_reason
+            if finance_review
+            and finance_review.status == FinanceReviewStatus.RETURNED
+            else None
+        ),
+        "returned_at": (
+            to_ph(finance_review.returned_at)
+            if finance_review
+            and finance_review.status == FinanceReviewStatus.RETURNED
+            else None
+        ),
     }
 
 @router.get("/completed")
