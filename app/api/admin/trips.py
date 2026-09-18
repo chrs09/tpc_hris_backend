@@ -3,7 +3,14 @@
 from app.models.gps_log import GPSLog
 from app.models.trip_models import GPSActionType
 from app.schemas import trip
-from fastapi import APIRouter, Depends, HTTPException, Body
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    Body,
+    UploadFile,
+    File as FastAPIFile,
+)
 from sqlalchemy.orm import Session, joinedload
 from datetime import datetime, date, timedelta
 
@@ -18,6 +25,7 @@ from app.models.trip_helper import TripHelper
 from app.models.trip_finance_review import FinanceReviewStatus, TripFinanceReview
 from app.models.files import File
 from app.models.stores import Store
+from app.services.file_service import FileService
 from app.utils.timezone import utc_to_ph
 from app.utils.user_display import display_name as _display_name
 from app.api.driver.trips import _load_planned_store_ids, _delivered_store_ids
@@ -607,14 +615,18 @@ def review_trip(
     )
 
     invoice_photos = [
-        f.file_url for f in checkout_photos if f.document_type == "INVOICE_PHOTO"
+        {"id": f.id, "url": f.file_url}
+        for f in checkout_photos
+        if f.document_type == "INVOICE_PHOTO"
     ]
     lm_photos = [
-        f.file_url for f in checkout_photos if f.document_type == "LM_MANIFEST_PHOTO"
+        {"id": f.id, "url": f.file_url}
+        for f in checkout_photos
+        if f.document_type == "LM_MANIFEST_PHOTO"
     ]
     lm_checkout_stamped_photo = next(
         (
-            f.file_url
+            {"id": f.id, "url": f.file_url}
             for f in reversed(checkout_photos)
             if f.document_type == "LM_CHECKOUT_STAMPED_PHOTO"
         ),
@@ -795,15 +807,19 @@ def review_trip(
             photo.entity_id
             not in delivery_proof_by_stop_id
         ):
-            delivery_proof_by_stop_id[
-                photo.entity_id
-            ] = photo.file_url
+            delivery_proof_by_stop_id[photo.entity_id] = {
+                "id": photo.id,
+                "url": photo.file_url,
+            }
 
     unloading_photo_by_stop_id = {}
 
     for photo in unloading_photos:
         if photo.entity_id not in unloading_photo_by_stop_id:
-            unloading_photo_by_stop_id[photo.entity_id] = photo.file_url
+            unloading_photo_by_stop_id[photo.entity_id] = {
+                "id": photo.id,
+                "url": photo.file_url,
+            }
 
     # =========================================================
     # 11. BUILD STOPS DATA
@@ -1022,7 +1038,7 @@ def review_trip(
         "lm_checkout_stamped_photo": lm_checkout_stamped_photo,
 
         "stamped_invoice_photo": (
-            stamped_invoice_photo.file_url
+            {"id": stamped_invoice_photo.id, "url": stamped_invoice_photo.file_url}
             if stamped_invoice_photo
             else None
         ),
@@ -1063,6 +1079,60 @@ def review_trip(
             else None
         ),
     }
+
+
+# =========================
+# OVERRIDE A TRIP DOCUMENT PHOTO
+#
+# Lets a coordinator replace a specific uploaded photo (invoice, LM,
+# stamped LM, unloading, POD, stamped invoice) in place -- e.g. the
+# driver photographed the wrong document, or the shot is unreadable.
+# The File row itself is reused (same id, same document_type), only
+# file_url changes -- so every existing screen that already reads that
+# document_type keeps working with no further changes.
+# =========================
+@router.post("/files/{file_id}/replace")
+def replace_trip_file(
+    file_id: int,
+    photo: UploadFile = FastAPIFile(...),
+    db: Session = Depends(get_db),
+    current_admin=Depends(require_role_or_module(roles=["admin", "superadmin", "coordinator_admin"], module_key="trip_management.trips")),
+):
+    file_row = db.query(File).filter(File.id == file_id).first()
+
+    if not file_row:
+        raise HTTPException(status_code=404, detail="File not found.")
+
+    if file_row.entity_type == "trip":
+        trip_id = file_row.entity_id
+    elif file_row.entity_type == "trip_stop":
+        stop = db.query(TripStop).filter(TripStop.id == file_row.entity_id).first()
+        if not stop:
+            raise HTTPException(status_code=404, detail="Trip stop not found.")
+        trip_id = stop.trip_id
+    else:
+        raise HTTPException(
+            status_code=400, detail="This file cannot be overridden here."
+        )
+
+    file_service = FileService()
+    new_url = file_service.upload(
+        photo, f"trips/{trip_id}/overrides/{file_row.document_type.lower()}"
+    )
+
+    file_row.file_url = new_url
+    file_row.uploaded_by = current_admin.id
+
+    db.commit()
+    db.refresh(file_row)
+
+    return {
+        "message": "Photo replaced.",
+        "file_id": file_row.id,
+        "document_type": file_row.document_type,
+        "file_url": file_row.file_url,
+    }
+
 
 @router.get("/completed")
 def get_completed_trips(
