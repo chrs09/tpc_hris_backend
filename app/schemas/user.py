@@ -55,6 +55,10 @@ class UserResponse(BaseModel):
     email: EmailStr | None = None
     role: UserRole
     is_active: bool
+    # The linked employee's full name, when this account has one --
+    # lets pickers/lists show a real name instead of the raw username
+    # (None for accounts with no linked employee record).
+    employee_name: str | None = None
 
     class Config:
         # orm_mode = True

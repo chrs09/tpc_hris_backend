@@ -6,7 +6,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException
 from sqlalchemy.orm import Session, joinedload
 
 from app.core.database import get_db
-from app.core.dependencies import get_current_user
+from app.core.dependencies import get_current_user, require_role_or_module
 
 from app.models.employees import Employee
 from app.models.files import File
@@ -80,6 +80,7 @@ def get_pending_office_review_trips(
         .filter(
             Trip.status == TripStatus.PENDING_OFFICE_REVIEW,
             TripFinanceReview.status == FinanceReviewStatus.OFFICE_REVIEW,
+            Trip.is_archived.is_(False),
         )
         .order_by(
             TripFinanceReview.coordinator_settlement_date.desc()
@@ -661,4 +662,44 @@ def forward_trip_to_finance(
             finance_review.office_reviewed_at
         ),
     }
+
+
+# =========================================================
+# ARCHIVE (soft delete)
+#
+# Lets office staff clean up test/junk trips out of the pending review
+# queue without deleting the row (same is_archived/archived_at/
+# archived_by_user_id columns the Admin Trips archive endpoint uses --
+# see app/api/admin/trips.py's archive_trip). Unlike that endpoint,
+# this one is not restricted to PENDING_APPROVAL/COMPLETED trips --
+# trips land here in PENDING_OFFICE_REVIEW, and a test trip run all the
+# way through the driver flow needs to be archivable regardless of its
+# current status.
+# =========================================================
+@router.post("/{trip_id}/archive")
+def archive_office_review_trip(
+    trip_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(
+        require_role_or_module(
+            roles=["admin", "superadmin", "coordinator_admin", "office_admin"],
+            module_key="trip_management.office_trip_review",
+        )
+    ),
+):
+    trip = db.query(Trip).filter(Trip.id == trip_id).first()
+
+    if not trip:
+        raise HTTPException(status_code=404, detail="Trip not found.")
+
+    if trip.is_archived:
+        raise HTTPException(status_code=400, detail="Trip is already archived.")
+
+    trip.is_archived = True
+    trip.archived_at = datetime.utcnow()
+    trip.archived_by_user_id = current_user.id
+
+    db.commit()
+
+    return {"message": "Trip archived.", "trip_id": trip.id}
 

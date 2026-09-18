@@ -67,8 +67,22 @@ def get_users(
     db: Session = Depends(get_db),
     current_user=Depends(_require_users_access),
 ):
-    users = db.query(User).all()
-    return users
+    users = db.query(User).options(joinedload(User.employee)).all()
+    return [
+        {
+            "id": u.id,
+            "username": u.username,
+            "email": u.email,
+            "role": u.role,
+            "is_active": u.is_active,
+            "employee_name": (
+                f"{u.employee.first_name} {u.employee.last_name}"
+                if u.employee
+                else None
+            ),
+        }
+        for u in users
+    ]
 
 
 @router.get("/assignable", response_model=List[UserAssignableResponse])
