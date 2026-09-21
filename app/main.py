@@ -26,6 +26,7 @@ from app.api import (
     overtime_request,
     department_head,
     employee_module_access,
+    mobile_page_access,
     cash_advance_request,
     cash_advance_settings,
 )
@@ -243,6 +244,7 @@ app.include_router(leave.router, prefix="/api")
 app.include_router(overtime_request.router, prefix="/api")
 app.include_router(department_head.router, prefix="/api")
 app.include_router(employee_module_access.router, prefix="/api")
+app.include_router(mobile_page_access.router, prefix="/api")
 app.include_router(cash_advance_request.router, prefix="/api")
 app.include_router(cash_advance_settings.router, prefix="/api")
 app.include_router(overtime_approval.router, prefix="/api")

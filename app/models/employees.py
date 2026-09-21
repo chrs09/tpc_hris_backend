@@ -36,6 +36,14 @@ class Employee(Base):
     # app/api/employee_module_access.py.
     has_custom_module_access = Column(Boolean, nullable=False, default=False)
 
+    # Same idea as has_custom_module_access above, but for the separate
+    # mobile-app page grants (see app/models/mobile_page_access.py) --
+    # kept as its own independent flag/table rather than reusing the web
+    # module system, so granting/restricting web sidebar access never
+    # accidentally changes what this employee sees in the mobile app,
+    # or vice versa.
+    has_custom_mobile_access = Column(Boolean, nullable=False, default=False)
+
     daily_rate = Column(Numeric(10, 2), nullable=True)
     monthly_basic = Column(Numeric(10, 2), nullable=True)
     monthly_allow = Column(Numeric(10, 2), nullable=True)
