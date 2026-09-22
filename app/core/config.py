@@ -20,6 +20,18 @@ class Settings:
     )
 
     # ===============================
+    # EXPO / EAS (tytan_mobile build sync)
+    # ===============================
+    # Personal/robot access token from expo.dev -> account settings ->
+    # Access Tokens. Only needed for the "Sync from EAS" button on the
+    # Mobile App Version settings page -- everything else in this app
+    # works without it.
+    EXPO_ACCESS_TOKEN = os.getenv("EXPO_ACCESS_TOKEN")
+    EXPO_PROJECT_ID = os.getenv(
+        "EXPO_PROJECT_ID", "3fe48054-860c-47ff-a5ec-971d404a8ee0"
+    )
+
+    # ===============================
     # FILE STORAGE
     # ===============================
     FILE_STORAGE = os.getenv("FILE_STORAGE", "local")
