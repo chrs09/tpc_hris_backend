@@ -19,6 +19,7 @@ from app.services.user_service import (
     create_user_service,
     bulk_create_users_service,
     update_user_service,
+    reset_user_password_service,
     get_user_revisions_service,
 )
 
@@ -144,6 +145,26 @@ def update_user(
         "message": "User updated successfully",
         "id": user.id,
         "role": user.role,
+    }
+
+
+@router.post("/{user_id}/reset-password")
+def reset_user_password(
+    user_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(_require_users_access),
+):
+    """Resets a user's password to the lastname+birthday (MMDDYYYY)
+    convention and returns it once, same as account creation -- nothing
+    is emailed or stored in plaintext anywhere."""
+    user, temp_password = reset_user_password_service(
+        user_id, db, changed_by_user_id=current_user.id
+    )
+
+    return {
+        "message": "Password reset successfully",
+        "username": user.username,
+        "temporary_password": temp_password,
     }
 
 

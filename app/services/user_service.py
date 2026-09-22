@@ -246,6 +246,72 @@ def update_user_service(
     return user
 
 
+def reset_user_password_service(
+    user_id: int,
+    db: Session,
+    changed_by_user_id: int = None,
+):
+    """Resets a user's password to the same lastname+birthday (MMDDYYYY)
+    convention used for an applicant-to-employee conversion (see
+    app/api/admin/applicants.py), rather than a random string -- easy for
+    an admin to read off screen and relay to the employee. Requires the
+    linked employee to have a birthday on file (Employee Profile ->
+    Personal Details); there's no other source for this convention's
+    date component. Never stores the plaintext password anywhere except
+    the one-time return value, same as account creation."""
+
+    user = db.query(User).filter(User.id == user_id).first()
+
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    employee = user.employee
+
+    if not employee or not employee.last_name or not employee.last_name.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="This account has no linked employee with a last name on file.",
+        )
+
+    birthday = (
+        employee.personal_details.birthday if employee.personal_details else None
+    )
+
+    if not birthday:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "This employee has no birthday on file -- add it under "
+                "Personal Details before resetting the password this way."
+            ),
+        )
+
+    temporary_password = employee.last_name.lower().strip() + birthday.strftime(
+        "%m%d%Y"
+    )
+
+    user.hashed_password = hash_password(temporary_password)
+    user.must_change_password = False
+
+    db.add(
+        UserRevision(
+            user_id=user.id,
+            field_changed="password",
+            # The actual password is never written to the audit trail --
+            # only that a reset happened and who did it.
+            old_value=None,
+            new_value="reset",
+            reason=None,
+            changed_by_user_id=changed_by_user_id,
+        )
+    )
+
+    db.commit()
+    db.refresh(user)
+
+    return user, temporary_password
+
+
 def get_user_revisions_service(user_id: int, db: Session):
     return (
         db.query(UserRevision)
