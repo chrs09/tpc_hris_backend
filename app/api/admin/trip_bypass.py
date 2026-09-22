@@ -277,6 +277,25 @@ def bypass_check_in(
             status_code=400, detail="This trip already has an open (non-delivered) stop."
         )
 
+    # Mirror the real driver check-in (app/api/driver/trips.py's check_in):
+    # once a planned store has been delivered, it's no longer a valid
+    # check-in target. Without this, a stale bypass UI (loaded before the
+    # driver's own app already delivered to this store) could create a
+    # second TripStop for a store that's already been visited.
+    planned_ids = _load_planned_store_ids(trip)
+    if planned_ids:
+        delivered_ids = _delivered_store_ids(db, trip.id)
+        if store_id in delivered_ids:
+            raise HTTPException(
+                status_code=400,
+                detail="The driver has already delivered to this store on this trip.",
+            )
+        if store_id not in planned_ids:
+            raise HTTPException(
+                status_code=400,
+                detail="This store is not one of the trip's planned destinations.",
+            )
+
     store = db.query(Store).filter(Store.id == store_id).first()
     if not store:
         raise HTTPException(status_code=400, detail="Store not found.")
