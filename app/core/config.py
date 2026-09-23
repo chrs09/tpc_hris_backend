@@ -1,7 +1,20 @@
+from pathlib import Path
+
 from dotenv import load_dotenv
 import os
 
 load_dotenv()
+
+# Anchors relative paths (UPLOAD_FOLDER's default) to this project's own
+# location on disk, rather than to whatever directory the process happens
+# to be launched from. Two uvicorn processes started from different
+# working directories (e.g. one from this project's own folder, another
+# from a different root a dev server happens to be launched from) used to
+# each resolve the "uploads" default to a different physical folder --
+# same database, two disjoint sets of files on disk, so whichever process
+# actually handled a given upload determined whether it could later be
+# found again by whichever process handled the view request.
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
 class Settings:
@@ -36,12 +49,13 @@ class Settings:
     # ===============================
     FILE_STORAGE = os.getenv("FILE_STORAGE", "local")
 
-    # Keep uploads inside the backend project.
-    # This works on both local development
-    # and the office server.
+    # Absolute by default (see PROJECT_ROOT above) so every process finds
+    # the same physical folder no matter what directory it was launched
+    # from. Still overridable via .env for a deployment that genuinely
+    # wants a different location (e.g. a mounted volume).
     UPLOAD_FOLDER = os.getenv(
         "UPLOAD_FOLDER",
-        "uploads"
+        str(PROJECT_ROOT / "uploads"),
     )
 
     # Azure Blob Storage
