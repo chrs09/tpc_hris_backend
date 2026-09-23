@@ -80,18 +80,9 @@ def set_latest_version(
     return _serialize(row)
 
 
-@router.post("/{platform}/sync-from-eas")
-def sync_from_eas(
-    platform: str,
-    profile: str = "preview",
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_superadmin),
-):
-    """Pulls the most recent finished EAS build for this platform+profile
-    (e.g. android/preview) and updates latest_version/apk_url from it --
-    an alternative to typing them in by hand after every `eas build`.
-    Deliberately leaves min_supported_version and release_notes alone;
-    those stay a manual decision, not something EAS knows about."""
+def _fetch_eas_builds(platform: str, profile: str) -> list[dict]:
+    """Shared EAS GraphQL fetch used by both the sync and history
+    endpoints below. Raises HTTPException on any failure."""
     if not settings.EXPO_ACCESS_TOKEN:
         raise HTTPException(
             status_code=400,
@@ -126,6 +117,7 @@ def sync_from_eas(
                 appVersion
                 buildProfile
                 createdAt
+                completedAt
                 artifacts {
                   buildUrl
                 }
@@ -173,15 +165,54 @@ def sync_from_eas(
     def matches(build: dict) -> bool:
         return (
             build.get("platform") == expo_platform
-            and build.get("status") == "FINISHED"
             and build.get("buildProfile") == profile
         )
 
-    candidates = sorted(
+    return sorted(
         (b for b in builds if matches(b)),
         key=lambda b: b.get("createdAt", ""),
         reverse=True,
     )
+
+
+@router.get("/{platform}/eas-history")
+def get_eas_build_history(
+    platform: str,
+    profile: str = "preview",
+    current_user: User = Depends(require_superadmin),
+):
+    """Returns recent EAS builds for this platform+profile, newest
+    first, so the settings page can show a version history instead of
+    just the single currently-published version."""
+    builds = _fetch_eas_builds(platform, profile)
+
+    return [
+        {
+            "id": b.get("id"),
+            "status": b.get("status"),
+            "app_version": b.get("appVersion"),
+            "created_at": b.get("createdAt"),
+            "completed_at": b.get("completedAt"),
+            "apk_url": (b.get("artifacts") or {}).get("buildUrl"),
+        }
+        for b in builds[:15]
+    ]
+
+
+@router.post("/{platform}/sync-from-eas")
+def sync_from_eas(
+    platform: str,
+    profile: str = "preview",
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_superadmin),
+):
+    """Pulls the most recent finished EAS build for this platform+profile
+    (e.g. android/preview) and updates latest_version/apk_url from it --
+    an alternative to typing them in by hand after every `eas build`.
+    Deliberately leaves min_supported_version and release_notes alone;
+    those stay a manual decision, not something EAS knows about."""
+    builds = _fetch_eas_builds(platform, profile)
+    candidates = [b for b in builds if b.get("status") == "FINISHED"]
 
     if not candidates:
         raise HTTPException(
