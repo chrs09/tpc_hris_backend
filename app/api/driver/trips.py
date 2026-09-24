@@ -823,6 +823,7 @@ def dispatch_trip(
             shipment_numbers=json.dumps(shipment_numbers),
             status=TripStatus.ASSIGNED,
             current_step="ASSIGNED",
+            dispatched_by_user_id=current_user.id,
         )
         db.add(new_trip)
         db.flush()

@@ -272,7 +272,10 @@ def get_assigned_trips(
 ):
     trips = (
         db.query(Trip)
-        .options(joinedload(Trip.driver).joinedload(User.employee))
+        .options(
+            joinedload(Trip.driver).joinedload(User.employee),
+            joinedload(Trip.dispatched_by).joinedload(User.employee),
+        )
         .filter(Trip.status == TripStatus.ASSIGNED)
         .order_by(Trip.created_at.desc())
         .all()
@@ -298,6 +301,11 @@ def get_assigned_trips(
                 "trip_code": trip.trip_code,
                 "ticket_no": trip.ticket_no,
                 "driver_name": _display_name(trip.driver),
+                "dispatched_by_name": (
+                    _display_name(trip.dispatched_by)
+                    if trip.dispatched_by
+                    else "-"
+                ),
                 "vehicle_unit": (
                     trip.vehicle_unit.unit_code if trip.vehicle_unit else "-"
                 ),

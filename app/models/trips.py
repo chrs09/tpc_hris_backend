@@ -11,7 +11,6 @@ from sqlalchemy import (
     String,
     Boolean,
     Text,
-    func,
 )
 from sqlalchemy.orm import relationship
 from app.core.database import Base
@@ -118,7 +117,22 @@ class Trip(Base):
     start_time = Column(DateTime, default=datetime.utcnow)
     end_time = Column(DateTime, nullable=True)
 
-    created_at = Column(DateTime, server_default=func.now(), nullable=False)
+    # Was `server_default=func.now()` -- that runs MySQL's own NOW(),
+    # which reflects the DB server's local clock (PH time on this
+    # deployment), not UTC. Every read of created_at then went through
+    # utc_to_ph(), which treats naive datetimes as UTC and adds another
+    # +8 on top -- double-offsetting every dispatch timestamp by 8
+    # hours. Switched to the same Python-side datetime.utcnow() default
+    # every other timestamp column on this model (and across the rest
+    # of the app) already uses, so it's actually UTC going in.
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    # The coordinator/coordinator_admin who dispatched this trip --
+    # nullable since trips created before this column existed have no
+    # recorded dispatcher.
+    dispatched_by_user_id = Column(
+        Integer, ForeignKey("tpc_users.id"), nullable=True
+    )
 
     # True when the driver was allowed to start this trip despite not
     # being within any hub's GPS radius (previously a hard block) -- lets
@@ -137,7 +151,9 @@ class Trip(Base):
     trip_code = Column(String(20), nullable=True)
     trip_category = Column(String(50), nullable=True)
 
-    driver = relationship("User", back_populates="trips")
+    driver = relationship("User", foreign_keys=[driver_id], back_populates="trips")
+
+    dispatched_by = relationship("User", foreign_keys=[dispatched_by_user_id])
 
     stops = relationship(
         "TripStop", back_populates="trip", cascade="all, delete-orphan"
