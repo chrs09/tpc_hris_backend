@@ -118,6 +118,8 @@ def _fetch_eas_builds(platform: str, profile: str) -> list[dict]:
                 buildProfile
                 createdAt
                 completedAt
+                gitCommitHash
+                gitCommitMessage
                 artifacts {
                   buildUrl
                 }
@@ -194,6 +196,8 @@ def get_eas_build_history(
             "created_at": b.get("createdAt"),
             "completed_at": b.get("completedAt"),
             "apk_url": (b.get("artifacts") or {}).get("buildUrl"),
+            "git_commit_hash": b.get("gitCommitHash"),
+            "git_commit_message": b.get("gitCommitMessage"),
         }
         for b in builds[:15]
     ]
