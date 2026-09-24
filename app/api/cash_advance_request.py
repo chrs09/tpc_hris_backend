@@ -20,6 +20,7 @@ from app.schemas.cash_advance_request import (
     CashAdvanceRequestCreate,
     CashAdvanceReviewAction,
     RecordDeductionCreate,
+    OpeningBalanceCreate,
 )
 
 router = APIRouter(prefix="/cash-advance-requests", tags=["Cash Advance Requests"])
@@ -120,6 +121,35 @@ def file_cash_advance_request(
                 f"{float(max_loan_amount):.2f}."
             ),
         )
+
+    max_active_requests = terms.max_active_requests if terms else None
+    if max_active_requests is not None:
+        active_requests = (
+            db.query(CashAdvanceRequest)
+            .filter(
+                CashAdvanceRequest.user_id == current_user.id,
+                CashAdvanceRequest.status.in_(["pending", "approved"]),
+            )
+            .all()
+        )
+        # "approved" only counts while still outstanding -- a fully paid
+        # off approved request shouldn't keep counting against the cap.
+        still_active = [
+            r
+            for r in active_requests
+            if r.status == "pending"
+            or float(r.amount) - _total_deducted(r.id, db) > 0
+        ]
+        if len(still_active) >= max_active_requests:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"You already have {len(still_active)} active cash "
+                    f"advance request(s), which is the maximum of "
+                    f"{max_active_requests} allowed at once. Settle or "
+                    "cancel an existing one before filing another."
+                ),
+            )
 
     option = (
         db.query(CashAdvanceDeductionOption)
@@ -463,6 +493,112 @@ def record_deduction(
     db.add(log)
     db.commit()
 
+    db.refresh(request)
+    return _serialize(request, db)
+
+
+@router.get("/{request_id}/transactions")
+def get_deduction_transactions(
+    request_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(
+        require_role_or_module(roles=[], module_key="finance.cash_advance")
+    ),
+):
+    """The full ledger of deductions recorded against one request, newest
+    first -- what the Outstanding Balances page's "Transaction History"
+    view shows. Separate from `record_deduction` above (which still adds
+    a new entry); this only reads."""
+    request = (
+        db.query(CashAdvanceRequest)
+        .filter(CashAdvanceRequest.id == request_id)
+        .first()
+    )
+    if not request:
+        raise HTTPException(status_code=404, detail="Cash advance request not found")
+
+    logs = (
+        db.query(CashAdvanceDeductionLog)
+        .options(joinedload(CashAdvanceDeductionLog.recorded_by))
+        .filter(CashAdvanceDeductionLog.cash_advance_request_id == request_id)
+        .order_by(CashAdvanceDeductionLog.recorded_at.desc())
+        .all()
+    )
+    return [
+        {
+            "id": log.id,
+            "amount": float(log.amount),
+            "note": log.note,
+            "recorded_by_name": (
+                log.recorded_by.username if log.recorded_by else None
+            ),
+            "recorded_at": log.recorded_at,
+        }
+        for log in logs
+    ]
+
+
+# =========================
+# OPENING BALANCE (superadmin/finance) -- pre-existing balance carried
+# over from before this system was used
+# =========================
+
+
+@router.post("/opening-balance")
+def create_opening_balance(
+    payload: OpeningBalanceCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(
+        require_role_or_module(roles=[], module_key="finance.cash_advance")
+    ),
+):
+    """Records a pre-existing cash advance balance for an employee (e.g.
+    carried over from a manual/paper ledger before this system existed)
+    as an already-approved request, so it shows up in Outstanding
+    Balances and can have deductions recorded against it exactly like
+    any other request -- without inventing a separate balance concept.
+    Skips the normal driver-filing flow entirely (no terms
+    acknowledgement, no deduction-option/pay-period math, no approval
+    routing) since this isn't a new request being filed, it's a
+    superadmin recording history."""
+    if payload.amount <= 0:
+        raise HTTPException(status_code=400, detail="Amount must be greater than 0.")
+    if (
+        payload.deduction_per_pay_amount is not None
+        and payload.deduction_per_pay_amount <= 0
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Deduction per pay period must be greater than 0.",
+        )
+
+    target_user = db.query(User).filter(User.id == payload.user_id).first()
+    if not target_user:
+        raise HTTPException(status_code=404, detail="User not found.")
+
+    request = CashAdvanceRequest(
+        user_id=target_user.id,
+        employee_id=target_user.employee_id,
+        requested_by_user_id=current_user.id,
+        amount=payload.amount,
+        deduction_option_id=None,
+        # Deducted via Record Deduction over time, same as any other
+        # approved request -- falls back to the full amount (a single
+        # lump-sum "period") if no per-pay amount was given.
+        deduction_per_pay_amount=(
+            payload.deduction_per_pay_amount
+            if payload.deduction_per_pay_amount is not None
+            else payload.amount
+        ),
+        reason=payload.note.strip() if payload.note else "Opening balance",
+        terms_accepted=False,
+        status="approved",
+        approved_by_user_id=current_user.id,
+        approved_at=datetime.utcnow(),
+    )
+
+    db.add(request)
+    db.commit()
     db.refresh(request)
     return _serialize(request, db)
 

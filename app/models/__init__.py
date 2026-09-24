@@ -73,6 +73,7 @@ from .cash_advance_deduction_option import (
     CashAdvanceDeductionOption as CashAdvanceDeductionOption,
 )
 from .cash_advance_terms import CashAdvanceTerms as CashAdvanceTerms
+from .cash_advance_purpose import CashAdvancePurpose as CashAdvancePurpose
 from .mobile_app_version import MobileAppVersion as MobileAppVersion
 from .cash_advance_request import CashAdvanceRequest as CashAdvanceRequest
 from .cash_advance_deduction_log import (

@@ -19,3 +19,16 @@ class RecordDeductionCreate(BaseModel):
     # Defaults to the request's deduction_per_pay_amount when omitted.
     amount: float | None = None
     note: str | None = None
+
+
+class OpeningBalanceCreate(BaseModel):
+    # A pre-existing balance carried over from before this system was
+    # used (e.g. a manual/paper ledger) -- created directly as an
+    # already-approved request by a superadmin, not filed by the
+    # employee.
+    user_id: int
+    amount: float
+    # How much to deduct per pay period going forward. Defaults to the
+    # full amount (a single lump-sum "period") if left blank.
+    deduction_per_pay_amount: float | None = None
+    note: str | None = None

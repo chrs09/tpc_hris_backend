@@ -22,7 +22,12 @@ class CashAdvanceTerms(Base):
 
     `max_loan_amount` is a separate, simpler cap: the largest total
     amount a single cash advance request may ask for. Null means no
-    cap."""
+    cap.
+
+    `max_active_requests` caps how many requests a single employee may
+    have in "pending" or "approved-but-not-fully-paid" state at once --
+    prevents someone from stacking multiple simultaneous advances. Null
+    means no cap."""
 
     __tablename__ = "tpc_cash_advance_terms"
 
@@ -32,6 +37,7 @@ class CashAdvanceTerms(Base):
 
     max_pay_periods = Column(Integer, nullable=False, default=6)
     max_loan_amount = Column(Numeric(10, 2), nullable=True)
+    max_active_requests = Column(Integer, nullable=True)
 
     updated_by_user_id = Column(Integer, ForeignKey("tpc_users.id"), nullable=True)
     updated_at = Column(

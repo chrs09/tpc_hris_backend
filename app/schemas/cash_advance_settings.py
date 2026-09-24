@@ -19,3 +19,16 @@ class TermsUpdate(BaseModel):
     max_pay_periods: int = 6
     # Largest total amount a single request may ask for. None = no cap.
     max_loan_amount: float | None = None
+    # Max simultaneous pending/unpaid requests per employee. None = no cap.
+    max_active_requests: int | None = None
+
+
+class PurposeCreate(BaseModel):
+    label: str
+    sort_order: int = 0
+
+
+class PurposeUpdate(BaseModel):
+    label: str | None = None
+    is_active: bool | None = None
+    sort_order: int | None = None
