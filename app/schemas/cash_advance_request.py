@@ -13,6 +13,16 @@ class CashAdvanceRequestCreate(BaseModel):
 
 class CashAdvanceReviewAction(BaseModel):
     remarks: str | None = None
+    # Approval only -- lets the approver grant less than what was
+    # requested (e.g. requested 5000, approve 3000). Ignored on reject.
+    # Defaults to the full requested amount when omitted.
+    approved_amount: float | None = None
+
+
+class ReleaseInfoUpdate(BaseModel):
+    # Proof the approved funds were actually handed over -- a GCash
+    # reference number, check number, payroll-release note, etc.
+    release_reference: str
 
 
 class RecordDeductionCreate(BaseModel):

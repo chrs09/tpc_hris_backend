@@ -21,6 +21,7 @@ from app.schemas.cash_advance_request import (
     CashAdvanceReviewAction,
     RecordDeductionCreate,
     OpeningBalanceCreate,
+    ReleaseInfoUpdate,
 )
 
 router = APIRouter(prefix="/cash-advance-requests", tags=["Cash Advance Requests"])
@@ -41,8 +42,16 @@ def _serialize(req: CashAdvanceRequest, db: Session) -> dict:
     approver = req.requested_by
 
     amount = float(req.amount)
+    approved_amount = (
+        float(req.approved_amount) if req.approved_amount is not None else None
+    )
+    # Balance math runs off the APPROVED amount once one exists (the
+    # approver may have granted less than requested) -- falls back to
+    # the requested amount before approval, when approved_amount is
+    # still null.
+    payable_amount = approved_amount if approved_amount is not None else amount
     deducted = _total_deducted(req.id, db)
-    remaining = round(amount - deducted, 2)
+    remaining = round(payable_amount - deducted, 2)
     per_pay = float(req.deduction_per_pay_amount)
 
     return {
@@ -54,9 +63,12 @@ def _serialize(req: CashAdvanceRequest, db: Session) -> dict:
             else (requester.username if requester else None)
         ),
         "amount": amount,
+        "approved_amount": approved_amount,
         "deduction_option_id": req.deduction_option_id,
         "deduction_per_pay_amount": per_pay,
-        "estimated_pay_periods": ceil(amount / per_pay) if per_pay > 0 else None,
+        "estimated_pay_periods": (
+            ceil(payable_amount / per_pay) if per_pay > 0 else None
+        ),
         "total_deducted": deducted,
         "remaining_balance": max(remaining, 0),
         "is_fully_paid": remaining <= 0,
@@ -69,6 +81,11 @@ def _serialize(req: CashAdvanceRequest, db: Session) -> dict:
         "requested_by_name": approver.username if approver else None,
         "approved_by_user_id": req.approved_by_user_id,
         "approved_at": req.approved_at,
+        "release_reference": req.release_reference,
+        "released_at": req.released_at,
+        "released_by_name": (
+            req.released_by.username if req.released_by else None
+        ),
         "created_at": req.created_at,
     }
 
@@ -134,11 +151,17 @@ def file_cash_advance_request(
         )
         # "approved" only counts while still outstanding -- a fully paid
         # off approved request shouldn't keep counting against the cap.
+        # Uses approved_amount (what the approver actually granted) once
+        # it's set, rather than the original requested amount.
         still_active = [
             r
             for r in active_requests
             if r.status == "pending"
-            or float(r.amount) - _total_deducted(r.id, db) > 0
+            or (
+                float(r.approved_amount if r.approved_amount is not None else r.amount)
+                - _total_deducted(r.id, db)
+                > 0
+            )
         ]
         if len(still_active) >= max_active_requests:
             raise HTTPException(
@@ -370,6 +393,25 @@ def approve_cash_advance_request(
             status_code=403, detail="You are not authorized to approve this request."
         )
 
+    if payload.approved_amount is not None:
+        if payload.approved_amount <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Approved amount must be greater than 0.",
+            )
+        if payload.approved_amount > float(request.amount):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Approved amount can't exceed the requested amount of "
+                    f"{float(request.amount):.2f}."
+                ),
+            )
+        request.approved_amount = payload.approved_amount
+    else:
+        # Not overridden -- approve the full requested amount.
+        request.approved_amount = request.amount
+
     request.status = "approved"
     request.remarks = payload.remarks
     request.approved_by_user_id = current_user.id
@@ -465,7 +507,12 @@ def record_deduction(
             detail="Deductions can only be recorded for approved requests.",
         )
 
-    remaining = float(request.amount) - _total_deducted(request.id, db)
+    payable_amount = (
+        float(request.approved_amount)
+        if request.approved_amount is not None
+        else float(request.amount)
+    )
+    remaining = payable_amount - _total_deducted(request.id, db)
     if remaining <= 0:
         raise HTTPException(
             status_code=400, detail="This cash advance is already fully paid."
@@ -593,11 +640,52 @@ def create_opening_balance(
         reason=payload.note.strip() if payload.note else "Opening balance",
         terms_accepted=False,
         status="approved",
+        approved_amount=payload.amount,
         approved_by_user_id=current_user.id,
         approved_at=datetime.utcnow(),
     )
 
     db.add(request)
+    db.commit()
+    db.refresh(request)
+    return _serialize(request, db)
+
+
+@router.post("/{request_id}/release")
+def set_release_info(
+    request_id: int,
+    payload: ReleaseInfoUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(
+        require_role_or_module(roles=[], module_key="finance.cash_advance")
+    ),
+):
+    """Records proof the approved funds were actually handed over to the
+    employee (a GCash/bank reference, check number, etc.) -- separate
+    from approval itself, since release can happen at a different time.
+    Can be called again to correct/update the reference."""
+    if not payload.release_reference.strip():
+        raise HTTPException(
+            status_code=400, detail="Reference is required."
+        )
+
+    request = (
+        db.query(CashAdvanceRequest)
+        .filter(CashAdvanceRequest.id == request_id)
+        .first()
+    )
+    if not request:
+        raise HTTPException(status_code=404, detail="Cash advance request not found")
+    if request.status != "approved":
+        raise HTTPException(
+            status_code=400,
+            detail="Release info can only be recorded for approved requests.",
+        )
+
+    request.release_reference = payload.release_reference.strip()
+    request.released_at = datetime.utcnow()
+    request.released_by_user_id = current_user.id
+
     db.commit()
     db.refresh(request)
     return _serialize(request, db)
