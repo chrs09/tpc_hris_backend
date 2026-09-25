@@ -29,7 +29,18 @@ from app.models.stores import Store
 from app.services.file_service import FileService
 from app.utils.timezone import utc_to_ph
 from app.utils.user_display import display_name as _display_name
-from app.api.driver.trips import _load_planned_store_ids, _delivered_store_ids
+from app.api.driver.trips import (
+    _load_planned_store_ids,
+    _delivered_store_ids,
+    _load_shipment_numbers,
+    _helper_departments_for,
+    MAX_PLANNED_STOPS,
+    MAX_SHIPMENT_NUMBERS,
+)
+from app.models.vehicle_unit import VehicleUnit
+from app.models.TripRate import TripRateProfile
+from pydantic import BaseModel
+import json
 
 router = APIRouter(prefix="/admin/trips", tags=["Admin Trips"])
 
@@ -276,6 +287,7 @@ def get_assigned_trips(
         .options(
             joinedload(Trip.driver).joinedload(User.employee),
             joinedload(Trip.dispatched_by).joinedload(User.employee),
+            joinedload(Trip.trip_helpers).joinedload(TripHelper.helper),
         )
         .filter(Trip.status == TripStatus.ASSIGNED)
         .order_by(Trip.created_at.desc())
@@ -285,16 +297,20 @@ def get_assigned_trips(
     result = []
     for trip in trips:
         planned_ids = _load_planned_store_ids(trip)
-        destination_names = (
-            [
-                store.name
+        stores_by_id = (
+            {
+                store.id: store
                 for store in db.query(Store)
                 .filter(Store.id.in_(planned_ids))
                 .all()
-            ]
+            }
             if planned_ids
-            else []
+            else {}
         )
+        # In the coordinator's chosen visiting order.
+        destination_names = [
+            stores_by_id[sid].name for sid in planned_ids if sid in stores_by_id
+        ]
 
         result.append(
             {
@@ -321,6 +337,22 @@ def get_assigned_trips(
                 "destinations": destination_names,
                 "current_step": trip.current_step,
                 "current_step_label": _current_step_label(trip.current_step),
+                # Once the driver has begun Checkout, photos are attached,
+                # so the dispatch details are frozen.
+                "editable": trip.current_step == "ASSIGNED",
+                "driver_id": trip.driver_id,
+                "vehicle_unit_id": trip.vehicle_unit_id,
+                "origin_store_id": trip.origin_store_id,
+                "destination_store_ids": planned_ids,
+                "shipment_numbers": _load_shipment_numbers(trip),
+                "helpers": [
+                    {
+                        "id": th.helper.id,
+                        "name": f"{th.helper.first_name} {th.helper.last_name}",
+                    }
+                    for th in trip.trip_helpers
+                    if th.helper
+                ],
                 "dispatched_at": (
                     utc_to_ph(trip.created_at).strftime("%Y-%m-%d %I:%M:%S %p")
                     if trip.created_at
@@ -410,6 +442,242 @@ def cancel_unstarted_trip(
     db.commit()
 
     return {"message": "Trip cancelled.", "trip_id": trip.id}
+
+
+# =========================
+# EDIT AN UNSTARTED TRIP'S DISPATCH DETAILS
+# =========================
+class AssignedTripUpdate(BaseModel):
+    driver_id: int
+    vehicle_unit_id: int
+    origin_store_id: int
+    destination_store_ids: list[int]
+    shipment_numbers: list[str]
+    helper_ids: list[int] = []
+    reason: str | None = None
+
+
+@router.put("/{trip_id}/assignment")
+def update_assigned_trip(
+    trip_id: int,
+    payload: AssignedTripUpdate,
+    db: Session = Depends(get_db),
+    current_admin=Depends(
+        require_role_or_module(
+            roles=["admin", "superadmin", "coordinator_admin", "coordinator"],
+            module_key="trip_management.trip_dashboard",
+        )
+    ),
+):
+    """Corrects a dispatch the driver hasn't started working on yet. Same
+    rules as dispatching (see dispatch_trip), except the trip's own
+    driver, vehicle, helpers and shipment numbers don't count as "already
+    taken" against itself. Vehicle/helper availability is swapped over for
+    whatever changed."""
+    trip = (
+        db.query(Trip)
+        .options(
+            joinedload(Trip.trip_helpers).joinedload(TripHelper.helper),
+            joinedload(Trip.vehicle_unit),
+        )
+        .filter(Trip.id == trip_id)
+        .with_for_update()
+        .first()
+    )
+    if not trip:
+        raise HTTPException(status_code=404, detail="Trip not found.")
+    if trip.status != TripStatus.ASSIGNED or trip.current_step != "ASSIGNED":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "This trip can no longer be edited -- the driver has "
+                "already started it. Use Trip Bypass instead."
+            ),
+        )
+
+    # ---- shipment numbers
+    shipment_numbers = [n.strip() for n in payload.shipment_numbers if n.strip()]
+    if not shipment_numbers:
+        raise HTTPException(status_code=400, detail="At least one shipment number is required.")
+    if len(shipment_numbers) != len(set(shipment_numbers)):
+        raise HTTPException(status_code=400, detail="Duplicate shipment numbers entered.")
+    if len(shipment_numbers) > MAX_SHIPMENT_NUMBERS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Maximum of {MAX_SHIPMENT_NUMBERS} shipment numbers allowed.",
+        )
+
+    used = set()
+    for other in db.query(Trip.id, Trip.ticket_no, Trip.shipment_numbers).all():
+        if other.id == trip.id or CANCELLED_TICKET_MARKER in (other.ticket_no or ""):
+            continue
+        if other.shipment_numbers:
+            try:
+                used.update(json.loads(other.shipment_numbers))
+            except Exception:
+                pass
+        elif other.ticket_no:
+            used.add(other.ticket_no)
+    duplicate = next((n for n in shipment_numbers if n in used), None)
+    if duplicate:
+        raise HTTPException(
+            status_code=400, detail=f'Shipment number "{duplicate}" already exists.'
+        )
+
+    # ---- destinations
+    dest_ids = payload.destination_store_ids
+    if not dest_ids:
+        raise HTTPException(status_code=400, detail="Select at least one destination store.")
+    if len(dest_ids) != len(set(dest_ids)):
+        raise HTTPException(status_code=400, detail="Duplicate stores selected.")
+    if len(dest_ids) > MAX_PLANNED_STOPS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Maximum of {MAX_PLANNED_STOPS} destination stores allowed.",
+        )
+    stores_by_id = {
+        st.id: st for st in db.query(Store).filter(Store.id.in_(dest_ids)).all()
+    }
+    for sid in dest_ids:
+        if sid not in stores_by_id:
+            raise HTTPException(status_code=400, detail=f"Store {sid} not found.")
+    primary_store = stores_by_id[dest_ids[0]]
+    if not primary_store.trip_rate_profile_id:
+        raise HTTPException(
+            status_code=400,
+            detail=f'"{primary_store.name}" has no trip rate profile configured.',
+        )
+    rate_profile = (
+        db.query(TripRateProfile)
+        .filter(
+            TripRateProfile.id == primary_store.trip_rate_profile_id,
+            TripRateProfile.is_active.is_(True),
+        )
+        .first()
+    )
+    if not rate_profile:
+        raise HTTPException(
+            status_code=400,
+            detail=f'"{primary_store.name}" trip rate profile is inactive.',
+        )
+
+    # ---- driver
+    driver = (
+        db.query(User)
+        .options(joinedload(User.employee))
+        .filter(User.id == payload.driver_id, User.role == UserRole.DRIVER)
+        .first()
+    )
+    if not driver or not driver.employee:
+        raise HTTPException(status_code=400, detail="Selected driver not found.")
+    if driver.id != trip.driver_id:
+        busy = (
+            db.query(Trip.id)
+            .filter(
+                Trip.driver_id == driver.id,
+                Trip.id != trip.id,
+                Trip.status.in_([TripStatus.ASSIGNED, TripStatus.ACTIVE]),
+            )
+            .first()
+        )
+        if busy:
+            raise HTTPException(
+                status_code=400, detail="This driver already has a trip in progress."
+            )
+
+    # ---- vehicle (its own current one is held by this trip, so allowed)
+    vehicle = (
+        db.query(VehicleUnit)
+        .filter(VehicleUnit.id == payload.vehicle_unit_id, VehicleUnit.is_active.is_(True))
+        .first()
+    )
+    if not vehicle or (
+        vehicle.id != trip.vehicle_unit_id and not vehicle.is_available
+    ):
+        raise HTTPException(status_code=400, detail="Selected vehicle is unavailable.")
+
+    origin = db.query(Store).filter(Store.id == payload.origin_store_id).first()
+    if not origin or not origin.is_hub:
+        raise HTTPException(status_code=400, detail="Selected origin is not a valid hub.")
+
+    # ---- helpers
+    if len(payload.helper_ids) != len(set(payload.helper_ids)):
+        raise HTTPException(status_code=400, detail="Duplicate helpers selected.")
+    if len(payload.helper_ids) > 3:
+        raise HTTPException(status_code=400, detail="Maximum of 3 helpers allowed.")
+    current_helper_ids = {th.helper_id for th in trip.trip_helpers}
+    allowed_departments = _helper_departments_for(driver.employee.department)
+    new_helpers = {}
+    for hid in payload.helper_ids:
+        helper = db.query(Employee).filter(Employee.id == hid).first()
+        if not helper:
+            raise HTTPException(status_code=404, detail=f"Helper {hid} not found.")
+        if (helper.position or "").upper() != "HELPER":
+            raise HTTPException(status_code=400, detail="Invalid helper position.")
+        if helper.department not in allowed_departments:
+            raise HTTPException(status_code=400, detail="Helper department mismatch.")
+        if hid not in current_helper_ids and not helper.is_available:
+            raise HTTPException(
+                status_code=400, detail=f"{helper.first_name} is unavailable."
+            )
+        new_helpers[hid] = helper
+
+    # ---- what changed
+    changes = []
+    if driver.id != trip.driver_id:
+        changes.append("driver")
+    if vehicle.id != trip.vehicle_unit_id:
+        changes.append("vehicle")
+    if origin.id != trip.origin_store_id:
+        changes.append("origin hub")
+    if shipment_numbers != _load_shipment_numbers(trip):
+        changes.append("shipment numbers")
+    if dest_ids != _load_planned_store_ids(trip):
+        changes.append("destinations")
+    if set(payload.helper_ids) != current_helper_ids:
+        changes.append("helpers")
+    if not changes:
+        raise HTTPException(status_code=400, detail="No changes to save.")
+
+    # ---- apply
+    if vehicle.id != trip.vehicle_unit_id:
+        if trip.vehicle_unit:
+            trip.vehicle_unit.is_available = True
+        vehicle.is_available = False
+
+    for th in list(trip.trip_helpers):
+        if th.helper_id not in new_helpers:
+            if th.helper:
+                th.helper.is_available = 1
+            db.delete(th)
+    for hid, helper in new_helpers.items():
+        if hid not in current_helper_ids:
+            helper.is_available = 0
+            db.add(TripHelper(trip_id=trip.id, helper_id=hid))
+
+    trip.driver_id = driver.id
+    trip.vehicle_unit_id = vehicle.id
+    trip.origin_store_id = origin.id
+    trip.destination_store_id = primary_store.id
+    trip.planned_store_ids = json.dumps(dest_ids)
+    trip.trip_rate_profile_id = rate_profile.id
+    trip.shipment_numbers = json.dumps(shipment_numbers)
+    trip.ticket_no = ", ".join(shipment_numbers)
+
+    summary = "Edited " + ", ".join(changes) + "."
+    if payload.reason and payload.reason.strip():
+        summary += f" {payload.reason.strip()}"
+    db.add(
+        TripBypassLog(
+            trip_id=trip.id,
+            action="edit",
+            performed_by_user_id=current_admin.id,
+            reason=summary,
+        )
+    )
+    db.commit()
+
+    return {"message": "Trip updated.", "trip_id": trip.id, "changed": changes}
 
 
 # =========================
