@@ -19,6 +19,21 @@ def utc_to_ph(dt):
     return dt.astimezone(PH_TZ)
 
 
+def ph_to_utc(dt):
+    """
+    Interpret a naive datetime as Philippine local time and return the
+    equivalent naive UTC datetime -- the form every timestamp column in
+    the database stores. An already-aware datetime is just converted.
+    """
+    if dt is None:
+        return None
+
+    if dt.tzinfo is None:
+        dt = PH_TZ.localize(dt)
+
+    return dt.astimezone(UTC).replace(tzinfo=None)
+
+
 def utc_to_ph_date(dt):
     """
     Convert UTC datetime to Philippine date.

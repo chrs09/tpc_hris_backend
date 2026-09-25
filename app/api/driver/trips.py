@@ -676,6 +676,10 @@ def dispatch_trip(
     # just an exact match on the joined ticket_no string.
     all_used_numbers = set()
     for other_trip in db.query(Trip.ticket_no, Trip.shipment_numbers).all():
+        # A trip cancelled before it started releases its shipment
+        # numbers (see cancel_unstarted_trip in app/api/admin/trips.py).
+        if "(cancelled #" in (other_trip.ticket_no or ""):
+            continue
         if other_trip.shipment_numbers:
             try:
                 all_used_numbers.update(json.loads(other_trip.shipment_numbers))
@@ -967,6 +971,8 @@ def check_in(
     # ---------------------------------------
     # 1️⃣ Validate Trip Ownership & Status
     # ---------------------------------------
+    # Locked so a simultaneous bypass check-in from a coordinator (which
+    # locks the same row) can't both create a stop for this arrival.
     trip = (
         db.query(Trip)
         .filter(
@@ -974,6 +980,7 @@ def check_in(
             Trip.driver_id == current_user.id,
             Trip.status == TripStatus.ACTIVE,
         )
+        .with_for_update()
         .first()
     )
 

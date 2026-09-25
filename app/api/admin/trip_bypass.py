@@ -14,7 +14,7 @@
 # the location. Every action is logged to tpc_trip_bypass_logs with a
 # required reason, since each one is overriding a safety check.
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy.orm import Session, joinedload
@@ -32,6 +32,8 @@ from app.models.trip_bypass_log import TripBypassLog
 from app.services.file_service import FileService
 from app.services.gps_service import calculate_distance_meters
 from app.services.notification_service import create_notification
+from app.utils.timezone import ph_to_utc, utc_to_ph
+from app.api.admin.trips import _current_step_label
 from app.api.driver.trips import _load_planned_store_ids, _delivered_store_ids
 
 router = APIRouter(prefix="/admin/trips/bypass", tags=["Trip Bypass"])
@@ -60,6 +62,92 @@ def _log_bypass(db: Session, trip_id: int, action: str, user_id: int, reason: st
             reason=reason,
         )
     )
+
+
+def _resolve_time(
+    performed_at: str | None,
+    floor: datetime | None = None,
+    floor_label: str = "the previous step",
+) -> datetime:
+    """The time a bypass step should be recorded as happening.
+
+    Blank means "now" (the original behaviour). Otherwise the coordinator
+    is recording something that really happened earlier -- e.g. a trip
+    from a previous day that was never processed on the driver's phone --
+    so the timestamp is what they entered, read as Philippine local time
+    and stored as UTC like every other timestamp. Trip pay is attributed
+    to the day of the trip's start time, so backdating the start puts the
+    trip in the right payroll cutoff instead of today's.
+
+    Refuses a time in the future, or one earlier than `floor` (the step
+    before it), so the trip's timeline can't end up out of order."""
+    if performed_at is None or not performed_at.strip():
+        return datetime.utcnow()
+
+    try:
+        parsed = datetime.fromisoformat(performed_at.strip())
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid date/time.")
+
+    when = ph_to_utc(parsed)
+
+    if when > datetime.utcnow() + timedelta(minutes=5):
+        raise HTTPException(
+            status_code=400, detail="The date/time can't be in the future."
+        )
+    if floor is not None and when < floor:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"The date/time can't be earlier than {floor_label} "
+                f"({utc_to_ph(floor).strftime('%b %d, %Y %I:%M %p')})."
+            ),
+        )
+    return when
+
+
+def _audit_reason(reason: str, performed_at: str | None, when: datetime) -> str:
+    """Appends the effective time to the audit reason when it was
+    backdated, so the log shows both when it was really done (the log
+    row's own timestamp) and when the step is recorded as happening."""
+    if performed_at is None or not performed_at.strip():
+        return reason
+    stamp = utc_to_ph(when).strftime("%b %d, %Y %I:%M %p")
+    return f"{reason} [recorded as happening {stamp} PH time]"
+
+
+def _latest_event_time(db: Session, trip: Trip) -> datetime | None:
+    """The most recent thing already recorded on the trip -- its start,
+    or any stop's arrival/delivery -- so a later step can't be backdated
+    to before it."""
+    times = [trip.start_time] if trip.start_time else []
+    for stop in db.query(TripStop).filter(TripStop.trip_id == trip.id).all():
+        if stop.check_in_time:
+            times.append(stop.check_in_time)
+        if stop.check_out_time:
+            times.append(stop.check_out_time)
+    return max(times) if times else None
+
+
+# The only trip steps at which the driver's own app offers "Arrived at
+# Store" (IN_TRANSIT before the first store, DELIVERED between stores).
+# A bypass check-in is only valid at those same moments -- otherwise the
+# driver's screen and the coordinator's would disagree about what's next.
+_ARRIVAL_STEPS = ("IN_TRANSIT", "DELIVERED")
+
+
+def _get_trip_locked(db: Session, trip_id: int) -> Trip:
+    """Same as _get_trip, but takes a row lock on the trip until the
+    transaction ends. The driver's own check-in locks the same row, so if
+    the driver taps Arrived at the very moment a coordinator submits a
+    bypass check-in, one waits for the other and then sees the updated
+    state (and is rejected) instead of both creating a stop."""
+    trip = (
+        db.query(Trip).filter(Trip.id == trip_id).with_for_update().first()
+    )
+    if not trip:
+        raise HTTPException(status_code=404, detail="Trip not found.")
+    return trip
 
 
 def _get_trip(db: Session, trip_id: int) -> Trip:
@@ -101,6 +189,7 @@ def list_bypassable_trips(
             "driver_name": trip.driver.username if trip.driver else None,
             "status": trip.status.value,
             "current_step": trip.current_step,
+            "current_step_label": _current_step_label(trip.current_step),
             "ticket_no": trip.ticket_no,
             "destination_store": (
                 trip.destination_store.name if trip.destination_store else None
@@ -147,6 +236,7 @@ def get_bypass_trip_detail(
         "driver_name": trip.driver.username if trip.driver else None,
         "status": trip.status.value,
         "current_step": trip.current_step,
+        "current_step_label": _current_step_label(trip.current_step),
         "ticket_no": trip.ticket_no,
         "origin_store_id": trip.origin_store_id,
         "origin_store": trip.origin_store.name if trip.origin_store else None,
@@ -189,6 +279,7 @@ def get_bypass_trip_detail(
 def bypass_checkout(
     trip_id: int,
     reason: str = Form(...),
+    performed_at: str | None = Form(None),
     odometer_reading: int = Form(0),
     invoice_photo: UploadFile | None = File(None),
     lm_photo: UploadFile | None = File(None),
@@ -202,6 +293,11 @@ def bypass_checkout(
     trip = _get_trip(db, trip_id)
     if trip.status != TripStatus.ASSIGNED:
         raise HTTPException(status_code=400, detail="Trip is not in ASSIGNED status.")
+
+    # No floor here on purpose: recording a trip from an earlier day means
+    # dispatching it today, so its dispatch time is always later than the
+    # date being backdated to. Only the "not in the future" check applies.
+    started_at = _resolve_time(performed_at)
 
     destination_store = trip.destination_store
 
@@ -247,9 +343,12 @@ def bypass_checkout(
     trip.odometer_reading = odometer_reading
     trip.status = TripStatus.ACTIVE
     trip.current_step = "IN_TRANSIT"
-    trip.start_time = datetime.utcnow()
+    trip.start_time = started_at
 
-    _log_bypass(db, trip.id, "checkout", current_user.id, reason)
+    _log_bypass(
+        db, trip.id, "checkout", current_user.id,
+        _audit_reason(reason, performed_at, started_at),
+    )
     db.commit()
 
     return {"message": "Checkout completed (bypass). Trip started."}
@@ -265,16 +364,45 @@ def bypass_check_in(
     trip_id: int,
     reason: str = Form(...),
     store_id: int = Form(...),
+    performed_at: str | None = Form(None),
+    expected_step: str | None = Form(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(_require_bypass_access),
 ):
-    trip = _get_trip(db, trip_id)
+    trip = _get_trip_locked(db, trip_id)
     if trip.status != TripStatus.ACTIVE:
         raise HTTPException(status_code=400, detail="Trip is not ACTIVE.")
 
+    # The screen this was submitted from is out of date -- the trip has
+    # moved on since it was loaded (the driver acted, or another
+    # coordinator did). 409 tells the UI to refresh rather than guess.
+    if expected_step is not None and expected_step != trip.current_step:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"This trip has changed since you opened it (now: "
+                f"{_current_step_label(trip.current_step)}). "
+                "Refresh and check what's next."
+            ),
+        )
+
+    if trip.current_step not in _ARRIVAL_STEPS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "The driver can't be marked as arrived at a store right "
+                f"now (trip is: {_current_step_label(trip.current_step)})."
+            ),
+        )
+
+    arrived_at = _resolve_time(
+        performed_at, _latest_event_time(db, trip), "the trip's previous step"
+    )
+
     if _get_open_stop(db, trip.id):
         raise HTTPException(
-            status_code=400, detail="This trip already has an open (non-delivered) stop."
+            status_code=400,
+            detail="The driver has already arrived at a store and hasn't marked it Delivered yet.",
         )
 
     # Mirror the real driver check-in (app/api/driver/trips.py's check_in):
@@ -285,6 +413,11 @@ def bypass_check_in(
     planned_ids = _load_planned_store_ids(trip)
     if planned_ids:
         delivered_ids = _delivered_store_ids(db, trip.id)
+        if all(sid in delivered_ids for sid in planned_ids):
+            raise HTTPException(
+                status_code=400,
+                detail="All planned stores have been delivered. Proceed to Checkin.",
+            )
         if store_id in delivered_ids:
             raise HTTPException(
                 status_code=400,
@@ -304,7 +437,7 @@ def bypass_check_in(
         trip_id=trip.id,
         store_id=store.id,
         status=StopStatus.CHECKED_IN,
-        check_in_time=datetime.utcnow(),
+        check_in_time=arrived_at,
         lat_in=store.latitude,
         long_in=store.longitude,
         requires_review=False,
@@ -314,10 +447,13 @@ def bypass_check_in(
 
     trip.current_step = "ARRIVED"
 
-    _log_bypass(db, trip.id, "check-in", current_user.id, reason, stop_id=stop.id)
+    _log_bypass(
+        db, trip.id, "check-in", current_user.id,
+        _audit_reason(reason, performed_at, arrived_at), stop_id=stop.id,
+    )
     db.commit()
 
-    return {"message": "Checked in (bypass).", "stop_id": stop.id, "store": store.name}
+    return {"message": "Marked as arrived at store (bypass).", "stop_id": stop.id, "store": store.name}
 
 
 # =========================
@@ -340,7 +476,7 @@ def bypass_start_unloading(
     if not stop:
         raise HTTPException(status_code=404, detail="Stop not found.")
     if stop.status != StopStatus.CHECKED_IN:
-        raise HTTPException(status_code=400, detail="Stop must be checked in first.")
+        raise HTTPException(status_code=400, detail="The driver must be marked as arrived at the store first.")
 
     trip = _get_trip(db, trip_id)
 
@@ -377,6 +513,7 @@ def bypass_check_out(
     reason: str = Form(...),
     proof_photo: UploadFile | None = File(None),
     store_id: int | None = Form(None),
+    performed_at: str | None = Form(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(_require_bypass_access),
 ):
@@ -388,7 +525,11 @@ def bypass_check_out(
     if not stop:
         raise HTTPException(status_code=404, detail="Stop not found.")
     if stop.status != StopStatus.UNLOADING:
-        raise HTTPException(status_code=400, detail="Stop must be in unloading first.")
+        raise HTTPException(status_code=400, detail="Start Unloading must be done before Delivered.")
+
+    delivered_at = _resolve_time(
+        performed_at, stop.check_in_time, "when the driver arrived at this stop"
+    )
 
     # If the stop wasn't matched to a store at check-in (requires_review),
     # let the admin fix that here rather than leaving it orphaned.
@@ -409,7 +550,7 @@ def bypass_check_out(
         distance = calculate_distance_meters(lat, long, store.latitude, store.longitude)
 
     stop.status = StopStatus.DELIVERED
-    stop.check_out_time = datetime.utcnow()
+    stop.check_out_time = delivered_at
     stop.lat_out = lat
     stop.long_out = long
 
@@ -429,7 +570,10 @@ def bypass_check_out(
             file_url=photo_url, uploaded_by=current_user.id,
         ))
 
-    _log_bypass(db, trip_id, "check-out", current_user.id, reason, stop_id=stop.id)
+    _log_bypass(
+        db, trip_id, "check-out", current_user.id,
+        _audit_reason(reason, performed_at, delivered_at), stop_id=stop.id,
+    )
     db.commit()
 
     return {"message": "Delivered (bypass)."}
@@ -444,6 +588,7 @@ def bypass_check_out(
 def bypass_checkin(
     trip_id: int,
     reason: str = Form(...),
+    performed_at: str | None = Form(None),
     photo: UploadFile | None = File(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(_require_bypass_access),
@@ -457,11 +602,13 @@ def bypass_checkin(
             status_code=400, detail="Current stop must be delivered first."
         )
 
+    completion_time = _resolve_time(
+        performed_at, _latest_event_time(db, trip), "the trip's previous step"
+    )
+
     hub = trip.origin_store
     lat = hub.latitude if hub else None
     long = hub.longitude if hub else None
-
-    completion_time = datetime.utcnow()
 
     trip.status = TripStatus.PENDING_APPROVAL
     trip.current_step = "CHECKIN"
@@ -496,7 +643,10 @@ def bypass_checkin(
         message=f"Trip completed via admin bypass and awaiting approval. Reason: {reason}",
     )
 
-    _log_bypass(db, trip.id, "checkin", current_user.id, reason)
+    _log_bypass(
+        db, trip.id, "checkin", current_user.id,
+        _audit_reason(reason, performed_at, completion_time),
+    )
     db.commit()
 
     return {"message": "Trip completed and submitted for approval (bypass)."}

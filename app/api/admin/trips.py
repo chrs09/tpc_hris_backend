@@ -22,6 +22,7 @@ from app.models.trip_stops import TripStop, StopStatus
 from app.models.user import User, UserRole
 from app.models.employees import Employee
 from app.models.trip_helper import TripHelper
+from app.models.trip_bypass_log import TripBypassLog
 from app.models.trip_finance_review import FinanceReviewStatus, TripFinanceReview
 from app.models.files import File
 from app.models.stores import Store
@@ -329,6 +330,86 @@ def get_assigned_trips(
         )
 
     return result
+
+
+# =========================
+# CANCEL AN UNSTARTED TRIP
+# =========================
+# Marker appended to a cancelled trip's ticket_no. ticket_no is UNIQUE, so
+# without this the shipment number(s) would stay locked to the cancelled
+# trip and the same shipment could never be dispatched again -- which is
+# the whole point of cancelling a dispatch made by mistake. The dispatch
+# duplicate check skips trips carrying this marker (see dispatch_trip).
+CANCELLED_TICKET_MARKER = "(cancelled #"
+
+
+@router.post("/{trip_id}/cancel")
+def cancel_unstarted_trip(
+    trip_id: int,
+    reason: str = Body(..., embed=True),
+    db: Session = Depends(get_db),
+    current_admin=Depends(
+        require_role_or_module(
+            roles=["admin", "superadmin", "coordinator_admin", "coordinator"],
+            module_key="trip_management.trip_dashboard",
+        )
+    ),
+):
+    """Undoes a dispatch: a trip the driver hasn't started (still
+    ASSIGNED) is cancelled, and its vehicle and helpers are released.
+    Whoever can dispatch a trip can cancel it. A trip already in progress
+    can't be cancelled here -- it has real steps recorded on it, so it goes
+    through Trip Bypass and the normal approve/reject review instead."""
+    reason = reason.strip()
+    if not reason:
+        raise HTTPException(status_code=400, detail="A reason is required.")
+
+    trip = (
+        db.query(Trip)
+        .options(
+            joinedload(Trip.trip_helpers).joinedload(TripHelper.helper),
+            joinedload(Trip.vehicle_unit),
+        )
+        .filter(Trip.id == trip_id)
+        .first()
+    )
+    if not trip:
+        raise HTTPException(status_code=404, detail="Trip not found.")
+
+    if trip.status != TripStatus.ASSIGNED:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Only a trip the driver hasn't started yet can be "
+                "cancelled. For one already in progress, use Trip Bypass."
+            ),
+        )
+
+    trip.status = TripStatus.CANCELLED
+    trip.current_step = "CANCELLED"
+
+    if trip.ticket_no:
+        marker = f" {CANCELLED_TICKET_MARKER}{trip.id})"
+        trip.ticket_no = trip.ticket_no[: 500 - len(marker)] + marker
+
+    if trip.vehicle_unit:
+        trip.vehicle_unit.is_available = True
+
+    for trip_helper in trip.trip_helpers:
+        if trip_helper.helper:
+            trip_helper.helper.is_available = 1
+
+    db.add(
+        TripBypassLog(
+            trip_id=trip.id,
+            action="cancel",
+            performed_by_user_id=current_admin.id,
+            reason=reason,
+        )
+    )
+    db.commit()
+
+    return {"message": "Trip cancelled.", "trip_id": trip.id}
 
 
 # =========================
