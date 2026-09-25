@@ -8,6 +8,7 @@ from fastapi import (
     Depends,
     HTTPException,
     Body,
+    Form,
     UploadFile,
     File as FastAPIFile,
 )
@@ -23,10 +24,12 @@ from app.models.user import User, UserRole
 from app.models.employees import Employee
 from app.models.trip_helper import TripHelper
 from app.models.trip_bypass_log import TripBypassLog
+from app.models.trip_remark import TripRemark
 from app.models.trip_finance_review import FinanceReviewStatus, TripFinanceReview
 from app.models.files import File
 from app.models.stores import Store
 from app.services.file_service import FileService
+from app.services.trip_remarks import serialize_trip_remarks
 from app.utils.timezone import utc_to_ph
 from app.utils.user_display import display_name as _display_name
 from app.api.driver.trips import (
@@ -1353,6 +1356,7 @@ def review_trip(
     # =========================================================
     return {
         "bypass_remarks": bypass_remarks,
+        "added_remarks": serialize_trip_remarks(db, trip.id),
         # -------------------------
         # TRIP
         # -------------------------
@@ -1545,6 +1549,16 @@ def replace_trip_file(
             status_code=400, detail="This file cannot be overridden here."
         )
 
+    trip_row = db.query(Trip).filter(Trip.id == trip_id).first()
+    if not trip_row or trip_row.status != TripStatus.PENDING_APPROVAL:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "This trip is already approved, so its photos can't be "
+                "changed. Add a remark instead."
+            ),
+        )
+
     file_service = FileService()
     new_url = file_service.upload(
         photo, f"trips/{trip_id}/overrides/{file_row.document_type.lower()}"
@@ -1562,6 +1576,49 @@ def replace_trip_file(
         "document_type": file_row.document_type,
         "file_url": file_row.file_url,
     }
+
+
+# =========================
+# ADD A REMARK TO AN APPROVED TRIP
+#
+# Approved trips' photos are locked (see replace_trip_file above). A
+# correction or extra proof is added as a remark instead -- text, an
+# image, or both -- so the original photos stay as the driver sent them.
+# =========================
+@router.post("/{trip_id}/remarks")
+def add_trip_remark(
+    trip_id: int,
+    text: str | None = Form(None),
+    image: UploadFile | None = FastAPIFile(None),
+    db: Session = Depends(get_db),
+    current_admin=Depends(require_role_or_module(roles=["admin", "superadmin", "coordinator_admin"], module_key="trip_management.trips")),
+):
+    trip = db.query(Trip).filter(Trip.id == trip_id).first()
+    if not trip:
+        raise HTTPException(status_code=404, detail="Trip not found.")
+
+    text = (text or "").strip() or None
+    if not text and image is None:
+        raise HTTPException(
+            status_code=400, detail="Add a remark, an image, or both."
+        )
+    if image is not None and not (image.content_type or "").startswith("image/"):
+        raise HTTPException(status_code=400, detail="Only image files can be attached.")
+
+    image_url = None
+    if image is not None:
+        image_url = FileService().upload(image, f"trips/{trip_id}/remarks")
+
+    remark = TripRemark(
+        trip_id=trip.id,
+        text=text,
+        image_url=image_url,
+        created_by_user_id=current_admin.id,
+    )
+    db.add(remark)
+    db.commit()
+
+    return {"message": "Remark added.", "id": remark.id}
 
 
 @router.get("/completed")

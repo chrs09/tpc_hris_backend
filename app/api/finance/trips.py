@@ -14,6 +14,7 @@ from app.models.employees import Employee
 from app.models.gps_log import GPSLog
 from app.models.files import File
 from app.utils.timezone import utc_to_ph
+from app.services.trip_remarks import serialize_trip_remarks
 
 router = APIRouter(prefix="/finance/trips", tags=["Finance Trips"])
 
@@ -304,6 +305,9 @@ def get_finance_trip_detail(
             unloading_photo_by_stop_id[photo.entity_id] = photo.file_url
 
     return {
+        # Remarks added after approval (see add_trip_remark in
+        # app/api/admin/trips.py).
+        "added_remarks": serialize_trip_remarks(db, trip.id),
         "id": trip.id,
         "trip_id": trip.id,
         "shipment_number": trip.ticket_no,

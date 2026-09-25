@@ -21,6 +21,7 @@ from app.models.trips import Trip, TripStatus
 from app.models.user import User
 
 from app.utils.timezone import utc_to_ph
+from app.services.trip_remarks import serialize_trip_remarks
 from app.utils.user_display import display_name as _display_name
 
 
@@ -465,6 +466,9 @@ def review_office_trip(
     # 12. RETURN COMPLETE REVIEW DATA
     # =====================================================
     return {
+        # Remarks the coordinator added after approving (photos are
+        # locked by then) -- see add_trip_remark in app/api/admin/trips.py.
+        "added_remarks": serialize_trip_remarks(db, trip.id),
         "review_id": finance_review.id,
         "review_status": (
             finance_review.status.value
