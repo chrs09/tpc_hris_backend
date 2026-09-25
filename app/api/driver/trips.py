@@ -1022,10 +1022,17 @@ def checkout_trip(
 # =========================
 # CHECK-IN
 # =========================
+class CheckInRequest(LocationRequest):
+    # The store the driver says they're at (picked from the trip's
+    # remaining assigned stores). Optional so older app versions, which
+    # don't send it, keep the nearest-store auto-match.
+    store_id: int | None = None
+
+
 @router.post("/{trip_id}/check-in")
 def check_in(
     trip_id: int,
-    payload: LocationRequest,
+    payload: CheckInRequest,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
@@ -1105,9 +1112,36 @@ def check_in(
     else:
         # Legacy trips dispatched before multi-store support -- fall back
         # to matching against every store, same as before.
+        remaining_ids = []
         stores = db.query(Store).all()
 
-    closest_store, _ = find_nearest_store(stores, payload.lat, payload.long)
+    outside_geofence_m = None
+    if payload.store_id is not None:
+        # Driver picked the store. It must be one of this trip's stores
+        # not yet delivered. GPS doesn't block the arrival (signal can be
+        # poor at a store), but being outside the store's radius flags the
+        # stop for coordinator review.
+        if payload.store_id not in remaining_ids:
+            raise HTTPException(
+                status_code=400,
+                detail="That store isn't one of your remaining stores on this trip.",
+            )
+        closest_store = next(st for st in stores if st.id == payload.store_id)
+        if (
+            closest_store.latitude is not None
+            and closest_store.longitude is not None
+            and not (closest_store.latitude == 0 and closest_store.longitude == 0)
+        ):
+            distance = calculate_distance_meters(
+                payload.lat,
+                payload.long,
+                closest_store.latitude,
+                closest_store.longitude,
+            )
+            if distance > closest_store.allowed_radius_meters:
+                outside_geofence_m = int(distance)
+    else:
+        closest_store, _ = find_nearest_store(stores, payload.lat, payload.long)
 
     # ---------------------------------------
     # 5️⃣ Create Trip Stop
@@ -1119,13 +1153,26 @@ def check_in(
         check_in_time=datetime.utcnow(),
         lat_in=payload.lat,
         long_in=payload.long,
-        requires_review=(closest_store is None),
+        requires_review=(closest_store is None or outside_geofence_m is not None),
     )
 
     db.add(stop)
     db.flush()  # Get stop.id before commit
 
     trip.current_step = "ARRIVED"
+
+    if outside_geofence_m is not None:
+        create_notification(
+            db=db,
+            type_="ARRIVAL_OUTSIDE_GEOFENCE",
+            driver_id=current_user.id,
+            trip_id=trip.id,
+            trip_stop_id=stop.id,
+            message=(
+                f"Driver marked arrival at {closest_store.name} but was "
+                f"{outside_geofence_m} m away from the store."
+            ),
+        )
 
     # ---------------------------------------
     # 6️⃣ Notify Admin if Unknown Location
