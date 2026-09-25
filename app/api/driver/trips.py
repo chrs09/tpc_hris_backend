@@ -21,6 +21,7 @@ from app.models.trip_finance_review import TripFinanceReview, FinanceReviewStatu
 from app.models.trip_stops import TripStop, StopStatus
 from app.models.stores import Store
 from app.models.trip_helper import TripHelper
+from app.models.trip_bypass_log import TripBypassLog
 from app.models.employees import Employee
 from app.models.files import File as FileModel
 from app.services.file_service import FileService
@@ -857,6 +858,66 @@ def dispatch_trip(
         "trip_category": trip_category.profile_name,
         "helpers_assigned": len(helper_objects),
     }
+
+
+# =========================
+# REORDER STOPS (driver picks their own visiting order before Checkout)
+# =========================
+class ReorderStopsBody(BaseModel):
+    store_ids: List[int]
+
+
+@router.put("/{trip_id}/reorder-stops")
+def reorder_stops(
+    trip_id: int,
+    body: ReorderStopsBody,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """The coordinator picks which stores a trip covers; the driver may
+    choose the order they visit them, but only before Checkout (nothing
+    has been recorded against the stops yet). The set of stores must stay
+    exactly the same -- only the order changes. The trip's rate profile
+    (pay) stays as dispatched, even if a different store is now first."""
+    trip = (
+        db.query(Trip)
+        .filter(
+            Trip.id == trip_id,
+            Trip.driver_id == current_user.id,
+            Trip.status == TripStatus.ASSIGNED,
+        )
+        .with_for_update()
+        .first()
+    )
+    if not trip:
+        raise HTTPException(status_code=404, detail="Assigned trip not found.")
+    if trip.current_step != "ASSIGNED":
+        raise HTTPException(
+            status_code=400,
+            detail="The stop order can only be changed before Checkout.",
+        )
+
+    current_ids = _load_planned_store_ids(trip)
+    if sorted(body.store_ids) != sorted(current_ids):
+        raise HTTPException(
+            status_code=400,
+            detail="The reordered list must contain exactly the assigned stores.",
+        )
+    if body.store_ids == current_ids:
+        return {"message": "Order unchanged.", "store_ids": current_ids}
+
+    trip.planned_store_ids = json.dumps(body.store_ids)
+    trip.destination_store_id = body.store_ids[0]
+    db.add(
+        TripBypassLog(
+            trip_id=trip.id,
+            action="reorder",
+            performed_by_user_id=current_user.id,
+            reason="Driver changed the stop order before Checkout.",
+        )
+    )
+    db.commit()
+    return {"message": "Stop order saved.", "store_ids": body.store_ids}
 
 
 # =========================
