@@ -14,6 +14,10 @@ from app.core.dependencies import get_current_user
 from app.models.user import User
 from app.models.employees import Employee
 from app.models.payroll_deductions import PayrollDeduction
+from app.services.cash_advance_payroll import (
+    apply_payroll_deduction,
+    payroll_suggestions,
+)
 
 router = APIRouter(
     prefix="/payroll-deductions",
@@ -21,7 +25,9 @@ router = APIRouter(
 )
 
 
-def _save_deduction(db: Session, payload: dict) -> PayrollDeduction:
+def _save_deduction(
+    db: Session, payload: dict, user_id: int | None = None
+) -> PayrollDeduction:
     employee = (
         db.query(Employee).filter(Employee.id == payload["employee_id"]).first()
     )
@@ -41,6 +47,20 @@ def _save_deduction(db: Session, payload: dict) -> PayrollDeduction:
         .first()
     )
 
+    # Post this cutoff's cash advance deduction to the employee's cash
+    # advance balance (replacing any earlier post for the same cutoff),
+    # capped at what they actually owe. Only when the client sends the
+    # field, so older clients don't wipe an existing deduction.
+    if "cash_advance_deduction" in payload:
+        ca = apply_payroll_deduction(
+            db,
+            payload["employee_id"],
+            payload["cutoff_period"],
+            payload.get("cash_advance_deduction") or 0,
+            user_id,
+        )
+        payload["cash_advance_deduction"] = ca["applied"]
+
     if existing:
         existing.department = payload["department"]
 
@@ -57,6 +77,9 @@ def _save_deduction(db: Session, payload: dict) -> PayrollDeduction:
         existing.undertime_deduction = payload.get("undertime_deduction", 0)
 
         existing.absent_deduction = payload.get("absent_deduction", 0)
+
+        if "cash_advance_deduction" in payload:
+            existing.cash_advance_deduction = payload["cash_advance_deduction"]
 
         existing.net_pay = payload["net_pay"]
 
@@ -78,6 +101,7 @@ def _save_deduction(db: Session, payload: dict) -> PayrollDeduction:
         tardiness_deduction=payload.get("tardiness_deduction", 0),
         undertime_deduction=payload.get("undertime_deduction", 0),
         absent_deduction=payload.get("absent_deduction", 0),
+        cash_advance_deduction=payload.get("cash_advance_deduction", 0),
         net_pay=payload["net_pay"],
     )
 
@@ -104,7 +128,7 @@ def save_payroll_deduction(
             detail="Only HR/Admin can save payroll deductions.",
         )
 
-    deduction = _save_deduction(db, payload)
+    deduction = _save_deduction(db, payload, current_user.id)
 
     return {
         "message": "Deduction saved.",
@@ -127,12 +151,33 @@ def save_payroll_deductions_bulk(
             detail="Only HR/Admin can save payroll deductions.",
         )
 
-    ids = [_save_deduction(db, item).id for item in payload]
+    ids = [_save_deduction(db, item, current_user.id).id for item in payload]
 
     return {
         "message": f"{len(ids)} deduction(s) saved.",
         "ids": ids,
     }
+
+
+@router.get("/cash-advance")
+def get_cash_advance_for_cutoff(
+    cutoff_period: str,
+    employee_ids: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Cash advance to deduct this cutoff, per employee (comma-separated
+    ids): the suggested amount from their approved advances, what was
+    already posted for this cutoff (if the payslip was generated before),
+    and the balance owed before this cutoff."""
+    if current_user.role not in ["admin", "superadmin"]:
+        raise HTTPException(status_code=403, detail="Not allowed.")
+    try:
+        ids = [int(x) for x in employee_ids.split(",") if x.strip()]
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid employee ids.")
+    suggestions = payroll_suggestions(db, ids, cutoff_period)
+    return {str(emp): data for emp, data in suggestions.items()}
 
 
 @router.get("/list")

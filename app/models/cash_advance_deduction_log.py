@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Column, DateTime, ForeignKey, Integer, Numeric, Text
+from sqlalchemy import Column, DateTime, ForeignKey, Integer, Numeric, String, Text
 from sqlalchemy.orm import relationship
 
 from app.core.database import Base
@@ -24,6 +24,12 @@ class CashAdvanceDeductionLog(Base):
 
     amount = Column(Numeric(10, 2), nullable=False)
     note = Column(Text, nullable=True)
+
+    # Set when the entry came from payroll (e.g. "2026-09-01_2026-09-15",
+    # same format as PayrollDeduction.cutoff_period). Regenerating that
+    # cutoff's payslip replaces these entries instead of adding more.
+    # Null for deductions recorded by hand.
+    payroll_cutoff_period = Column(String(50), nullable=True, index=True)
 
     recorded_by_user_id = Column(Integer, ForeignKey("tpc_users.id"), nullable=True)
     recorded_at = Column(DateTime, default=datetime.utcnow, nullable=False)

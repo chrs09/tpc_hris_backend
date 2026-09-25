@@ -38,6 +38,9 @@ class PayrollDeduction(Base):
     tardiness_deduction = Column(Numeric(12, 2), nullable=False, default=0)
     undertime_deduction = Column(Numeric(12, 2), nullable=False, default=0)
     absent_deduction = Column(Numeric(12, 2), nullable=False, default=0)
+    # Cash advance paid down this cutoff -- the matching
+    # CashAdvanceDeductionLog entries carry the same cutoff_period.
+    cash_advance_deduction = Column(Numeric(12, 2), nullable=False, default=0)
     net_pay = Column(Numeric(12, 2), nullable=False, default=0)
 
     created_at = Column(DateTime, server_default=func.now())
