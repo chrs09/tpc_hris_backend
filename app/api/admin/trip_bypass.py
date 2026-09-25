@@ -29,6 +29,7 @@ from app.models.files import File as FileModel
 from app.models.gps_log import GPSLog
 from app.models.trip_models import GPSActionType
 from app.models.trip_bypass_log import TripBypassLog
+from app.models.notification import Notification
 from app.services.file_service import FileService
 from app.services.gps_service import calculate_distance_meters
 from app.services.notification_service import create_notification
@@ -577,6 +578,74 @@ def bypass_check_out(
     db.commit()
 
     return {"message": "Delivered (bypass)."}
+
+
+# =========================
+# ASSIGN STORE TO AN UNMATCHED STOP
+# =========================
+@router.post("/{trip_id}/stops/{stop_id}/assign-store")
+def bypass_assign_stop_store(
+    trip_id: int,
+    stop_id: int,
+    store_id: int = Form(...),
+    reason: str = Form(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(_require_bypass_access),
+):
+    """When the driver's app couldn't match an arrival to a store (GPS
+    outside every remaining store's radius), the stop is saved with no
+    store. Its delivery then doesn't count toward any planned store, so
+    the trip keeps asking for the store again. This links that stop to
+    the planned store the driver was actually at."""
+    trip = _get_trip_locked(db, trip_id)
+    stop = (
+        db.query(TripStop)
+        .filter(TripStop.id == stop_id, TripStop.trip_id == trip.id)
+        .first()
+    )
+    if not stop:
+        raise HTTPException(status_code=404, detail="Stop not found.")
+    if stop.store_id is not None:
+        raise HTTPException(
+            status_code=400, detail="This stop is already matched to a store."
+        )
+
+    planned_ids = _load_planned_store_ids(trip)
+    if planned_ids:
+        if store_id not in planned_ids:
+            raise HTTPException(
+                status_code=400, detail="That store isn't on this trip."
+            )
+        if store_id in _delivered_store_ids(db, trip.id):
+            raise HTTPException(
+                status_code=400,
+                detail="That store is already marked delivered on this trip.",
+            )
+
+    store = db.query(Store).filter(Store.id == store_id).first()
+    if not store:
+        raise HTTPException(status_code=400, detail="Store not found.")
+
+    stop.store_id = store.id
+    stop.requires_review = False
+
+    # The "driver checked in at unknown location" alert is resolved now.
+    for notification in db.query(Notification).filter(
+        Notification.trip_stop_id == stop.id,
+        Notification.type == "UNREGISTERED_STORE",
+        Notification.status == "PENDING",
+    ):
+        notification.status = "APPROVED"
+        notification.reviewed_by_admin_id = current_user.id
+        notification.reviewed_at = datetime.utcnow()
+
+    _log_bypass(
+        db, trip.id, "assign-store", current_user.id,
+        f"Linked stop to {store.name}. {reason}".strip(), stop_id=stop.id,
+    )
+    db.commit()
+
+    return {"message": f"Stop linked to {store.name}."}
 
 
 # =========================
