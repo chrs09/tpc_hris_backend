@@ -1580,6 +1580,54 @@ def get_completed_trips(
         .all()
     )
 
+    # A trip only becomes COMPLETED when Finance approves it (see
+    # app/api/finance/trips.py) -- who approved it and when.
+    trip_ids = [trip.id for trip in trips]
+    finance_reviews = (
+        {
+            review.trip_id: review
+            for review in db.query(TripFinanceReview)
+            .options(
+                joinedload(TripFinanceReview.finance_reviewer).joinedload(
+                    User.employee
+                )
+            )
+            .filter(TripFinanceReview.trip_id.in_(trip_ids))
+            .all()
+        }
+        if trip_ids
+        else {}
+    )
+
+    planned_by_trip = {trip.id: _load_planned_store_ids(trip) for trip in trips}
+    all_store_ids = {sid for ids in planned_by_trip.values() for sid in ids}
+    store_names = (
+        {
+            store.id: store.name
+            for store in db.query(Store).filter(Store.id.in_(all_store_ids)).all()
+        }
+        if all_store_ids
+        else {}
+    )
+
+    def finance_info(trip_id):
+        review = finance_reviews.get(trip_id)
+        if not review or review.status != FinanceReviewStatus.APPROVED:
+            return {"status_label": "Completed"}
+        return {
+            "status_label": "Approved by Finance",
+            "finance_approved_by": (
+                _display_name(review.finance_reviewer)
+                if review.finance_reviewer
+                else None
+            ),
+            "finance_approved_at": (
+                utc_to_ph(review.approved_at).strftime("%Y-%m-%d %I:%M %p")
+                if review.approved_at
+                else None
+            ),
+        }
+
     return [
         {
             "id": trip.id,
@@ -1597,6 +1645,11 @@ def get_completed_trips(
                 .filter(TripStop.trip_id == trip.id)
                 .count(),
             "username": trip.driver.username,
+            "stores": [
+                store_names.get(sid, f"Store #{sid}")
+                for sid in planned_by_trip[trip.id]
+            ],
+            **finance_info(trip.id),
         }
         for trip in trips
     ]
