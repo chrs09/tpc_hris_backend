@@ -1,6 +1,7 @@
 # app/api/driver/trips.py
 
 import json
+import re
 import logging
 import sys
 from logging.handlers import RotatingFileHandler
@@ -55,6 +56,15 @@ MAX_PLANNED_STOPS = 20
 # A single truck/trip can carry multiple shipments (e.g. several
 # DRs/manifests loaded together) -- capped for the same reason.
 MAX_SHIPMENT_NUMBERS = 10
+
+
+# Shipment numbers are exactly 8 digits (no letters or symbols).
+SHIPMENT_NUMBER_RE = re.compile(r"\d{8}")
+
+
+def _invalid_shipment_number(numbers: list[str]) -> str | None:
+    """First shipment number that isn't exactly 8 digits, or None."""
+    return next((n for n in numbers if not SHIPMENT_NUMBER_RE.fullmatch(n)), None)
 
 
 def _load_shipment_numbers(trip: Trip) -> list[str]:
@@ -664,6 +674,12 @@ def dispatch_trip(
 
     if not shipment_numbers:
         raise HTTPException(status_code=400, detail="At least one shipment number is required.")
+    bad_number = _invalid_shipment_number(shipment_numbers)
+    if bad_number:
+        raise HTTPException(
+            status_code=400,
+            detail=f'Shipment number "{bad_number}" must be exactly 8 digits.',
+        )
     if len(shipment_numbers) != len(set(shipment_numbers)):
         raise HTTPException(status_code=400, detail="Duplicate shipment numbers entered.")
     if len(shipment_numbers) > MAX_SHIPMENT_NUMBERS:

@@ -33,6 +33,7 @@ from app.api.driver.trips import (
     _load_planned_store_ids,
     _delivered_store_ids,
     _load_shipment_numbers,
+    _invalid_shipment_number,
     _helper_departments_for,
     MAX_PLANNED_STOPS,
     MAX_SHIPMENT_NUMBERS,
@@ -213,6 +214,19 @@ def get_pending_trips(
         )
         return_reasons = {r.trip_id: r.return_reason for r in returned_reviews}
 
+    # Assigned stores per trip, in the coordinator's route order. One
+    # store lookup for the whole list rather than one per trip.
+    planned_by_trip = {trip.id: _load_planned_store_ids(trip) for trip in trips}
+    all_store_ids = {sid for ids in planned_by_trip.values() for sid in ids}
+    store_names = (
+        {
+            store.id: store.name
+            for store in db.query(Store).filter(Store.id.in_(all_store_ids)).all()
+        }
+        if all_store_ids
+        else {}
+    )
+
     return [
         {
             "id": trip.id,
@@ -226,6 +240,10 @@ def get_pending_trips(
             .count(),
             "username": trip.driver.username,
             "return_reason": return_reasons.get(trip.id),
+            "stores": [
+                store_names.get(sid, f"Store #{sid}")
+                for sid in planned_by_trip[trip.id]
+            ],
         }
         for trip in trips
     ]
@@ -499,6 +517,12 @@ def update_assigned_trip(
     shipment_numbers = [n.strip() for n in payload.shipment_numbers if n.strip()]
     if not shipment_numbers:
         raise HTTPException(status_code=400, detail="At least one shipment number is required.")
+    bad_number = _invalid_shipment_number(shipment_numbers)
+    if bad_number:
+        raise HTTPException(
+            status_code=400,
+            detail=f'Shipment number "{bad_number}" must be exactly 8 digits.',
+        )
     if len(shipment_numbers) != len(set(shipment_numbers)):
         raise HTTPException(status_code=400, detail="Duplicate shipment numbers entered.")
     if len(shipment_numbers) > MAX_SHIPMENT_NUMBERS:
@@ -1277,9 +1301,58 @@ def review_trip(
         )
 
     # =========================================================
+    # 11.6 TRIP BYPASS REMARKS -- steps a coordinator completed on the
+    # driver's behalf, with the reason they entered for each.
+    # =========================================================
+    bypass_action_labels = {
+        "checkout": "Checkout",
+        "check-in": "Arrived at Store",
+        "start-unloading": "Start Unloading",
+        "check-out": "Delivered",
+        "checkin": "Checkin",
+        "assign-store": "Linked stop to store",
+        "edit": "Edited dispatch",
+        "reorder": "Changed stop order",
+    }
+    bypass_logs = (
+        db.query(TripBypassLog)
+        .filter(TripBypassLog.trip_id == trip.id)
+        .order_by(TripBypassLog.created_at.asc(), TripBypassLog.id.asc())
+        .all()
+    )
+    bypass_user_ids = {log.performed_by_user_id for log in bypass_logs}
+    bypass_users = (
+        {
+            user.id: user
+            for user in db.query(User)
+            .options(joinedload(User.employee))
+            .filter(User.id.in_(bypass_user_ids))
+            .all()
+        }
+        if bypass_user_ids
+        else {}
+    )
+    bypass_remarks = [
+        {
+            "id": log.id,
+            "action": log.action,
+            "action_label": bypass_action_labels.get(log.action, log.action),
+            "reason": log.reason,
+            "performed_by": (
+                _display_name(bypass_users[log.performed_by_user_id])
+                if log.performed_by_user_id in bypass_users
+                else None
+            ),
+            "created_at": to_ph(log.created_at),
+        }
+        for log in bypass_logs
+    ]
+
+    # =========================================================
     # 12. RETURN COMPLETE TRIP REVIEW DATA
     # =========================================================
     return {
+        "bypass_remarks": bypass_remarks,
         # -------------------------
         # TRIP
         # -------------------------
