@@ -21,7 +21,10 @@ from app.models.trips import Trip, TripStatus
 from app.models.user import User
 
 from app.utils.timezone import utc_to_ph
-from app.services.trip_remarks import serialize_trip_remarks
+from app.services.trip_remarks import (
+    serialize_bypass_remarks,
+    serialize_trip_remarks,
+)
 from app.utils.user_display import display_name as _display_name
 
 
@@ -469,6 +472,9 @@ def review_office_trip(
         # Remarks the coordinator added after approving (photos are
         # locked by then) -- see add_trip_remark in app/api/admin/trips.py.
         "added_remarks": serialize_trip_remarks(db, trip.id),
+        # Steps done on the driver's behalf (Trip Bypass / Manual
+        # Entries), with the reason given for each.
+        "bypass_remarks": serialize_bypass_remarks(db, trip.id),
         "review_id": finance_review.id,
         "review_status": (
             finance_review.status.value

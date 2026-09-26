@@ -30,6 +30,7 @@ from app.api import (
     cash_advance_request,
     cash_advance_settings,
     mobile_app_version,
+    fuel_requests,
 )
 from app.api.payroll import overtime_approval, payroll_deductions
 from app.api import schedule_template as schedule_template_router
@@ -248,6 +249,7 @@ app.include_router(department_head.router, prefix="/api")
 app.include_router(employee_module_access.router, prefix="/api")
 app.include_router(mobile_page_access.router, prefix="/api")
 app.include_router(cash_advance_request.router, prefix="/api")
+app.include_router(fuel_requests.router, prefix="/api")
 app.include_router(cash_advance_settings.router, prefix="/api")
 app.include_router(mobile_app_version.router, prefix="/api")
 app.include_router(overtime_approval.router, prefix="/api")

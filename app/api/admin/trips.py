@@ -29,7 +29,10 @@ from app.models.trip_finance_review import FinanceReviewStatus, TripFinanceRevie
 from app.models.files import File
 from app.models.stores import Store
 from app.services.file_service import FileService
-from app.services.trip_remarks import serialize_trip_remarks
+from app.services.trip_remarks import (
+    serialize_bypass_remarks,
+    serialize_trip_remarks,
+)
 from app.utils.timezone import utc_to_ph
 from app.utils.user_display import display_name as _display_name
 from app.api.driver.trips import (
@@ -1304,61 +1307,10 @@ def review_trip(
         )
 
     # =========================================================
-    # 11.6 TRIP BYPASS REMARKS -- steps a coordinator completed on the
-    # driver's behalf, with the reason they entered for each.
-    # =========================================================
-    bypass_action_labels = {
-        "checkout": "Checkout",
-        "check-in": "Arrived at Store",
-        "start-unloading": "Start Unloading",
-        "check-out": "Delivered",
-        "checkin": "Checkin",
-        "assign-store": "Linked stop to store",
-        "edit": "Edited dispatch",
-        "reorder": "Changed stop order",
-        "manual-entry": "Manual trip entry",
-        "manual-entry-approved": "Manual entry approved",
-        "manual-entry-rejected": "Manual entry rejected",
-    }
-    bypass_logs = (
-        db.query(TripBypassLog)
-        .filter(TripBypassLog.trip_id == trip.id)
-        .order_by(TripBypassLog.created_at.asc(), TripBypassLog.id.asc())
-        .all()
-    )
-    bypass_user_ids = {log.performed_by_user_id for log in bypass_logs}
-    bypass_users = (
-        {
-            user.id: user
-            for user in db.query(User)
-            .options(joinedload(User.employee))
-            .filter(User.id.in_(bypass_user_ids))
-            .all()
-        }
-        if bypass_user_ids
-        else {}
-    )
-    bypass_remarks = [
-        {
-            "id": log.id,
-            "action": log.action,
-            "action_label": bypass_action_labels.get(log.action, log.action),
-            "reason": log.reason,
-            "performed_by": (
-                _display_name(bypass_users[log.performed_by_user_id])
-                if log.performed_by_user_id in bypass_users
-                else None
-            ),
-            "created_at": to_ph(log.created_at),
-        }
-        for log in bypass_logs
-    ]
-
-    # =========================================================
     # 12. RETURN COMPLETE TRIP REVIEW DATA
     # =========================================================
     return {
-        "bypass_remarks": bypass_remarks,
+        "bypass_remarks": serialize_bypass_remarks(db, trip.id),
         "added_remarks": serialize_trip_remarks(db, trip.id),
         # -------------------------
         # TRIP

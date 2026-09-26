@@ -68,7 +68,13 @@ MODULE_GROUPS = {
     ],
     "customers": ["customers"],
     "suppliers": ["suppliers"],
-    "fleet_management": ["vehicle_list", "vehicle_maintenance", "truck_types"],
+    "fleet_management": [
+        "vehicle_list",
+        "vehicle_maintenance",
+        "truck_types",
+        # Driver fuel requests (app/api/fuel_requests.py).
+        "fuel_requests",
+    ],
     "finance": ["finance_trips", "finance_expenses"],
     "administrator": [
         "users",
