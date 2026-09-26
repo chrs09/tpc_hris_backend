@@ -154,9 +154,10 @@ def reset_user_password(
     db: Session = Depends(get_db),
     current_user=Depends(_require_users_access),
 ):
-    """Resets a user's password to the lastname+birthday (MMDDYYYY)
-    convention and returns it once, same as account creation -- nothing
-    is emailed or stored in plaintext anywhere."""
+    """Resets a user's password to lastname+birthday (MMDDYYYY), or
+    lastname+current year when there's no birthday in the 201 file, and
+    returns it once, same as account creation -- nothing is emailed or
+    stored in plaintext anywhere."""
     user, temp_password = reset_user_password_service(
         user_id, db, changed_by_user_id=current_user.id
     )

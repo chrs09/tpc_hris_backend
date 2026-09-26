@@ -1,3 +1,4 @@
+from sqlalchemy import func
 from datetime import datetime
 
 from fastapi import HTTPException
@@ -196,6 +197,38 @@ def update_user_service(
 
     revisions = []
 
+    if data.username is not None:
+        new_username = " ".join(data.username.split())
+        if len(new_username) < 3 or len(new_username) > 50:
+            raise HTTPException(
+                status_code=400,
+                detail="Username must be 3 to 50 characters.",
+            )
+        if new_username != user.username:
+            taken = (
+                db.query(User.id)
+                .filter(
+                    func.lower(User.username) == new_username.lower(),
+                    User.id != user.id,
+                )
+                .first()
+            )
+            if taken:
+                raise HTTPException(
+                    status_code=400, detail="That username is already taken."
+                )
+            revisions.append(
+                UserRevision(
+                    user_id=user.id,
+                    field_changed="username",
+                    old_value=user.username,
+                    new_value=new_username,
+                    reason=data.reason,
+                    changed_by_user_id=changed_by_user_id,
+                )
+            )
+            user.username = new_username
+
     if data.role is not None:
         new_role = UserRole(data.role)
 
@@ -251,14 +284,12 @@ def reset_user_password_service(
     db: Session,
     changed_by_user_id: int = None,
 ):
-    """Resets a user's password to the same lastname+birthday (MMDDYYYY)
-    convention used for an applicant-to-employee conversion (see
-    app/api/admin/applicants.py), rather than a random string -- easy for
-    an admin to read off screen and relay to the employee. Requires the
-    linked employee to have a birthday on file (Employee Profile ->
-    Personal Details); there's no other source for this convention's
-    date component. Never stores the plaintext password anywhere except
-    the one-time return value, same as account creation."""
+    """Resets a user's password to lastname + birthday (MMDDYYYY), or --
+    only when the employee has no birthday in their 201 file --
+    lastname + the current year (same as a new account's password).
+    Easy for an admin to read off screen and relay to the employee.
+    Never stores the plaintext password anywhere except the one-time
+    return value, same as account creation."""
 
     user = db.query(User).filter(User.id == user_id).first()
 
@@ -277,18 +308,11 @@ def reset_user_password_service(
         employee.personal_details.birthday if employee.personal_details else None
     )
 
-    if not birthday:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "This employee has no birthday on file -- add it under "
-                "Personal Details before resetting the password this way."
-            ),
-        )
-
-    temporary_password = employee.last_name.lower().strip() + birthday.strftime(
-        "%m%d%Y"
-    )
+    last_name = employee.last_name.lower().strip()
+    if birthday:
+        temporary_password = last_name + birthday.strftime("%m%d%Y")
+    else:
+        temporary_password = last_name + str(datetime.now().year)
 
     user.hashed_password = hash_password(temporary_password)
     user.must_change_password = False

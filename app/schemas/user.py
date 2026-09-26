@@ -37,6 +37,9 @@ class UserCreate(BaseModel):
 
 
 class UserUpdate(BaseModel):
+    # New login name (optional). Must be unique; recorded in the
+    # user's revision history.
+    username: str | None = None
     role: UpdateUserRole | None = None
     is_active: bool | None = None
     # Required by update_user_service() when is_active is being changed

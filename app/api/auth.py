@@ -128,7 +128,19 @@ def refresh_access_token(
     except JWTError:
         raise HTTPException(status_code=401, detail="Refresh token expired or invalid")
 
-    user = db.query(User).filter(func.lower(User.username) == username.lower()).first()
+    # By id, not username: usernames can be renamed in Users, and an old
+    # token must neither break for the renamed user nor ever resolve to
+    # someone who later takes the old username. Old tokens without a
+    # user_id fall back to the username.
+    user_id = payload.get("user_id")
+    if user_id is not None:
+        user = db.query(User).filter(User.id == user_id).first()
+    else:
+        user = (
+            db.query(User)
+            .filter(func.lower(User.username) == username.lower())
+            .first()
+        )
 
     if not user:
         raise HTTPException(status_code=401, detail="User not found")
