@@ -10,6 +10,7 @@ from datetime import datetime
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel
+from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
 from app.core.database import get_db
@@ -17,6 +18,7 @@ from app.core.dependencies import require_role_or_module
 from app.models.employees import Employee
 from app.models.user import User
 from app.models.ticket import Ticket
+from app.models.ticket_comment import TicketComment
 from app.services.file_service import FileService
 from app.utils.user_display import display_name as _display_name
 
@@ -108,8 +110,9 @@ def _next_ticket_no(db: Session, when: datetime) -> str:
     return f"{prefix}{number:04d}"
 
 
-def _serialize(ticket: Ticket) -> dict:
+def _serialize(ticket: Ticket, comment_count: int = 0) -> dict:
     return {
+        "comment_count": comment_count,
         "id": ticket.id,
         "ticket_no": ticket.ticket_no,
         "title": ticket.title,
@@ -140,7 +143,12 @@ def list_tickets(
         .order_by(Ticket.created_at.desc())
         .all()
     )
-    return [_serialize(t) for t in tickets]
+    counts = dict(
+        db.query(TicketComment.ticket_id, func.count(TicketComment.id))
+        .group_by(TicketComment.ticket_id)
+        .all()
+    )
+    return [_serialize(t, counts.get(t.id, 0)) for t in tickets]
 
 
 @router.get("/assignees")
@@ -246,10 +254,111 @@ def delete_ticket(
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found.")
 
+    db.query(TicketComment).filter(TicketComment.ticket_id == ticket.id).delete(
+        synchronize_session=False
+    )
     db.delete(ticket)
     db.commit()
 
     return {"message": "Ticket deleted."}
+
+
+# =========================
+# COMMENTS / REMARKS
+# =========================
+class TicketCommentCreate(BaseModel):
+    body: str
+
+
+def _serialize_comment(
+    comment: TicketComment, current_user_id: int, creator_id: int
+) -> dict:
+    return {
+        "id": comment.id,
+        "body": comment.body,
+        "user_id": comment.user_id,
+        "user_name": _display_name(comment.user),
+        # Marks the ticket creator's comments ("Creator" tag in the UI).
+        "is_creator": comment.user_id == creator_id,
+        "is_mine": comment.user_id == current_user_id,
+        "created_at": comment.created_at,
+    }
+
+
+def _get_ticket(db: Session, ticket_id: int) -> Ticket:
+    ticket = db.query(Ticket).filter(Ticket.id == ticket_id).first()
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Ticket not found.")
+    return ticket
+
+
+@router.get("/{ticket_id}/comments")
+def list_ticket_comments(
+    ticket_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(_require_tickets_access),
+):
+    """Oldest first, like a conversation."""
+    ticket = _get_ticket(db, ticket_id)
+    comments = (
+        db.query(TicketComment)
+        .options(joinedload(TicketComment.user).joinedload(User.employee))
+        .filter(TicketComment.ticket_id == ticket.id)
+        .order_by(TicketComment.created_at.asc(), TicketComment.id.asc())
+        .all()
+    )
+    return [
+        _serialize_comment(c, current_user.id, ticket.created_by_user_id)
+        for c in comments
+    ]
+
+
+@router.post("/{ticket_id}/comments")
+def add_ticket_comment(
+    ticket_id: int,
+    payload: TicketCommentCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(_require_tickets_access),
+):
+    ticket = _get_ticket(db, ticket_id)
+    body = (payload.body or "").strip()
+    if not body:
+        raise HTTPException(status_code=400, detail="Comment can't be empty.")
+    if len(body) > 5000:
+        raise HTTPException(
+            status_code=400, detail="Comment is too long (5,000 characters max)."
+        )
+
+    comment = TicketComment(ticket_id=ticket.id, user_id=current_user.id, body=body)
+    db.add(comment)
+    ticket.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(comment)
+    return _serialize_comment(comment, current_user.id, ticket.created_by_user_id)
+
+
+@router.delete("/{ticket_id}/comments/{comment_id}")
+def delete_ticket_comment(
+    ticket_id: int,
+    comment_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(_require_tickets_access),
+):
+    """Only the person who wrote a comment can delete it."""
+    comment = (
+        db.query(TicketComment)
+        .filter(TicketComment.id == comment_id, TicketComment.ticket_id == ticket_id)
+        .first()
+    )
+    if not comment:
+        raise HTTPException(status_code=404, detail="Comment not found.")
+    if comment.user_id != current_user.id:
+        raise HTTPException(
+            status_code=403, detail="You can only delete your own comments."
+        )
+    db.delete(comment)
+    db.commit()
+    return {"message": "Comment deleted."}
 
 
 @router.post("/{ticket_id}/image")

@@ -84,3 +84,4 @@ from .trip_bypass_log import TripBypassLog as TripBypassLog
 from .trip_remark import TripRemark as TripRemark
 from .ticket import Ticket as Ticket
 from .fuel_request import FuelRequest as FuelRequest
+from .ticket_comment import TicketComment as TicketComment
