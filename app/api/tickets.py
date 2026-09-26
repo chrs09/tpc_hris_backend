@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.core.database import get_db
 from app.core.dependencies import require_role_or_module
+from app.models.employees import Employee
 from app.models.user import User
 from app.models.ticket import Ticket
 from app.services.file_service import FileService
@@ -35,7 +36,6 @@ class TicketCreate(BaseModel):
     title: str
     description: str | None = None
     priority: str | None = None
-    assigned_to_user_id: int | None = None
 
 
 class TicketUpdate(BaseModel):
@@ -51,15 +51,67 @@ class TicketUpdate(BaseModel):
     assigned_to_user_id: int | None = None
 
 
-def _require_valid_assignee(db: Session, user_id: int) -> None:
-    assignee = db.query(User).filter(User.id == user_id).first()
-    if not assignee:
-        raise HTTPException(status_code=400, detail="Assignee not found.")
+# Tickets are handled by IT: active users whose linked employee has the
+# position "IT".
+def _it_users(db: Session) -> list[User]:
+    return (
+        db.query(User)
+        .join(Employee, Employee.id == User.employee_id)
+        .options(joinedload(User.employee))
+        .filter(
+            Employee.position.isnot(None),
+            Employee.position.ilike("it"),
+            User.is_active.is_(True),
+        )
+        .order_by(User.id.asc())
+        .all()
+    )
+
+
+def _pick_it_assignee(db: Session) -> User | None:
+    """The IT employee with the fewest open tickets (ties: lowest id)."""
+    it_users = _it_users(db)
+    if not it_users:
+        return None
+    open_counts = {u.id: 0 for u in it_users}
+    for (assignee_id,) in db.query(Ticket.assigned_to_user_id).filter(
+        Ticket.assigned_to_user_id.in_(list(open_counts)),
+        Ticket.status != "done",
+    ):
+        open_counts[assignee_id] += 1
+    return min(it_users, key=lambda u: (open_counts[u.id], u.id))
+
+
+def _require_it_assignee(db: Session, user_id: int) -> None:
+    if user_id not in {u.id for u in _it_users(db)}:
+        raise HTTPException(
+            status_code=400, detail="Tickets can only be assigned to IT."
+        )
+
+
+def _next_ticket_no(db: Session, when: datetime) -> str:
+    """"TKT-YYYY-NNNN", sequential per year. The unique index on
+    ticket_no is the safety net against a rare concurrent collision."""
+    prefix = f"TKT-{when.year}-"
+    last = (
+        db.query(Ticket.ticket_no)
+        .filter(Ticket.ticket_no.like(f"{prefix}%"))
+        .order_by(Ticket.ticket_no.desc())
+        .first()
+    )
+    number = 1
+    if last and last[0]:
+        try:
+            number = int(last[0].rsplit("-", 1)[1]) + 1
+        except (IndexError, ValueError):
+            pass
+    return f"{prefix}{number:04d}"
 
 
 def _serialize(ticket: Ticket) -> dict:
     return {
         "id": ticket.id,
+        "ticket_no": ticket.ticket_no,
         "title": ticket.title,
         "description": ticket.description,
         "status": ticket.status,
@@ -91,6 +143,22 @@ def list_tickets(
     return [_serialize(t) for t in tickets]
 
 
+@router.get("/assignees")
+def list_ticket_assignees(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(_require_tickets_access),
+):
+    """Who a ticket can be assigned to: the IT employees."""
+    return [
+        {
+            "id": u.id,
+            "username": u.username,
+            "employee_name": _display_name(u),
+        }
+        for u in _it_users(db)
+    ]
+
+
 @router.post("")
 def create_ticket(
     payload: TicketCreate,
@@ -104,16 +172,19 @@ def create_ticket(
     if payload.priority and payload.priority not in VALID_PRIORITIES:
         raise HTTPException(status_code=400, detail="Invalid priority.")
 
-    if payload.assigned_to_user_id:
-        _require_valid_assignee(db, payload.assigned_to_user_id)
+    # Always handled by IT, never assigned to the creator.
+    assignee = _pick_it_assignee(db)
+    now = datetime.utcnow()
 
     ticket = Ticket(
+        ticket_no=_next_ticket_no(db, now),
         title=title,
         description=(payload.description or "").strip() or None,
         priority=payload.priority,
         status="todo",
         created_by_user_id=current_user.id,
-        assigned_to_user_id=payload.assigned_to_user_id or None,
+        assigned_to_user_id=assignee.id if assignee else None,
+        created_at=now,
     )
     db.add(ticket)
     db.commit()
@@ -152,10 +223,10 @@ def update_ticket(
             raise HTTPException(status_code=400, detail="Invalid priority.")
         ticket.priority = payload.priority or None
 
-    if payload.assigned_to_user_id is not None:
-        if payload.assigned_to_user_id:
-            _require_valid_assignee(db, payload.assigned_to_user_id)
-        ticket.assigned_to_user_id = payload.assigned_to_user_id or None
+    # Reassigning is only between IT employees (no unassigning).
+    if payload.assigned_to_user_id:
+        _require_it_assignee(db, payload.assigned_to_user_id)
+        ticket.assigned_to_user_id = payload.assigned_to_user_id
 
     ticket.updated_at = datetime.utcnow()
 

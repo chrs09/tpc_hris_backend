@@ -14,6 +14,10 @@ class Ticket(Base):
 
     id = Column(Integer, primary_key=True, index=True)
 
+    # Human-friendly reference for tracking, e.g. "TKT-2026-0001"
+    # (sequential per year, see app/api/tickets.py).
+    ticket_no = Column(String(20), unique=True, index=True, nullable=True)
+
     title = Column(String(255), nullable=False)
     description = Column(Text, nullable=True)
 
@@ -28,8 +32,9 @@ class Ticket(Base):
     image_url = Column(String(500), nullable=True)
 
     created_by_user_id = Column(Integer, ForeignKey("tpc_users.id"), nullable=False)
-    # Who's responsible for actually handling this ticket -- nullable,
-    # not every ticket needs an owner right away.
+    # Who handles it: always an IT employee (Employee.position "IT"),
+    # assigned automatically on create -- never the creator. Null only
+    # if no IT employee exists yet.
     assigned_to_user_id = Column(Integer, ForeignKey("tpc_users.id"), nullable=True)
 
     created_at = Column(DateTime, default=datetime.utcnow)
