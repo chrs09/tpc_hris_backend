@@ -1316,6 +1316,9 @@ def review_trip(
         "assign-store": "Linked stop to store",
         "edit": "Edited dispatch",
         "reorder": "Changed stop order",
+        "manual-entry": "Manual trip entry",
+        "manual-entry-approved": "Manual entry approved",
+        "manual-entry-rejected": "Manual entry rejected",
     }
     bypass_logs = (
         db.query(TripBypassLog)

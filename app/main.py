@@ -36,6 +36,7 @@ from app.api import schedule_template as schedule_template_router
 from app.api.driver import trips
 from app.api.admin import trips as admin_trips
 from app.api.admin import trip_bypass as admin_trip_bypass
+from app.api.admin import trip_manual_entries as admin_trip_manual_entries
 from app.api.admin import stores as stores
 from app.api.admin import origins as origins
 from app.api.admin import truck_types as truck_types
@@ -257,6 +258,7 @@ app.include_router(trip_maintenance_router.router, prefix="/api")
 
 app.include_router(admin_trips.router, prefix="/api")
 app.include_router(admin_trip_bypass.router, prefix="/api")
+app.include_router(admin_trip_manual_entries.router, prefix="/api")
 app.include_router(stores.router, prefix="/api")
 app.include_router(origins.router, prefix="/api")
 app.include_router(truck_types.router, prefix="/api")

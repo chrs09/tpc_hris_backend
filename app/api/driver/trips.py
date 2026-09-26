@@ -1878,7 +1878,10 @@ def get_my_trips(
 ):
     query = db.query(Trip).options(
         joinedload(Trip.stops).joinedload(TripStop.store)
-    ).filter(Trip.driver_id == current_user.id)
+    ).filter(
+        Trip.driver_id == current_user.id,
+        Trip.status != TripStatus.PENDING_MANUAL_APPROVAL,
+    )
 
     if cutoff:
         try:

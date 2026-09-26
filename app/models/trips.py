@@ -20,6 +20,10 @@ class TripStatus(str, enum.Enum):
     ASSIGNED = "ASSIGNED"
     ACTIVE = "ACTIVE"
 
+    # Entered by a coordinator_admin in Trip Manual Entries; waiting for
+    # a superadmin before it goes to Trip Approvals (PENDING_APPROVAL).
+    PENDING_MANUAL_APPROVAL = "PENDING_MANUAL_APPROVAL"
+
     # Driver completed trip.
     # Waiting for coordinator.
     PENDING_APPROVAL = "PENDING_APPROVAL"
