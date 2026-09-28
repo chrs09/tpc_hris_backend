@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Body, Depends, File, HTTPException, Form, UploadFile
 from datetime import date, datetime
 import json
+from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
 from app.core.database import get_db
@@ -12,6 +13,7 @@ from app.models.truck_type import TruckType
 from app.models.vehicle_or_history import VehicleUnitORHistory
 from app.models.vehicle_unit_checklist import VehicleUnitChecklist
 from app.models.TripRate import TripRateProfile
+from app.models.stores import Store
 from app.models.customer import Customer
 from app.models.supplier import Supplier
 from app.models.vehicle_maintenance import VehicleMaintenance
@@ -491,6 +493,14 @@ def get_rate_profiles(
     profiles = (
         db.query(TripRateProfile).order_by(TripRateProfile.profile_name.asc()).all()
     )
+    # Stores set to each category -- archiving a category they use stops
+    # new trips to them until the store is moved to another category.
+    store_counts = dict(
+        db.query(Store.trip_rate_profile_id, func.count(Store.id))
+        .filter(Store.trip_rate_profile_id.isnot(None))
+        .group_by(Store.trip_rate_profile_id)
+        .all()
+    )
 
     response = [
         {
@@ -502,6 +512,7 @@ def get_rate_profiles(
             "helper_first_trip_rate": float(profile.helper_first_trip_rate),
             "helper_next_trip_rate": float(profile.helper_next_trip_rate),
             "is_active": profile.is_active,
+            "store_count": store_counts.get(profile.id, 0),
         }
         for profile in profiles
     ]

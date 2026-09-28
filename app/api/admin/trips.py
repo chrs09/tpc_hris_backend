@@ -124,6 +124,23 @@ def _current_stop_name(db: Session, trip: Trip) -> str | None:
 # =========================
 # SUMMARY
 # =========================
+# Trips recorded on the Trip Manual Entries page (logged there with this
+# action -- see app/api/admin/trip_manual_entries.py), so lists can badge
+# them apart from trips done on the driver's phone.
+def _manual_entry_trip_ids(db: Session, trip_ids) -> set:
+    if not trip_ids:
+        return set()
+    return {
+        row[0]
+        for row in db.query(TripBypassLog.trip_id)
+        .filter(
+            TripBypassLog.trip_id.in_(list(trip_ids)),
+            TripBypassLog.action == "manual-entry",
+        )
+        .all()
+    }
+
+
 @router.get("/summary")
 def get_trip_summary(
     db: Session = Depends(get_db), current_admin=Depends(require_role_or_module(roles=["admin", "superadmin", "coordinator_admin", "coordinator"], module_key="trip_management.trips"))
@@ -135,7 +152,12 @@ def get_trip_summary(
         .filter(Trip.status == TripStatus.ASSIGNED)
         .count(),
         "pending_trips": db.query(Trip)
-        .filter(Trip.status == TripStatus.PENDING_APPROVAL)
+        .filter(
+            Trip.status.in_(
+                [TripStatus.PENDING_APPROVAL, TripStatus.PENDING_MANUAL_APPROVAL]
+            ),
+            Trip.is_archived.is_(False),
+        )
         .count(),
         "active_trips": db.query(Trip).filter(Trip.status == TripStatus.ACTIVE).count(),
         "completed_today": db.query(Trip)
@@ -197,12 +219,18 @@ def get_pending_trips(
         db.query(Trip)
         .options(joinedload(Trip.driver))
         .filter(
-            Trip.status == TripStatus.PENDING_APPROVAL,
+            # PENDING_MANUAL_APPROVAL: a coordinator_admin's manual entry
+            # still waiting for a superadmin -- listed here too so it
+            # isn't only visible on the Trip Manual Entries page.
+            Trip.status.in_(
+                [TripStatus.PENDING_APPROVAL, TripStatus.PENDING_MANUAL_APPROVAL]
+            ),
             Trip.is_archived.is_(False),
         )
         .order_by(Trip.start_time.desc())
         .all()
     )
+    manual_ids = _manual_entry_trip_ids(db, [trip.id for trip in trips])
 
     # Batched lookup (not per-row) of return reasons, so trips office
     # sent back for correction show a badge in the list without
@@ -246,6 +274,10 @@ def get_pending_trips(
             .count(),
             "username": trip.driver.username,
             "return_reason": return_reasons.get(trip.id),
+            "is_manual_entry": trip.id in manual_ids,
+            "awaiting_manual_approval": (
+                trip.status == TripStatus.PENDING_MANUAL_APPROVAL
+            ),
             "stores": [
                 store_names.get(sid, f"Store #{sid}")
                 for sid in planned_by_trip[trip.id]
@@ -1322,6 +1354,7 @@ def review_trip(
         "current_step": trip.current_step,
         "current_step_label": _current_step_label(trip.current_step),
         "current_stop": _current_stop_name(db, trip),
+        "is_manual_entry": bool(_manual_entry_trip_ids(db, [trip.id])),
         "status": (
             trip.status.value
             if hasattr(trip.status, "value")
@@ -1595,6 +1628,7 @@ def get_completed_trips(
     # A trip only becomes COMPLETED when Finance approves it (see
     # app/api/finance/trips.py) -- who approved it and when.
     trip_ids = [trip.id for trip in trips]
+    manual_ids = _manual_entry_trip_ids(db, trip_ids)
     finance_reviews = (
         {
             review.trip_id: review
@@ -1661,6 +1695,7 @@ def get_completed_trips(
                 store_names.get(sid, f"Store #{sid}")
                 for sid in planned_by_trip[trip.id]
             ],
+            "is_manual_entry": trip.id in manual_ids,
             **finance_info(trip.id),
         }
         for trip in trips
