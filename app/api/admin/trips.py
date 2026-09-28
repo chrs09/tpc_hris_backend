@@ -11,7 +11,9 @@ from fastapi import (
     Form,
     UploadFile,
     File as FastAPIFile,
+    Query,
 )
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session, joinedload
 from datetime import datetime, date, timedelta
 
@@ -285,6 +287,174 @@ def get_pending_trips(
         }
         for trip in trips
     ]
+
+
+# =========================
+# APPROVAL PIPELINE (Trip Dashboard list)
+#
+# Every finished trip and where it sits in the approval chain --
+# coordinator (Trip Approvals) -> office (Trip Confirmation) -> finance
+# -> approved. Filtered, searched and paged on the server since approved
+# trips pile up over time.
+# =========================
+PIPELINE_STATUSES = {
+    TripStatus.PENDING_MANUAL_APPROVAL: "Pending Superadmin (Manual Entry)",
+    TripStatus.PENDING_APPROVAL: "Pending Approval",
+    TripStatus.PENDING_OFFICE_REVIEW: "Pending Office Approval",
+    TripStatus.PENDING_FINANCE_REVIEW: "Pending Finance Approval",
+    TripStatus.COMPLETED: "Approved",
+}
+
+
+@router.get("/approval-pipeline")
+def get_approval_pipeline(
+    status: str | None = Query(None),
+    search: str | None = Query(None),
+    limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+    current_admin=Depends(require_role_or_module(roles=["admin", "superadmin", "coordinator_admin", "coordinator"], module_key="trip_management.trip_dashboard")),
+):
+    statuses = list(PIPELINE_STATUSES)
+    base = db.query(Trip).filter(
+        Trip.status.in_(statuses), Trip.is_archived.is_(False)
+    )
+
+    # Per-status counts for the filter (before the status filter itself,
+    # but after search, so the numbers match what the search finds).
+    query = base
+    if search and search.strip():
+        like = f"%{search.strip()}%"
+        store_ids = [
+            row[0]
+            for row in db.query(Store.id).filter(Store.name.ilike(like)).all()
+        ]
+        conditions = [
+            Trip.trip_code.ilike(like),
+            Trip.ticket_no.ilike(like),
+            Trip.driver_id.in_(
+                db.query(User.id)
+                .outerjoin(Employee, Employee.id == User.employee_id)
+                .filter(
+                    or_(
+                        User.username.ilike(like),
+                        Employee.first_name.ilike(like),
+                        Employee.last_name.ilike(like),
+                        func.concat(
+                            Employee.first_name, " ", Employee.last_name
+                        ).ilike(like),
+                    )
+                )
+            ),
+        ]
+        if store_ids:
+            conditions.append(
+                Trip.id.in_(
+                    db.query(TripStop.trip_id).filter(
+                        TripStop.store_id.in_(store_ids)
+                    )
+                )
+            )
+            conditions.append(Trip.destination_store_id.in_(store_ids))
+        query = query.filter(or_(*conditions))
+
+    counts = {key.value: 0 for key in statuses}
+    for value, count in (
+        query.with_entities(Trip.status, func.count(Trip.id))
+        .group_by(Trip.status)
+        .all()
+    ):
+        counts[value.value if hasattr(value, "value") else value] = count
+
+    if status:
+        try:
+            wanted = TripStatus(status)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid status.")
+        if wanted not in PIPELINE_STATUSES:
+            raise HTTPException(status_code=400, detail="Invalid status.")
+        query = query.filter(Trip.status == wanted)
+
+    total = query.count()
+    trips = (
+        query.options(
+            joinedload(Trip.driver).joinedload(User.employee),
+            joinedload(Trip.trip_rate_profile),
+        )
+        .order_by(Trip.end_time.desc(), Trip.id.desc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+
+    trip_ids = [trip.id for trip in trips]
+    manual_ids = _manual_entry_trip_ids(db, trip_ids)
+    reviews = (
+        {
+            review.trip_id: review
+            for review in db.query(TripFinanceReview)
+            .filter(TripFinanceReview.trip_id.in_(trip_ids))
+            .all()
+        }
+        if trip_ids
+        else {}
+    )
+    planned_by_trip = {trip.id: _load_planned_store_ids(trip) for trip in trips}
+    all_store_ids = {sid for ids in planned_by_trip.values() for sid in ids}
+    store_names = (
+        {
+            store.id: store.name
+            for store in db.query(Store).filter(Store.id.in_(all_store_ids)).all()
+        }
+        if all_store_ids
+        else {}
+    )
+
+    def fmt(dt):
+        return utc_to_ph(dt).strftime("%Y-%m-%d %I:%M %p") if dt else None
+
+    items = []
+    for trip in trips:
+        review = reviews.get(trip.id)
+        # When the trip reached its current stage.
+        stage_at = {
+            TripStatus.PENDING_OFFICE_REVIEW: review.submitted_at if review else None,
+            TripStatus.PENDING_FINANCE_REVIEW: (
+                review.office_reviewed_at if review else None
+            ),
+            TripStatus.COMPLETED: review.approved_at if review else None,
+        }.get(trip.status) or trip.end_time
+        items.append(
+            {
+                "id": trip.id,
+                "trip_code": trip.trip_code,
+                "ticket_no": trip.ticket_no,
+                "driver_name": _display_name(trip.driver) if trip.driver else None,
+                "username": trip.driver.username if trip.driver else None,
+                "trip_category": (
+                    trip.trip_rate_profile.profile_name
+                    if trip.trip_rate_profile
+                    else None
+                ),
+                "stores": [
+                    store_names.get(sid, f"Store #{sid}")
+                    for sid in planned_by_trip[trip.id]
+                ],
+                "start_time": fmt(trip.start_time),
+                "end_time": fmt(trip.end_time),
+                "status": trip.status.value,
+                "status_label": PIPELINE_STATUSES[trip.status],
+                "status_since": fmt(stage_at),
+                "is_manual_entry": trip.id in manual_ids,
+                "returned": bool(
+                    review
+                    and review.status == FinanceReviewStatus.RETURNED
+                    and trip.status == TripStatus.PENDING_APPROVAL
+                ),
+            }
+        )
+
+    return {"items": items, "total": total, "counts": counts}
 
 
 # =========================
