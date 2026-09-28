@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, Query
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -18,6 +19,8 @@ def list_error_logs(
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     status_code: int | None = Query(None),
+    # Matches URL, error type, message or username (contains, any case).
+    search: str | None = Query(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(_require_error_logs_access),
 ):
@@ -29,6 +32,18 @@ def list_error_logs(
 
     if status_code is not None:
         query = query.filter(ErrorLog.status_code == status_code)
+
+    if search and search.strip():
+        like = f"%{search.strip()}%"
+        query = query.filter(
+            or_(
+                ErrorLog.url.ilike(like),
+                ErrorLog.error_type.ilike(like),
+                ErrorLog.detail.ilike(like),
+                ErrorLog.username.ilike(like),
+                ErrorLog.method.ilike(like),
+            )
+        )
 
     total = query.count()
 

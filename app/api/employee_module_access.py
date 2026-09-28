@@ -75,7 +75,7 @@ MODULE_GROUPS = {
         # Driver fuel requests (app/api/fuel_requests.py).
         "fuel_requests",
     ],
-    "finance": ["finance_trips", "finance_expenses"],
+    "finance": ["finance_trips", "finance_expenses", "cash_advance"],
     "administrator": [
         "users",
         "hierarchy",
@@ -148,6 +148,7 @@ def list_employees_with_access(
 
     employee_ids = [e.id for e in employees]
     grants_by_employee: dict[int, list[str]] = {}
+    read_only_by_employee: dict[int, list[str]] = {}
     if employee_ids:
         rows = (
             db.query(EmployeeModuleAccess)
@@ -156,6 +157,10 @@ def list_employees_with_access(
         )
         for row in rows:
             grants_by_employee.setdefault(row.employee_id, []).append(row.module_key)
+            if not row.can_edit:
+                read_only_by_employee.setdefault(row.employee_id, []).append(
+                    row.module_key
+                )
 
     return [
         {
@@ -165,6 +170,7 @@ def list_employees_with_access(
             "department": emp.department,
             "position": emp.position,
             "module_keys": grants_by_employee.get(emp.id, []),
+            "read_only_keys": read_only_by_employee.get(emp.id, []),
             "has_custom_access": emp.has_custom_module_access,
         }
         for emp in employees
@@ -188,6 +194,20 @@ def set_employee_module_access(
             status_code=400, detail=f"Unknown module key(s): {', '.join(invalid)}"
         )
 
+    # View-only keys: from the request, or (when not sent) whatever each
+    # key already had, so a save that doesn't know about view-only never
+    # silently turns it off.
+    if payload.read_only_keys is not None:
+        read_only = set(payload.read_only_keys) & set(payload.module_keys)
+    else:
+        read_only = {
+            row.module_key
+            for row in db.query(EmployeeModuleAccess).filter(
+                EmployeeModuleAccess.employee_id == employee_id,
+                EmployeeModuleAccess.can_edit.is_(False),
+            )
+        }
+
     # Full replace -- simplest semantics for a checkbox grid saved per row.
     db.query(EmployeeModuleAccess).filter(
         EmployeeModuleAccess.employee_id == employee_id
@@ -198,6 +218,7 @@ def set_employee_module_access(
             EmployeeModuleAccess(
                 employee_id=employee_id,
                 module_key=key,
+                can_edit=key not in read_only,
                 granted_by_user_id=current_user.id,
             )
         )
@@ -213,6 +234,7 @@ def set_employee_module_access(
     return {
         "employee_id": employee_id,
         "module_keys": sorted(set(payload.module_keys)),
+        "read_only_keys": sorted(read_only & set(payload.module_keys)),
         "has_custom_access": True,
     }
 
@@ -270,5 +292,6 @@ def get_my_module_access(
     )
     return {
         "module_keys": [r.module_key for r in rows],
+        "read_only_keys": [r.module_key for r in rows if not r.can_edit],
         "has_custom_access": employee.has_custom_module_access,
     }

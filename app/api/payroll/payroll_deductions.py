@@ -9,7 +9,7 @@ from fastapi import (
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.dependencies import get_current_user
+from app.core.dependencies import get_current_user, require_role_or_module
 
 from app.models.user import User
 from app.models.employees import Employee
@@ -22,6 +22,12 @@ from app.services.cash_advance_payroll import (
 router = APIRouter(
     prefix="/payroll-deductions",
     tags=["Payroll Deductions"],
+)
+
+# Admin role by default; others via Module Assignment / Org Chart
+# (payroll.payroll), where "Can edit: No" makes it view-only.
+_require_payroll = require_role_or_module(
+    roles=["admin"], module_key="payroll.payroll"
 )
 
 
@@ -117,16 +123,8 @@ def _save_deduction(
 def save_payroll_deduction(
     payload: dict,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(_require_payroll),
 ):
-    if current_user.role not in [
-        "admin",
-        "superadmin",
-    ]:
-        raise HTTPException(
-            status_code=403,
-            detail="Only HR/Admin can save payroll deductions.",
-        )
 
     deduction = _save_deduction(db, payload, current_user.id)
 
@@ -140,16 +138,8 @@ def save_payroll_deduction(
 def save_payroll_deductions_bulk(
     payload: list[dict],
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(_require_payroll),
 ):
-    if current_user.role not in [
-        "admin",
-        "superadmin",
-    ]:
-        raise HTTPException(
-            status_code=403,
-            detail="Only HR/Admin can save payroll deductions.",
-        )
 
     ids = [_save_deduction(db, item, current_user.id).id for item in payload]
 
@@ -164,14 +154,12 @@ def get_cash_advance_for_cutoff(
     cutoff_period: str,
     employee_ids: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(_require_payroll),
 ):
     """Cash advance to deduct this cutoff, per employee (comma-separated
     ids): the suggested amount from their approved advances, what was
     already posted for this cutoff (if the payslip was generated before),
     and the balance owed before this cutoff."""
-    if current_user.role not in ["admin", "superadmin"]:
-        raise HTTPException(status_code=403, detail="Not allowed.")
     try:
         ids = [int(x) for x in employee_ids.split(",") if x.strip()]
     except ValueError:
@@ -185,7 +173,7 @@ def get_payroll_deductions(
     cutoff_period: str | None = None,
     department: str | None = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(_require_payroll),
 ):
     query = db.query(PayrollDeduction)
 
@@ -204,7 +192,7 @@ def get_payroll_deductions(
 def get_employee_payroll_deductions(
     employee_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(_require_payroll),
 ):
     records = (
         db.query(PayrollDeduction)

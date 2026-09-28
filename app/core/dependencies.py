@@ -1,4 +1,4 @@
-from fastapi import Depends, HTTPException, status
+from fastapi import Request, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
 from sqlalchemy.orm import Session
@@ -104,6 +104,7 @@ def require_role_or_module(roles: list[str], module_key: str):
     exactly, e.g. "hris.leave", "trip_management.stores")."""
 
     def _dependency(
+        request: Request,
         current_user: User = Depends(get_current_user),
         db: Session = Depends(get_db),
     ) -> User:
@@ -113,7 +114,35 @@ def require_role_or_module(roles: list[str], module_key: str):
             else current_user.role
         )
 
-        if role_value == "superadmin" or role_value in roles:
+        if role_value == "superadmin":
+            return current_user
+
+        # View-only grant ("Can edit: No" on the Org Chart): the module
+        # still opens, but any change is refused -- checked before the
+        # role shortcut below, so a role that would normally allow edits
+        # can't override it.
+        if request.method not in ("GET", "HEAD", "OPTIONS") and current_user.employee_id:
+            from app.models.employees import Employee
+            from app.models.employee_module_access import EmployeeModuleAccess
+
+            view_only = (
+                db.query(EmployeeModuleAccess.id)
+                .join(Employee, Employee.id == EmployeeModuleAccess.employee_id)
+                .filter(
+                    Employee.id == current_user.employee_id,
+                    Employee.has_custom_module_access.is_(True),
+                    EmployeeModuleAccess.module_key == module_key,
+                    EmployeeModuleAccess.can_edit.is_(False),
+                )
+                .first()
+            )
+            if view_only:
+                raise HTTPException(
+                    status_code=403,
+                    detail="You have view-only access to this module.",
+                )
+
+        if role_value in roles:
             return current_user
 
         if current_user.employee_id:
@@ -143,5 +172,49 @@ def require_role_or_module(roles: list[str], module_key: str):
             status_code=403,
             detail="You don't have access to this module.",
         )
+
+    return _dependency
+
+
+def has_editable_grant(db: Session, user: User, module_keys: list[str]) -> bool:
+    """True for a superadmin, or an employee explicitly granted any of
+    `module_keys` with "Can edit: Yes" (Org Chart -> What they can
+    access). Role alone never counts here -- this is for actions that
+    used to be superadmin-only (e.g. editing attendance)."""
+    role_value = user.role.value if hasattr(user.role, "value") else user.role
+    if role_value == "superadmin":
+        return True
+    if not user.employee_id:
+        return False
+    from app.models.employees import Employee
+    from app.models.employee_module_access import EmployeeModuleAccess
+
+    return (
+        db.query(EmployeeModuleAccess.id)
+        .join(Employee, Employee.id == EmployeeModuleAccess.employee_id)
+        .filter(
+            Employee.id == user.employee_id,
+            Employee.has_custom_module_access.is_(True),
+            EmployeeModuleAccess.module_key.in_(module_keys),
+            EmployeeModuleAccess.can_edit.is_(True),
+        )
+        .first()
+        is not None
+    )
+
+
+def require_superadmin_or_editable(module_keys: list[str]):
+    """Dependency form of has_editable_grant."""
+
+    def _dependency(
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+    ) -> User:
+        if not has_editable_grant(db, current_user, module_keys):
+            raise HTTPException(
+                status_code=403,
+                detail="You don't have edit access to this module.",
+            )
+        return current_user
 
     return _dependency

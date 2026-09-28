@@ -6,7 +6,11 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
 from app.core.database import get_db
-from app.core.dependencies import get_current_user, require_role_or_module
+from app.core.dependencies import (
+    get_current_user,
+    has_editable_grant,
+    require_role_or_module,
+)
 from app.models.user import User
 from app.models.employees import Employee
 from app.models.cash_advance_head import CashAdvanceHead
@@ -94,6 +98,9 @@ def _can_review(req: CashAdvanceRequest, current_user: User, db: Session) -> boo
     if req.requested_by_user_id == current_user.id:
         return True
     if current_user.role == "superadmin":
+        return True
+    # Granted Cash Advance Approvals with "Can edit: Yes".
+    if has_editable_grant(db, current_user, ["finance.cash_advance"]):
         return True
     employee = req.employee
     if not employee or not employee.department:

@@ -13,7 +13,13 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.database import get_db
-from app.core.dependencies import require_superadmin
+from app.core.dependencies import require_role_or_module
+
+# Superadmin, or granted Settings (Module Assignment / Org Chart); with
+# "Can edit: No" it's view-only.
+_require_settings = require_role_or_module(
+    roles=[], module_key="administrator.settings"
+)
 from app.models.mobile_app_version import MobileAppVersion
 from app.models.user import User
 from app.schemas.mobile_app_version import MobileAppVersionUpdate
@@ -56,7 +62,7 @@ def set_latest_version(
     platform: str,
     payload: MobileAppVersionUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_superadmin),
+    current_user: User = Depends(_require_settings),
 ):
     row = (
         db.query(MobileAppVersion)
@@ -181,7 +187,7 @@ def _fetch_eas_builds(platform: str, profile: str) -> list[dict]:
 def get_eas_build_history(
     platform: str,
     profile: str = "preview",
-    current_user: User = Depends(require_superadmin),
+    current_user: User = Depends(_require_settings),
 ):
     """Returns recent EAS builds for this platform+profile, newest
     first, so the settings page can show a version history instead of
@@ -208,7 +214,7 @@ def sync_from_eas(
     platform: str,
     profile: str = "preview",
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_superadmin),
+    current_user: User = Depends(_require_settings),
 ):
     """Pulls the most recent finished EAS build for this platform+profile
     (e.g. android/preview) and updates latest_version/apk_url from it --

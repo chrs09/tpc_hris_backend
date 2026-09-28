@@ -21,13 +21,20 @@ from app.models.employee_bank import EmployeeBank
 from app.models.employees import Employee
 from app.models.user import User
 from app.models.schedule_template import ScheduleTemplate
-from app.core.dependencies import get_current_user
+from app.core.dependencies import get_current_user, require_role_or_module
 from app.services.cv_parser import parse_cv
 from app.models.files import File as FileModel
 from app.services.file_service import FileService
 from app.models.employee_inactive import EmployeeInactiveRecord
 
 router = APIRouter(prefix="/employees", tags=["Employees"])
+
+# Changing employee records: admin role by default, or anyone granted
+# HRIS -> Employees (Module Assignment / Org Chart); "Can edit: No"
+# makes it view-only. Reading stays open -- many pages use the list.
+_require_employee_editor = require_role_or_module(
+    roles=["admin"], module_key="hris.employees"
+)
 
 
 # Validation error
@@ -490,7 +497,7 @@ async def create_employee(
     employment_history: str = Form("[]"),
     character_references: str = Form("[]"),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(_require_employee_editor),
 ):
     parsed_education = safe_json_loads(education_records, "education_records")
     parsed_employment = safe_json_loads(employment_history, "employment_history")
@@ -783,7 +790,7 @@ async def patch_employee(
     employment_history: str = Form(None),
     character_references: str = Form(None),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(_require_employee_editor),
 ):
     employee = db.query(Employee).filter(Employee.id == employee_id).first()
 
@@ -1254,7 +1261,7 @@ async def patch_employee(
 def delete_employee(
     employee_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(_require_employee_editor),
 ):
     employee = db.query(Employee).filter(Employee.id == employee_id).first()
 
@@ -1272,7 +1279,10 @@ def delete_employee(
 
 # CV PARSER
 @router.post("/parse-cv")
-async def parse_cv_endpoint(file: UploadFile = File(...)):
+async def parse_cv_endpoint(
+    file: UploadFile = File(...),
+    current_user: User = Depends(_require_employee_editor),
+):
     if not file.filename.endswith(".pdf"):
         return {"error": "Only PDF files supported for now"}
 

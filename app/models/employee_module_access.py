@@ -1,6 +1,14 @@
 from datetime import datetime
 
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, UniqueConstraint
+from sqlalchemy import (
+    Boolean,
+    Column,
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import relationship
 
 from app.core.database import Base
@@ -23,6 +31,10 @@ class EmployeeModuleAccess(Base):
     )
 
     module_key = Column(String(80), nullable=False)
+
+    # False = view-only: the module opens, but changes (POST/PUT/PATCH/
+    # DELETE) are refused -- see require_role_or_module.
+    can_edit = Column(Boolean, nullable=False, default=True)
 
     granted_by_user_id = Column(Integer, ForeignKey("tpc_users.id"), nullable=True)
 

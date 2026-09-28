@@ -10,7 +10,7 @@ from fastapi import (
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.dependencies import get_current_user
+from app.core.dependencies import get_current_user, require_role_or_module
 
 from app.models.user import User
 from app.models.employees import Employee
@@ -22,11 +22,17 @@ router = APIRouter(
     tags=["Overtime Approval"],
 )
 
+# Admin role by default; others via Module Assignment / Org Chart
+# (payroll.payroll), where "Can edit: No" makes it view-only.
+_require_payroll = require_role_or_module(
+    roles=["admin"], module_key="payroll.payroll"
+)
+
 
 @router.get("/list")
 def get_overtime_approvals(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(_require_payroll),
 ):
     records = (
         db.query(OvertimeApproval).order_by(OvertimeApproval.created_at.desc()).all()
@@ -39,7 +45,7 @@ def get_overtime_approvals(
 def get_employee_overtime(
     employee_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(_require_payroll),
 ):
     records = (
         db.query(OvertimeApproval)
@@ -74,16 +80,8 @@ def get_employee_overtime(
 def approve_overtime(
     payload: dict,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(_require_payroll),
 ):
-    if current_user.role not in [
-        "admin",
-        "superadmin",
-    ]:
-        raise HTTPException(
-            status_code=403,
-            detail="Only HR/Admin can approve overtime.",
-        )
 
     employee = db.query(Employee).filter(Employee.id == payload["employee_id"]).first()
 
@@ -183,16 +181,8 @@ def approve_overtime(
 def reverse_overtime(
     payload: dict,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(_require_payroll),
 ):
-    if current_user.role not in [
-        "admin",
-        "superadmin",
-    ]:
-        raise HTTPException(
-            status_code=403,
-            detail="Only HR/Admin can reverse overtime.",
-        )
 
     overtime = (
         db.query(OvertimeApproval)

@@ -19,7 +19,13 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
 from app.core.database import get_db
-from app.core.dependencies import get_current_user, require_role_or_module, require_superadmin
+from app.core.dependencies import (
+    get_current_user,
+    has_editable_grant,
+    require_role_or_module,
+    require_superadmin,
+    require_superadmin_or_editable,
+)
 from app.models.attendance import AttendanceRecord
 from app.models.employees import Employee
 from app.models.user import User
@@ -984,10 +990,12 @@ def update_attendance(
 ):
     today = datetime.now(ZoneInfo("Asia/Manila")).date()
 
-    if current_user.role != "superadmin":
+    # Superadmin, or someone granted an Attendance view with "Can edit:
+    # Yes" (Org Chart -> What they can access).
+    if not has_editable_grant(db, current_user, ["hris.attendance_list_view", "hris.attendance_grid_view"]):
         raise HTTPException(
             status_code=403,
-            detail="Only superadmin can edit attendance records.",
+            detail="You don't have edit access to attendance records.",
         )
 
     if attendance_in.attendance_date > today:
@@ -1319,7 +1327,9 @@ def approve_attendance(
     attendance_id: int,
     side: str = Query("time_in", pattern="^(time_in|time_out)$"),
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_superadmin),
+    current_user: User = Depends(
+        require_superadmin_or_editable(["hris.attendance_grid_view"])
+    ),
 ):
     attendance = (
         db.query(AttendanceRecord).filter(AttendanceRecord.id == attendance_id).first()
@@ -1351,7 +1361,9 @@ def reject_attendance(
     attendance_id: int,
     side: str = Query("time_in", pattern="^(time_in|time_out)$"),
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_superadmin),
+    current_user: User = Depends(
+        require_superadmin_or_editable(["hris.attendance_grid_view"])
+    ),
 ):
     attendance = (
         db.query(AttendanceRecord).filter(AttendanceRecord.id == attendance_id).first()
@@ -1383,10 +1395,12 @@ def adjust_attendance_time(
     attendance_id: int,
     payload: AttendanceTimeAdjust,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_superadmin),
+    current_user: User = Depends(
+        require_superadmin_or_editable(["hris.attendance_list_view", "hris.attendance_grid_view"])
+    ),
 ):
-    # Editing/overriding an already-recorded attendance time is
-    # superadmin-only -- module grants no longer bypass this (see
+    # Editing/overriding an already-recorded attendance time: superadmin,
+    # or an Attendance view granted with "Can edit: Yes" (see
     # AttendanceGridReview.jsx / AttendanceTable.jsx on the frontend,
     # which hide these controls from everyone else).
     attendance = (
