@@ -61,7 +61,14 @@ def am_i_department_head(
         .filter(DepartmentHead.head_user_id == current_user.id)
         .all()
     ]
-    return {"is_department_head": bool(departments), "departments": departments}
+    # Org chart heads with overtime ticked review overtime too.
+    from app.services.approval_chain import my_approver_kinds
+
+    approves_overtime = my_approver_kinds(db, current_user)["overtime"]
+    return {
+        "is_department_head": bool(departments) or approves_overtime,
+        "departments": departments,
+    }
 
 
 @router.get("/")

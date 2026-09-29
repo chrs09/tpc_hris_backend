@@ -26,6 +26,9 @@ class OrgUnit(Base):
     sort_order = Column(Integer, nullable=False, default=0)
 
     head_user_id = Column(Integer, ForeignKey("tpc_users.id"), nullable=True)
+    # What the head approves for the people below them: JSON list of
+    # "cash_advance" / "overtime" / "attendance" (approval_chain.py).
+    approves = Column(Text, nullable=True)
 
     member_positions = Column(Text, nullable=True)
     member_roles = Column(Text, nullable=True)

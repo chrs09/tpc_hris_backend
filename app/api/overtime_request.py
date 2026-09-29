@@ -1,7 +1,7 @@
 from datetime import datetime, date, time as time_cls, timedelta
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm import Session, joinedload, object_session
 
 from app.core.database import get_db
 from app.core.dependencies import get_current_user
@@ -9,6 +9,14 @@ from app.models.user import User
 from app.models.employees import Employee
 from app.models.overtime_request import OvertimeRequest
 from app.models.department_head import DepartmentHead
+from app.utils.user_display import display_name
+from app.services.approval_chain import (
+    append_log,
+    describe_chain,
+    dump_chain,
+    load_json_list,
+    resolve_chain,
+)
 from app.schemas.overtime_request import OvertimeReviewAction
 from app.services.file_service import FileService
 from app.services.trip_payroll_service import now_ph
@@ -94,12 +102,24 @@ def _serialize(req: OvertimeRequest) -> dict:
         "requested_by_user_id": req.requested_by_user_id,
         "requested_by_name": approver.username if approver else None,
         "approved_by_user_id": req.approved_by_user_id,
+        # Who gave the final approval / rejection (full name).
+        "approved_by_name": (
+            display_name(req.approved_by) if req.approved_by else None
+        ),
         "approved_at": req.approved_at,
         "created_at": req.created_at,
         # The head can see this request from the moment it's filed, but
         # can only actually approve/reject it once the employee has
         # clocked out (time_out is set).
         "can_approve": req.time_out is not None,
+        # Org chart approval progress (empty when routed the old way).
+        **describe_chain(
+            object_session(req),
+            req.approval_chain,
+            req.approval_step,
+            req.approval_log,
+            req.status != "pending",
+        ),
     }
 
 
@@ -111,6 +131,10 @@ def _can_review(request: OvertimeRequest, current_user: User, db: Session) -> bo
     employee in for overtime."""
     if request.requested_by_user_id == current_user.id:
         return True
+
+    if request.approval_chain:
+        # Org chart routing: only the approver whose turn it is.
+        return False
 
     employee = request.employee
     if not employee or not employee.department:
@@ -186,19 +210,23 @@ def clock_in_overtime(
     employee = (
         db.query(Employee).filter(Employee.id == current_user.employee_id).first()
     )
-    if not employee or not employee.department:
+    if not employee:
         raise HTTPException(
             status_code=400,
-            detail="Your account isn't linked to an employee department.",
+            detail="Your account isn't linked to an employee.",
         )
 
-    requested_by_user_id = _get_department_head(employee, db)
+    # Org chart first: every head up the layers who approves overtime,
+    # in order. Nobody set up there -> the department's immediate head.
+    chain = resolve_chain(db, employee, current_user, "overtime")
+    requested_by_user_id = chain[0] if chain else _get_department_head(employee, db)
     if not requested_by_user_id:
         raise HTTPException(
             status_code=400,
             detail=(
-                f"No immediate head has been set for the {employee.department} "
-                "department yet. Ask an admin to set this up in Reporting Hierarchy."
+                "No one has been set to approve your overtime yet. Ask an "
+                "admin to tick Overtime for your head on the Org Chart (or "
+                "set your department's immediate head in Reporting Hierarchy)."
             ),
         )
 
@@ -227,6 +255,8 @@ def clock_in_overtime(
         user_id=current_user.id,
         employee_id=current_user.employee_id,
         requested_by_user_id=requested_by_user_id,
+        approval_chain=dump_chain(chain),
+        approval_step=0,
         ot_date=now.date(),
         time_in=now.time(),
         reason=reason.strip(),
@@ -413,12 +443,36 @@ def approve_overtime_request(
             status_code=403, detail="You are not authorized to approve this request."
         )
 
-    request.status = "approved"
     request.approved_hours = (
         payload.approved_hours
         if payload.approved_hours is not None
+        # Keep what an earlier head in the chain approved, if any.
+        else request.approved_hours
+        if request.approved_hours is not None
         else request.computed_hours
     )
+    request.approval_log = append_log(
+        request.approval_log,
+        current_user,
+        "approved",
+        payload.remarks,
+        approved_hours=request.approved_hours,
+    )
+
+    # Org chart chain: pass it to the next head up.
+    chain = [int(i) for i in load_json_list(request.approval_chain)]
+    if (
+        chain
+        and request.requested_by_user_id == current_user.id
+        and request.approval_step < len(chain) - 1
+    ):
+        request.approval_step += 1
+        request.requested_by_user_id = chain[request.approval_step]
+        db.commit()
+        db.refresh(request)
+        return _serialize(request)
+
+    request.status = "approved"
     request.remarks = payload.remarks
     request.approved_by_user_id = current_user.id
     request.approved_at = datetime.utcnow()
@@ -450,6 +504,9 @@ def reject_overtime_request(
             status_code=403, detail="You are not authorized to reject this request."
         )
 
+    request.approval_log = append_log(
+        request.approval_log, current_user, "rejected", payload.remarks
+    )
     request.status = "rejected"
     request.remarks = payload.remarks
     request.approved_by_user_id = current_user.id

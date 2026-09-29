@@ -68,6 +68,14 @@ class OvertimeRequest(Base):
         Integer, ForeignKey("tpc_overtime_approvals.id"), nullable=True
     )
 
+    # Org chart approval chain (see app/services/approval_chain.py): the
+    # approvers in order (JSON list of user ids), which one is up now
+    # (requested_by_user_id is kept in step with it), and who did what.
+    # NULL chain = routed the old way (Reporting Hierarchy / superadmin).
+    approval_chain = Column(Text, nullable=True)
+    approval_step = Column(Integer, nullable=False, default=0, server_default="0")
+    approval_log = Column(Text, nullable=True)
+
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     employee = relationship("Employee", foreign_keys=[employee_id])

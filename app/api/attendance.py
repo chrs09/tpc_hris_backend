@@ -3,7 +3,7 @@ import math
 import pytz
 
 from collections import defaultdict
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from zoneinfo import ZoneInfo
 
 from fastapi import (
@@ -15,7 +15,7 @@ from fastapi import (
     Form,
     Query,
 )
-from sqlalchemy import func
+from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session, joinedload
 
 from app.core.database import get_db
@@ -32,8 +32,15 @@ from app.models.user import User
 from app.models.trips import Trip
 from app.models.trip_helper import TripHelper
 from app.models.files import File as FileModel
-from app.services.file_service import FileService
+from app.services.file_service import FileService, _watermark_timestamp
 from app.services.face_recognition_service import FaceRecognitionService
+from app.services.approval_chain import (
+    append_log,
+    describe_chain,
+    dump_chain,
+    load_json_list,
+    resolve_chain,
+)
 from app.schemas.attendance import (
     AttendanceCreate,
     AttendanceResponse,
@@ -63,12 +70,12 @@ ATTENDANCE_ALLOWED_LOCATIONS = [
         "longitude": 123.936819,
         "radius_meters": 150,
     },
-    {
-        "name": "Test Location",
-        "latitude": 10.359618,
-        "longitude": 123.973413,
-        "radius_meters": 150,
-    },
+    # {
+    #     "name": "Test Location",
+    #     "latitude": 10.359618,
+    #     "longitude": 123.973413,
+    #     "radius_meters": 150,
+    # },
     {
         "name": "Consolacion Office",
         "latitude": 10.3787,
@@ -140,6 +147,70 @@ def find_nearest_allowed_attendance_location(
         nearest_distance,
         is_allowed,
     )
+
+
+def check_attendance_geofence(latitude: float, longitude: float):
+    """Where a time in/out happened relative to the allowed attendance
+    locations. Never refuses -- returns (outside, note, photo_label):
+    `note` explains the flag for reviewers, `photo_label` is the line
+    burned onto the selfie (same watermark as the driver photos)."""
+    nearest, distance, allowed = find_nearest_allowed_attendance_location(
+        latitude, longitude
+    )
+    if not nearest:
+        return True, "Outside geofence (no attendance locations set up).", (
+            "Outside geofence"
+        )
+    meters = int(round(distance))
+    if allowed:
+        return False, None, f"{nearest['name']} ({meters}m)"
+    return (
+        True,
+        (
+            f"Outside geofence: {meters}m from {nearest['name']} "
+            f"(allowed {nearest['radius_meters']}m)."
+        ),
+        f"Outside geofence - nearest: {nearest['name']} ({meters}m)",
+    )
+
+
+def flag_side_for_geofence(record, side: str, outside: bool, note: str | None):
+    """Saves the geofence result on one side of the record and, when
+    outside, sends that side to the existing review (Approve/Reject on
+    the Attendance grid) -- keeping any face-check problem already there
+    and adding the geofence reason in front of it."""
+    setattr(record, f"{side}_outside_geofence", outside)
+    setattr(record, f"{side}_geofence_note", note)
+    if not outside:
+        return
+    status = getattr(record, f"{side}_face_review_status")
+    reason = getattr(record, f"{side}_face_review_reason")
+    if status not in ("NEEDS_REVIEW", "FACE_MATCH_FAILED", "NO_PROFILE_PHOTO"):
+        setattr(record, f"{side}_face_review_status", "NEEDS_REVIEW")
+    setattr(
+        record,
+        f"{side}_face_review_reason",
+        f"{note} {reason}".strip() if reason else note,
+    )
+
+
+# A side in one of these still needs someone to approve or reject it.
+REVIEW_PENDING_STATUSES = ("NEEDS_REVIEW", "FACE_MATCH_FAILED", "NO_PROFILE_PHOTO")
+
+
+def start_attendance_review(db: Session, record, side: str):
+    """If this side needs review, work out who approves it from the Org
+    Chart (heads with Attendance ticked, layer by layer). No chain =
+    only superadmin / an Attendance grid "Can edit" grant, as before."""
+    if getattr(record, f"{side}_face_review_status") not in REVIEW_PENDING_STATUSES:
+        return
+    employee = record.employee or (
+        db.query(Employee).filter(Employee.id == record.employee_id).first()
+    )
+    user = db.query(User).filter(User.employee_id == record.employee_id).first()
+    chain = resolve_chain(db, employee, user, "attendance")
+    setattr(record, f"{side}_review_chain", dump_chain(chain))
+    setattr(record, f"{side}_review_step", 0)
 
 
 def format_attendance_time_only(value):
@@ -248,12 +319,21 @@ def time_in_selfie(
     record.time_in_longitude = longitude
     record.time_in_address = address
 
+    outside, geofence_note, photo_label = check_attendance_geofence(
+        latitude, longitude
+    )
+    flag_side_for_geofence(record, "time_in", outside, geofence_note)
+    start_attendance_review(db, record, "time_in")
+
     if not existing:
         db.add(record)
         db.flush()
 
     file_service = FileService()
-    photo_url = file_service.upload(photo, f"attendance/{record.id}/time-in")
+    photo_url = file_service.upload(
+        _watermark_timestamp(photo, photo_label, latitude, longitude),
+        f"attendance/{record.id}/time-in",
+    )
 
     db.add(
         FileModel(
@@ -270,6 +350,92 @@ def time_in_selfie(
 
     record.time_in_photo_url = photo_url
     record.time_out_photo_url = None
+
+    return record
+
+
+@router.post("/time-out-selfie", response_model=AttendanceResponse)
+def time_out_selfie(
+    latitude: float = Form(...),
+    longitude: float = Form(...),
+    address: str = Form(...),
+    photo: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Mobile selfie time-out -- the counterpart of time_in_selfie():
+    same access, geofence flag (outside = accepted but sent to review)
+    and GPS/time watermark on the photo."""
+    require_role_or_module(
+        roles=["admin", "superadmin", "motorpool"], module_key="hris.attendance"
+    )(current_user=current_user, db=db)
+
+    employee_id = current_user.employee_id
+    if not employee_id:
+        raise HTTPException(
+            status_code=400,
+            detail="User account is not linked to an employee.",
+        )
+
+    if not photo.content_type or not photo.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="Photo must be an image file")
+
+    today = datetime.now(ZoneInfo("Asia/Manila")).date()
+    record = (
+        db.query(AttendanceRecord)
+        .filter(
+            AttendanceRecord.employee_id == employee_id,
+            AttendanceRecord.attendance_date == today,
+        )
+        .first()
+    )
+
+    if not record or not record.check_in_time:
+        raise HTTPException(status_code=400, detail="You haven't timed in today.")
+    if record.check_out_time:
+        raise HTTPException(status_code=400, detail="You already timed out today.")
+
+    record.check_out_time = datetime.utcnow()
+    record.time_out_latitude = latitude
+    record.time_out_longitude = longitude
+    record.time_out_address = address
+
+    outside, geofence_note, photo_label = check_attendance_geofence(
+        latitude, longitude
+    )
+    flag_side_for_geofence(record, "time_out", outside, geofence_note)
+    start_attendance_review(db, record, "time_out")
+
+    file_service = FileService()
+    photo_url = file_service.upload(
+        _watermark_timestamp(photo, photo_label, latitude, longitude),
+        f"attendance/{record.id}/time-out",
+    )
+
+    db.add(
+        FileModel(
+            entity_type="attendance",
+            entity_id=record.id,
+            document_type="ATTENDANCE_TIME_OUT",
+            file_url=photo_url,
+            uploaded_by=current_user.id,
+        )
+    )
+
+    db.commit()
+    db.refresh(record)
+
+    time_in_photo = (
+        db.query(FileModel.file_url)
+        .filter(
+            FileModel.entity_type == "attendance",
+            FileModel.entity_id == record.id,
+            FileModel.document_type == "ATTENDANCE_TIME_IN",
+        )
+        .scalar()
+    )
+    record.time_in_photo_url = time_in_photo
+    record.time_out_photo_url = photo_url
 
     return record
 
@@ -386,6 +552,8 @@ def get_my_attendance_today(
         "time_in_latitude": record.time_in_latitude,
         "time_in_longitude": record.time_in_longitude,
         "time_in_address": record.time_in_address,
+        "time_in_outside_geofence": record.time_in_outside_geofence,
+        "time_out_outside_geofence": record.time_out_outside_geofence,
     }
 
 
@@ -951,6 +1119,35 @@ def get_attendance_records(
                 "time_out_face_review_reason": record.time_out_face_review_reason,
                 "time_out_face_checked_at": record.time_out_face_checked_at,
 
+                "time_in_outside_geofence": record.time_in_outside_geofence,
+                "time_in_geofence_note": record.time_in_geofence_note,
+                "time_out_outside_geofence": record.time_out_outside_geofence,
+                "time_out_geofence_note": record.time_out_geofence_note,
+                "time_in_review": (
+                    describe_chain(
+                        db,
+                        record.time_in_review_chain,
+                        record.time_in_review_step,
+                        record.time_in_review_log,
+                        record.time_in_face_review_status
+                        not in REVIEW_PENDING_STATUSES,
+                    )
+                    if record.time_in_review_chain
+                    else None
+                ),
+                "time_out_review": (
+                    describe_chain(
+                        db,
+                        record.time_out_review_chain,
+                        record.time_out_review_step,
+                        record.time_out_review_log,
+                        record.time_out_face_review_status
+                        not in REVIEW_PENDING_STATUSES,
+                    )
+                    if record.time_out_review_chain
+                    else None
+                ),
+
                 # Kept for any caller still reading the old singular
                 # fields -- mirrors time-in, which is what these always
                 # represented before time-out got its own review.
@@ -1175,17 +1372,11 @@ def kiosk_selfie_attendance(
         f"DISTANCE={round(distance_meters, 2)}"
     )
 
-    if not is_allowed_location:
-        raise HTTPException(
-            status_code=403,
-            detail=(
-                f"Attendance rejected. "
-                f"You are {round(distance_meters, 2)} meters away from "
-                f"{nearest_location['name']}. "
-                f"Allowed radius is "
-                f"{nearest_location['radius_meters']} meters."
-            ),
-        )
+    # Outside the allowed area is still accepted -- it's flagged for
+    # review below instead of refused.
+    outside_geofence, geofence_note, photo_label = check_attendance_geofence(
+        latitude, longitude
+    )
 
     now = datetime.utcnow()
     today = datetime.now(ZoneInfo("Asia/Manila")).date()
@@ -1251,7 +1442,11 @@ def kiosk_selfie_attendance(
         upload_folder = f"attendance/{record.id}/time-out"
 
     file_service = FileService()
-    photo_url = file_service.upload(photo, upload_folder)
+    # GPS time + location burned onto the selfie, same as driver photos.
+    photo_url = file_service.upload(
+        _watermark_timestamp(photo, photo_label, latitude, longitude),
+        upload_folder,
+    )
 
     # Face verification runs for both time-in and time-out now -- each
     # writes to its own time_in_/time_out_ prefixed fields (see the
@@ -1285,6 +1480,9 @@ def kiosk_selfie_attendance(
         record.time_out_face_review_reason = face_result["reason"]
         record.time_out_face_checked_at = face_result["checked_at"]
 
+    flag_side_for_geofence(record, action, outside_geofence, geofence_note)
+    start_attendance_review(db, record, action)
+
     logger.info(f"PHOTO URL: {photo_url}")
 
     db.add(
@@ -1302,10 +1500,16 @@ def kiosk_selfie_attendance(
 
     logger.info("KIOSK ATTENDANCE SUCCESS")
 
+    done = "Time in successful." if action == "time_in" else "Time out successful."
     return {
         "message": (
-            "Time in successful." if action == "time_in" else "Time out successful."
+            f"{done} You are outside the allowed attendance area, so this "
+            "was flagged for review."
+            if outside_geofence
+            else done
         ),
+        "outside_geofence": outside_geofence,
+        "geofence_note": geofence_note,
         "attendance_id": record.id,
         "employee_id": record.employee_id,
         "attendance_date": str(record.attendance_date),
@@ -1322,37 +1526,147 @@ def kiosk_selfie_attendance(
     }
 
 
+# =========================
+# BELL: time in/out outside the geofence, still waiting for review
+#
+# For the people who can approve/reject them: superadmin, or the
+# Attendance grid view granted with "Can edit: Yes". Last 7 days; a
+# side drops off once it's approved or rejected.
+# =========================
+GEOFENCE_PENDING_STATUSES = REVIEW_PENDING_STATUSES
+
+
+@router.get("/geofence-alerts")
+def get_geofence_alerts(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    # Superadmin / Attendance grid "Can edit" grant: every one. An org
+    # chart head: only the ones whose turn is with them.
+    sees_all = has_editable_grant(db, current_user, ["hris.attendance_grid_view"])
+    since = datetime.now(ZoneInfo("Asia/Manila")).date() - timedelta(days=6)
+    records = (
+        db.query(AttendanceRecord)
+        .options(joinedload(AttendanceRecord.employee))
+        .filter(
+            AttendanceRecord.attendance_date >= since,
+            or_(
+                and_(
+                    AttendanceRecord.time_in_outside_geofence.is_(True),
+                    AttendanceRecord.time_in_face_review_status.in_(
+                        GEOFENCE_PENDING_STATUSES
+                    ),
+                ),
+                and_(
+                    AttendanceRecord.time_out_outside_geofence.is_(True),
+                    AttendanceRecord.time_out_face_review_status.in_(
+                        GEOFENCE_PENDING_STATUSES
+                    ),
+                ),
+            ),
+        )
+        .all()
+    )
+
+    alerts = []
+    for record in records:
+        employee = record.employee
+        name = (
+            f"{employee.first_name} {employee.last_name}"
+            if employee
+            else f"Employee #{record.employee_id}"
+        )
+        for side, label, when in (
+            ("time_in", "Time In", record.check_in_time),
+            ("time_out", "Time Out", record.check_out_time),
+        ):
+            if (
+                getattr(record, f"{side}_outside_geofence")
+                and getattr(record, f"{side}_face_review_status")
+                in GEOFENCE_PENDING_STATUSES
+                and (sees_all or _current_approver(record, side) == current_user.id)
+            ):
+                alerts.append(
+                    {
+                        "key": f"{record.id}-{side}",
+                        "attendance_id": record.id,
+                        "employee_name": name,
+                        "side": side,
+                        "side_label": label,
+                        "attendance_date": str(record.attendance_date),
+                        "time": format_attendance_time_only(when),
+                        "note": getattr(record, f"{side}_geofence_note"),
+                        "_sort": when or datetime.min,
+                    }
+                )
+    alerts.sort(key=lambda a: a["_sort"], reverse=True)
+    for a in alerts:
+        a.pop("_sort")
+    return alerts
+
+
+def _current_approver(record, side: str) -> int | None:
+    chain = [int(i) for i in load_json_list(getattr(record, f"{side}_review_chain"))]
+    step = getattr(record, f"{side}_review_step") or 0
+    return chain[step] if step < len(chain) else None
+
+
+def _get_review_record(db: Session, attendance_id: int, side: str, current_user: User):
+    """The record, plus whether the caller is the org chart head whose
+    turn it is (vs. a superadmin / Attendance grid "Can edit" grant,
+    who can approve or reject at any point)."""
+    attendance = (
+        db.query(AttendanceRecord).filter(AttendanceRecord.id == attendance_id).first()
+    )
+    if not attendance:
+        raise HTTPException(status_code=404, detail="Attendance record not found.")
+    is_turn = (
+        getattr(attendance, f"{side}_face_review_status") in REVIEW_PENDING_STATUSES
+        and _current_approver(attendance, side) == current_user.id
+    )
+    if not is_turn and not has_editable_grant(
+        db, current_user, ["hris.attendance_grid_view"]
+    ):
+        raise HTTPException(
+            status_code=403, detail="You can't review this attendance."
+        )
+    return attendance, is_turn
+
+
 @router.post("/{attendance_id}/approve")
 def approve_attendance(
     attendance_id: int,
     side: str = Query("time_in", pattern="^(time_in|time_out)$"),
     db: Session = Depends(get_db),
-    current_user: User = Depends(
-        require_superadmin_or_editable(["hris.attendance_grid_view"])
-    ),
+    current_user: User = Depends(get_current_user),
 ):
-    attendance = (
-        db.query(AttendanceRecord).filter(AttendanceRecord.id == attendance_id).first()
+    attendance, is_turn = _get_review_record(db, attendance_id, side, current_user)
+
+    setattr(
+        attendance,
+        f"{side}_review_log",
+        append_log(getattr(attendance, f"{side}_review_log"), current_user, "approved"),
     )
 
-    if not attendance:
-        raise HTTPException(status_code=404, detail="Attendance record not found.")
-
-    if side == "time_in":
-        attendance.time_in_face_review_status = "APPROVED"
-        new_status = attendance.time_in_face_review_status
+    # Org chart chain: the head whose turn it is passes it up to the
+    # next head; the last one (or a superadmin / grant) finishes it.
+    chain = load_json_list(getattr(attendance, f"{side}_review_chain"))
+    step = getattr(attendance, f"{side}_review_step") or 0
+    message = "Attendance approved."
+    if is_turn and step < len(chain) - 1:
+        setattr(attendance, f"{side}_review_step", step + 1)
+        message = "Approved -- passed to the next approver."
     else:
-        attendance.time_out_face_review_status = "APPROVED"
-        new_status = attendance.time_out_face_review_status
+        setattr(attendance, f"{side}_face_review_status", "APPROVED")
 
     db.commit()
     db.refresh(attendance)
 
     return {
-        "message": "Attendance approved.",
+        "message": message,
         "attendance_id": attendance.id,
         "side": side,
-        "status": new_status,
+        "status": getattr(attendance, f"{side}_face_review_status"),
     }
 
 
@@ -1361,23 +1675,16 @@ def reject_attendance(
     attendance_id: int,
     side: str = Query("time_in", pattern="^(time_in|time_out)$"),
     db: Session = Depends(get_db),
-    current_user: User = Depends(
-        require_superadmin_or_editable(["hris.attendance_grid_view"])
-    ),
+    current_user: User = Depends(get_current_user),
 ):
-    attendance = (
-        db.query(AttendanceRecord).filter(AttendanceRecord.id == attendance_id).first()
+    attendance, _ = _get_review_record(db, attendance_id, side, current_user)
+
+    setattr(
+        attendance,
+        f"{side}_review_log",
+        append_log(getattr(attendance, f"{side}_review_log"), current_user, "rejected"),
     )
-
-    if not attendance:
-        raise HTTPException(status_code=404, detail="Attendance record not found.")
-
-    if side == "time_in":
-        attendance.time_in_face_review_status = "REJECTED"
-        new_status = attendance.time_in_face_review_status
-    else:
-        attendance.time_out_face_review_status = "REJECTED"
-        new_status = attendance.time_out_face_review_status
+    setattr(attendance, f"{side}_face_review_status", "REJECTED")
 
     db.commit()
     db.refresh(attendance)
@@ -1386,8 +1693,88 @@ def reject_attendance(
         "message": "Attendance rejected.",
         "attendance_id": attendance.id,
         "side": side,
-        "status": new_status,
+        "status": getattr(attendance, f"{side}_face_review_status"),
     }
+
+
+# =========================
+# ATTENDANCE WAITING ON ME (org chart heads)
+# =========================
+@router.get("/for-my-approval")
+def get_attendance_for_my_approval(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Time in/out sides whose turn is with me on the org chart chain
+    (last 30 days), newest first."""
+    since = datetime.now(ZoneInfo("Asia/Manila")).date() - timedelta(days=30)
+    records = (
+        db.query(AttendanceRecord)
+        .options(joinedload(AttendanceRecord.employee))
+        .filter(
+            AttendanceRecord.attendance_date >= since,
+            or_(
+                AttendanceRecord.time_in_review_chain.isnot(None),
+                AttendanceRecord.time_out_review_chain.isnot(None),
+            ),
+        )
+        .all()
+    )
+    photos = {
+        (f.entity_id, f.document_type): f.file_url
+        for f in db.query(FileModel).filter(
+            FileModel.entity_type == "attendance",
+            FileModel.entity_id.in_([r.id for r in records] or [0]),
+        )
+    }
+    items = []
+    for record in records:
+        employee = record.employee
+        for side, label, when in (
+            ("time_in", "Time In", record.check_in_time),
+            ("time_out", "Time Out", record.check_out_time),
+        ):
+            if (
+                getattr(record, f"{side}_face_review_status") in REVIEW_PENDING_STATUSES
+                and _current_approver(record, side) == current_user.id
+            ):
+                items.append(
+                    {
+                        "key": f"{record.id}-{side}",
+                        "attendance_id": record.id,
+                        "side": side,
+                        "side_label": label,
+                        "employee_name": (
+                            f"{employee.first_name} {employee.last_name}"
+                            if employee
+                            else f"Employee #{record.employee_id}"
+                        ),
+                        "position": employee.position if employee else None,
+                        "attendance_date": str(record.attendance_date),
+                        "time": format_attendance_time_only(when),
+                        "address": getattr(record, f"{side}_address"),
+                        "photo_url": photos.get(
+                            (record.id, f"ATTENDANCE_{side.upper()}")
+                        ),
+                        "outside_geofence": bool(
+                            getattr(record, f"{side}_outside_geofence")
+                        ),
+                        "review_status": getattr(record, f"{side}_face_review_status"),
+                        "review_reason": getattr(record, f"{side}_face_review_reason"),
+                        **describe_chain(
+                            db,
+                            getattr(record, f"{side}_review_chain"),
+                            getattr(record, f"{side}_review_step"),
+                            getattr(record, f"{side}_review_log"),
+                            False,
+                        ),
+                        "_sort": when or datetime.min,
+                    }
+                )
+    items.sort(key=lambda i: i["_sort"], reverse=True)
+    for i in items:
+        i.pop("_sort")
+    return items
 
 
 @router.patch("/{attendance_id}/adjust-time")

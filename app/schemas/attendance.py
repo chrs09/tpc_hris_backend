@@ -62,6 +62,12 @@ class AttendanceResponse(BaseModel):
     time_in_photo_url: Optional[str] = None
     time_out_photo_url: Optional[str] = None
 
+    # Geofence (outside = flagged for review, not refused)
+    time_in_outside_geofence: Optional[bool] = None
+    time_in_geofence_note: Optional[str] = None
+    time_out_outside_geofence: Optional[bool] = None
+    time_out_geofence_note: Optional[str] = None
+
     # =========================
     # OTHER
     # =========================

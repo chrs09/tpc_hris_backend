@@ -14,6 +14,14 @@ from app.core.dependencies import (
 from app.models.user import User
 from app.models.employees import Employee
 from app.models.cash_advance_head import CashAdvanceHead
+from app.utils.user_display import display_name
+from app.services.approval_chain import (
+    append_log,
+    describe_chain,
+    dump_chain,
+    load_json_list,
+    resolve_chain,
+)
 from app.models.cash_advance_request import CashAdvanceRequest
 from app.models.cash_advance_deduction_option import CashAdvanceDeductionOption
 from app.models.cash_advance_deduction_log import CashAdvanceDeductionLog
@@ -84,6 +92,10 @@ def _serialize(req: CashAdvanceRequest, db: Session) -> dict:
         "requested_by_user_id": req.requested_by_user_id,
         "requested_by_name": approver.username if approver else None,
         "approved_by_user_id": req.approved_by_user_id,
+        # Who gave the final approval / rejection (full name).
+        "approved_by_name": (
+            display_name(req.approved_by) if req.approved_by else None
+        ),
         "approved_at": req.approved_at,
         "release_reference": req.release_reference,
         "released_at": req.released_at,
@@ -91,6 +103,14 @@ def _serialize(req: CashAdvanceRequest, db: Session) -> dict:
             req.released_by.username if req.released_by else None
         ),
         "created_at": req.created_at,
+        # Org chart approval progress (empty when routed the old way).
+        **describe_chain(
+            db,
+            req.approval_chain,
+            req.approval_step,
+            req.approval_log,
+            req.status != "pending",
+        ),
     }
 
 
@@ -102,6 +122,10 @@ def _can_review(req: CashAdvanceRequest, current_user: User, db: Session) -> boo
     # Granted Cash Advance Approvals with "Can edit: Yes".
     if has_editable_grant(db, current_user, ["finance.cash_advance"]):
         return True
+    if req.approval_chain:
+        # Org chart routing: only the approver whose turn it is (kept in
+        # requested_by_user_id, checked above).
+        return False
     employee = req.employee
     if not employee or not employee.department:
         return False
@@ -216,7 +240,16 @@ def file_cash_advance_request(
     employee = (
         db.query(Employee).filter(Employee.id == current_user.employee_id).first()
     )
-    if not employee or not employee.department:
+    if not employee:
+        raise HTTPException(
+            status_code=400,
+            detail="Your account isn't linked to an employee.",
+        )
+
+    # Org chart first: every head up the layers who approves cash
+    # advances, in order. Nobody set up there -> the old routing below.
+    chain = resolve_chain(db, employee, current_user, "cash_advance")
+    if not chain and not employee.department:
         raise HTTPException(
             status_code=400,
             detail="Your account isn't linked to an employee department.",
@@ -229,12 +262,16 @@ def file_cash_advance_request(
     # superadmin rather than blocking the request outright -- an
     # unconfigured hierarchy shouldn't stop an employee from filing.
     head_entry = (
-        db.query(CashAdvanceHead)
+        None
+        if chain
+        else db.query(CashAdvanceHead)
         .filter(CashAdvanceHead.department == employee.department)
         .first()
     )
 
-    if head_entry:
+    if chain:
+        approver_user_id = chain[0]
+    elif head_entry:
         approver_user_id = head_entry.head_user_id
     else:
         fallback_superadmin = (
@@ -256,6 +293,8 @@ def file_cash_advance_request(
         user_id=current_user.id,
         employee_id=current_user.employee_id,
         requested_by_user_id=approver_user_id,
+        approval_chain=dump_chain(chain),
+        approval_step=0,
         amount=payload.amount,
         deduction_option_id=option.id,
         deduction_per_pay_amount=option.amount,
@@ -415,9 +454,32 @@ def approve_cash_advance_request(
                 ),
             )
         request.approved_amount = payload.approved_amount
-    else:
-        # Not overridden -- approve the full requested amount.
+    elif request.approved_amount is None:
+        # Not overridden -- approve the full requested amount (or keep
+        # what an earlier head in the chain approved).
         request.approved_amount = request.amount
+
+    request.approval_log = append_log(
+        request.approval_log,
+        current_user,
+        "approved",
+        payload.remarks,
+        approved_amount=float(request.approved_amount),
+    )
+
+    # Org chart chain: pass it to the next head up. (A superadmin or a
+    # Cash Advance "Can edit" grant who isn't the one up now finishes it.)
+    chain = [int(i) for i in load_json_list(request.approval_chain)]
+    if (
+        chain
+        and request.requested_by_user_id == current_user.id
+        and request.approval_step < len(chain) - 1
+    ):
+        request.approval_step += 1
+        request.requested_by_user_id = chain[request.approval_step]
+        db.commit()
+        db.refresh(request)
+        return _serialize(request, db)
 
     request.status = "approved"
     request.remarks = payload.remarks
@@ -451,6 +513,9 @@ def reject_cash_advance_request(
             status_code=403, detail="You are not authorized to reject this request."
         )
 
+    request.approval_log = append_log(
+        request.approval_log, current_user, "rejected", payload.remarks
+    )
     request.status = "rejected"
     request.remarks = payload.remarks
     request.approved_by_user_id = current_user.id

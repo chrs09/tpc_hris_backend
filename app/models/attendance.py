@@ -7,6 +7,7 @@ from sqlalchemy import (
     Date,
     Float,
     Text,
+    Boolean,
 )
 from sqlalchemy.orm import relationship
 from app.core.database import Base
@@ -51,6 +52,24 @@ class AttendanceRecord(Base):
     time_out_face_review_status = Column(String(50), nullable=True)
     time_out_face_review_reason = Column(Text, nullable=True)
     time_out_face_checked_at = Column(DateTime, nullable=True)
+
+    # Geofence result per side. Timing in/out outside the allowed area is
+    # allowed but flagged: *_outside_geofence is True and the side's face
+    # review status is set to NEEDS_REVIEW so it goes through approval.
+    time_in_outside_geofence = Column(Boolean, nullable=True)
+    time_in_geofence_note = Column(String(255), nullable=True)
+    time_out_outside_geofence = Column(Boolean, nullable=True)
+    time_out_geofence_note = Column(String(255), nullable=True)
+
+    # Org chart approval chain for a side that needs review (outside the
+    # geofence / face check) -- same idea as CashAdvanceRequest's
+    # approval_chain: approvers in order, who's up now, and the log.
+    time_in_review_chain = Column(Text, nullable=True)
+    time_in_review_step = Column(Integer, nullable=False, default=0, server_default="0")
+    time_in_review_log = Column(Text, nullable=True)
+    time_out_review_chain = Column(Text, nullable=True)
+    time_out_review_step = Column(Integer, nullable=False, default=0, server_default="0")
+    time_out_review_log = Column(Text, nullable=True)
 
     reviewed_by_user_id = Column(Integer, ForeignKey("tpc_users.id"), nullable=True)
     reviewed_at = Column(DateTime, nullable=True)

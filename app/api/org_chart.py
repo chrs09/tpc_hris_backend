@@ -16,12 +16,21 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
 from app.core.database import get_db
-from app.core.dependencies import require_role_or_module, require_superadmin
+from app.core.dependencies import (
+    get_current_user,
+    require_role_or_module,
+    require_superadmin,
+)
 from app.models.employee_module_access import EmployeeModuleAccess
 from app.models.employees import Employee
 from app.models.files import File as FileModel
 from app.models.org_unit import OrgUnit
 from app.models.user import User, UserRole
+from app.services.approval_chain import (
+    APPROVAL_KINDS,
+    my_approver_kinds,
+    unit_approves,
+)
 
 router = APIRouter(prefix="/org-chart", tags=["Org Chart"])
 
@@ -63,6 +72,20 @@ class UnitUpdate(BaseModel):
     roles: list[str] | None = None
     departments: list[str] | None = None
     employee_ids: list[int] | None = None
+    # What the head approves for the units below: "cash_advance",
+    # "overtime", "attendance".
+    approves: list[str] | None = None
+
+
+@router.get("/my-approvals")
+def get_my_approval_kinds(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """What the logged-in user approves as an org chart head -- used by
+    the menu to show the Cash Advance / OT / Attendance approval pages.
+    Open to any logged-in user; it only reports on yourself."""
+    return my_approver_kinds(db, current_user)
 
 
 @router.get("")
@@ -166,6 +189,7 @@ def get_org_chart(
                 ],
                 "sort_order": unit.sort_order,
                 "head": person_from_user(head_user) if head_user else None,
+                "approves": sorted(unit_approves(unit)),
                 "rules": {
                     "positions": _load(unit.member_positions),
                     "roles": _load(unit.member_roles),
@@ -305,6 +329,11 @@ def update_unit(
         )
     if payload.employee_ids is not None:
         unit.member_employee_ids = json.dumps(sorted(set(payload.employee_ids)))
+    if payload.approves is not None:
+        bad = [k for k in payload.approves if k not in APPROVAL_KINDS]
+        if bad:
+            raise HTTPException(status_code=400, detail=f"Unknown approval type: {bad[0]}")
+        unit.approves = json.dumps(sorted(set(payload.approves)))
 
     unit.updated_by_user_id = current_user.id
     db.commit()
