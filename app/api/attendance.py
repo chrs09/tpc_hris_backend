@@ -70,12 +70,12 @@ ATTENDANCE_ALLOWED_LOCATIONS = [
         "longitude": 123.936819,
         "radius_meters": 150,
     },
-    # {
-    #     "name": "Test Location",
-    #     "latitude": 10.359618,
-    #     "longitude": 123.973413,
-    #     "radius_meters": 150,
-    # },
+    {
+        "name": "Test Location",
+        "latitude": 10.359618,
+        "longitude": 123.973413,
+        "radius_meters": 150,
+    },
     {
         "name": "Consolacion Office",
         "latitude": 10.3787,
