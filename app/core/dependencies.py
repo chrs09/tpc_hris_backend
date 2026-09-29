@@ -103,8 +103,11 @@ def require_role_or_module(roles: list[str], module_key: str):
     tpc_hris_frontend/src/constants/modules.js -- module_key must match
     exactly, e.g. "hris.leave", "trip_management.stores")."""
 
+    # `request` is filled in by FastAPI when used via Depends(). Endpoints
+    # that call this directly pass it themselves; without it (e.g. an
+    # employee's own selfie time-in) the view-only check is skipped.
     def _dependency(
-        request: Request,
+        request: Request = None,
         current_user: User = Depends(get_current_user),
         db: Session = Depends(get_db),
     ) -> User:
@@ -121,7 +124,11 @@ def require_role_or_module(roles: list[str], module_key: str):
         # still opens, but any change is refused -- checked before the
         # role shortcut below, so a role that would normally allow edits
         # can't override it.
-        if request.method not in ("GET", "HEAD", "OPTIONS") and current_user.employee_id:
+        if (
+            request is not None
+            and request.method not in ("GET", "HEAD", "OPTIONS")
+            and current_user.employee_id
+        ):
             from app.models.employees import Employee
             from app.models.employee_module_access import EmployeeModuleAccess
 

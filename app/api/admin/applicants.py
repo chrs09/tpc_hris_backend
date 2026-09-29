@@ -2,7 +2,7 @@ import secrets
 from datetime import datetime, timedelta
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Form, File, UploadFile
+from fastapi import APIRouter, Depends, HTTPException, Form, File, UploadFile, Request
 from sqlalchemy.orm import Session
 
 from app.utils.response import api_response
@@ -384,13 +384,14 @@ def get_applicant_detail(applicant_id: int, db: Session = Depends(get_db)):
 
 @router.get("/{applicant_id}/onboarding")
 def get_applicant_onboarding(
+    request: Request,
     applicant_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     require_role_or_module(
         roles=["admin", "superadmin", "hr"], module_key="hris.applicants"
-    )(current_user=current_user, db=db)
+    )(request=request, current_user=current_user, db=db)
 
     applicant = db.query(Applicant).filter(Applicant.id == applicant_id).first()
 
@@ -480,6 +481,7 @@ def get_applicant_onboarding(
 
 @router.patch("/{applicant_id}/onboarding/birthday")
 def update_applicant_onboarding_birthday(
+    request: Request,
     applicant_id: int,
     payload: OnboardingBirthdayUpdate,
     db: Session = Depends(get_db),
@@ -491,7 +493,7 @@ def update_applicant_onboarding_birthday(
     otherwise-complete applicant would be permanently stuck."""
     require_role_or_module(
         roles=["admin", "superadmin", "hr"], module_key="hris.applicants"
-    )(current_user=current_user, db=db)
+    )(request=request, current_user=current_user, db=db)
 
     applicant = db.query(Applicant).filter(Applicant.id == applicant_id).first()
     if not applicant:
@@ -607,13 +609,14 @@ def add_applicant_remark(
 
 @router.post("/{applicant_id}/generate-employment-form")
 def generate_employment_form(
+    request: Request,
     applicant_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     require_role_or_module(
         roles=["admin", "superadmin", "hr"], module_key="hris.applicants"
-    )(current_user=current_user, db=db)
+    )(request=request, current_user=current_user, db=db)
 
     applicant = db.query(Applicant).filter(Applicant.id == applicant_id).first()
 
@@ -674,6 +677,7 @@ def generate_employment_form(
 
 @router.post("/{applicant_id}/convert-to-employee")
 def convert_to_employee(
+    request: Request,
     applicant_id: int,
     payload: ConvertApplicantRequest,
     db: Session = Depends(get_db),
@@ -681,7 +685,7 @@ def convert_to_employee(
 ):
     require_role_or_module(
         roles=["admin", "superadmin", "hr"], module_key="hris.applicants"
-    )(current_user=current_user, db=db)
+    )(request=request, current_user=current_user, db=db)
 
     applicant = db.query(Applicant).filter(Applicant.id == applicant_id).first()
 
