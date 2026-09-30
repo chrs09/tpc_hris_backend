@@ -33,7 +33,7 @@ from app.api import (
     fuel_requests,
     org_chart,
 )
-from app.api.payroll import overtime_approval, payroll_deductions
+from app.api.payroll import overtime_approval, payroll_cutoffs, payroll_deductions
 from app.api import schedule_template as schedule_template_router
 from app.api.driver import trips
 from app.api.admin import trips as admin_trips
@@ -256,6 +256,7 @@ app.include_router(cash_advance_settings.router, prefix="/api")
 app.include_router(mobile_app_version.router, prefix="/api")
 app.include_router(overtime_approval.router, prefix="/api")
 app.include_router(payroll_deductions.router, prefix="/api")
+app.include_router(payroll_cutoffs.router, prefix="/api")
 app.include_router(schedule_template_router.router, prefix="/api")
 app.include_router(trips.router, prefix="/api")
 app.include_router(trip_maintenance_router.router, prefix="/api")

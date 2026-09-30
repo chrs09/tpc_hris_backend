@@ -58,6 +58,7 @@ from .dispatch_helpers import DispatchHelper as DispatchHelper
 
 from .holiday import Holiday as Holiday
 from .payroll_deductions import PayrollDeduction as PayrollDeduction
+from .payroll_cutoff_rule import PayrollCutoffRule as PayrollCutoffRule
 from .finance_expense import FinanceExpense as FinanceExpense
 from .finance_expense_item import FinanceExpenseItem as FinanceExpenseItem
 from .trip_finance_review import TripFinanceReview as TripFinanceReview
