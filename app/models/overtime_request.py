@@ -1,6 +1,7 @@
 from datetime import datetime
 
 from sqlalchemy import (
+    Boolean,
     Column,
     Integer,
     String,
@@ -67,6 +68,14 @@ class OvertimeRequest(Base):
     overtime_approval_id = Column(
         Integer, ForeignKey("tpc_overtime_approvals.id"), nullable=True
     )
+
+    # Filed after the fact ("File missed overtime" -- forgot to clock in
+    # and out), or the time out was typed in because they forgot to
+    # clock out. late_note is the employee's explanation. Both show a
+    # "Late filing" badge to approvers.
+    filed_late = Column(Boolean, nullable=False, default=False, server_default="0")
+    manual_time_out = Column(Boolean, nullable=False, default=False, server_default="0")
+    late_note = Column(Text, nullable=True)
 
     # Org chart approval chain (see app/services/approval_chain.py): the
     # approvers in order (JSON list of user ids), which one is up now
