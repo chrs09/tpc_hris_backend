@@ -76,6 +76,9 @@ class OvertimeRequest(Base):
     filed_late = Column(Boolean, nullable=False, default=False, server_default="0")
     manual_time_out = Column(Boolean, nullable=False, default=False, server_default="0")
     late_note = Column(Text, nullable=True)
+    # Filed through the File Overtime form (not the old clock in/out) --
+    # only these can be "filed in advance".
+    filed_via_form = Column(Boolean, nullable=False, default=False, server_default="0")
 
     # Org chart approval chain (see app/services/approval_chain.py): the
     # approvers in order (JSON list of user ids), which one is up now

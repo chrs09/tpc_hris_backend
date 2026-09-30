@@ -22,7 +22,6 @@ from app.services.approval_chain import (
 from app.schemas.overtime_request import OvertimeReviewAction
 from app.services.file_service import FileService
 from app.services.trip_payroll_service import now_ph, to_ph
-from app.api.attendance import find_nearest_allowed_attendance_location
 
 router = APIRouter(prefix="/overtime-requests", tags=["Overtime Requests"])
 
@@ -256,6 +255,15 @@ def _serialize(req: OvertimeRequest) -> dict:
             attendance.check_out_time if attendance else None
         ),
         "after_attendance_time_out": _after_attendance(req, attendance),
+        # Filed before the overtime was over (a plan): a later attendance
+        # mismatch means they left early, not a call-back.
+        "filed_in_advance": bool(
+            req.filed_via_form
+            and req.created_at
+            and req.time_in
+            and req.time_out
+            and to_ph(req.created_at) < _span(req.ot_date, req.time_in, req.time_out)[1]
+        ),
         # Org chart approval progress (empty when routed the old way).
         **describe_chain(
             object_session(req),
@@ -346,107 +354,15 @@ def clock_in_overtime(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    if current_user.role == "superadmin":
-        raise HTTPException(
-            status_code=403,
-            detail="Superadmin accounts cannot file overtime requests.",
-        )
-
-    if not reason.strip():
-        raise HTTPException(status_code=400, detail="Reason is required.")
-
-    if _get_ongoing_request(current_user.employee_id, current_user.id, db):
-        raise HTTPException(
-            status_code=400,
-            detail="You already have an overtime in progress. Clock out first.",
-        )
-
-    employee = (
-        db.query(Employee).filter(Employee.id == current_user.employee_id).first()
+    # Overtime is filed now (POST /file) -- no more clock in/out. Kept so
+    # an old app version gets a clear message instead of a 404.
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            "Overtime clock in was replaced by overtime filing. Update the "
+            "app, then tap File Overtime."
+        ),
     )
-    if not employee:
-        raise HTTPException(
-            status_code=400,
-            detail="Your account isn't linked to an employee.",
-        )
-
-    # Org chart first: every head up the layers who approves overtime,
-    # in order. Nobody set up there -> the department's immediate head.
-    chain = resolve_chain(db, employee, current_user, "overtime")
-    requested_by_user_id = chain[0] if chain else _get_department_head(employee, db)
-    if not requested_by_user_id:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "No one has been set to approve your overtime yet. Ask an "
-                "admin to tick Overtime for your head on the Org Chart (or "
-                "set your department's immediate head in Reporting Hierarchy)."
-            ),
-        )
-
-    now = now_ph()
-    scheduled_out = _get_scheduled_time_out(employee, now.date())
-
-    if not scheduled_out:
-        raise HTTPException(
-            status_code=400,
-            detail="You don't have an assigned schedule for today.",
-        )
-
-    eligible_at = datetime.combine(now.date(), scheduled_out) + timedelta(
-        minutes=GRACE_MINUTES
-    )
-    if now < eligible_at:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Overtime can only be started {GRACE_MINUTES} minutes after "
-                f"your scheduled time-out ({scheduled_out.strftime('%H:%M')})."
-            ),
-        )
-
-    request = OvertimeRequest(
-        user_id=current_user.id,
-        employee_id=current_user.employee_id,
-        requested_by_user_id=requested_by_user_id,
-        approval_chain=dump_chain(chain),
-        approval_step=0,
-        ot_date=now.date(),
-        time_in=now.time(),
-        reason=reason.strip(),
-        status="pending",
-        clock_in_lat=lat,
-        clock_in_long=long,
-    )
-    db.add(request)
-    db.flush()
-
-    # Geofence is recorded on the selfie's watermark for a visual record,
-    # but isn't enforced here -- unlike trips, an employee isn't blocked
-    # from clocking in overtime just because they're away from a known
-    # office location.
-    geofence_label = None
-    if lat is not None and long is not None:
-        location, distance, is_allowed = find_nearest_allowed_attendance_location(
-            lat, long
-        )
-        coords_text = f"{lat:.5f}, {long:.5f}"
-        if location:
-            geofence_label = f"{location['name']} ({int(distance)}m) · {coords_text}"
-            if not is_allowed:
-                geofence_label += " - outside geofence"
-        else:
-            geofence_label = coords_text
-
-    file_service = FileService()
-    request.selfie_photo_url = file_service.upload_overtime_selfie(
-        photo, request.id, geofence_label=geofence_label
-    )
-
-    db.commit()
-    db.refresh(request)
-
-    return _serialize(request)
 
 
 @router.post("/{request_id}/clock-out")
@@ -482,34 +398,23 @@ def clock_out_overtime(
     return _serialize(request)
 
 
-@router.get("/missed/options")
-def get_missed_overtime_options(
+@router.get("/file/options")
+def get_overtime_filing_options(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Days the employee can file missed overtime for (this cutoff, up to
-    today, newest first), each pre-filled: start = scheduled time out,
-    end = attendance time out when it's later than that."""
+    """The days overtime can be filed for -- today (before or after
+    working it) and yesterday (forgot to file) -- each pre-filled:
+    start = scheduled time out, end = attendance time out when it's later
+    than that."""
     today = now_ph().date()
-    start, end = _current_cutoff(today)
+
     employee = (
         db.query(Employee).filter(Employee.id == current_user.employee_id).first()
     )
-    payroll_done = _payroll_approved(db, current_user.employee_id, today)
-
-    filed = {
-        (r.ot_date)
-        for r in db.query(OvertimeRequest).filter(
-            OvertimeRequest.user_id == current_user.id,
-            OvertimeRequest.filed_late.is_(True),
-            OvertimeRequest.status.in_(["pending", "approved"]),
-            OvertimeRequest.ot_date >= start,
-        )
-    }
 
     days = []
-    day = today
-    while day >= start:
+    for day in (today, today - timedelta(days=1)):
         attendance = _attendance_on(db, current_user.employee_id, day)
         scheduled_out = _get_scheduled_time_out(employee, day)
         attendance_out = attendance.check_out_time if attendance else None
@@ -528,20 +433,21 @@ def get_missed_overtime_options(
                 "scheduled_time_out": scheduled_out.strftime("%H:%M") if scheduled_out else None,
                 "suggested_time_in": scheduled_out.strftime("%H:%M") if scheduled_out else None,
                 "suggested_time_out": suggested_out,
-                "already_filed": day in filed,
+                "is_today": day == today,
+                # Yesterday needs attendance; today may be filed ahead.
+                "can_file": (
+                    not _payroll_approved(db, current_user.employee_id, day)
+                    and (day == today or bool(attendance and attendance.check_in_time))
+                ),
+                "payroll_approved": _payroll_approved(db, current_user.employee_id, day),
             }
         )
-        day -= timedelta(days=1)
 
-    return {
-        "cutoff_label": _cutoff_label(start, end),
-        "payroll_approved": payroll_done,
-        "days": days,
-    }
+    return {"days": days}
 
 
-@router.post("/missed")
-def file_missed_overtime(
+@router.post("/file")
+def file_overtime(
     ot_date: date = Form(...),
     time_in: str = Form(...),
     time_out: str = Form(...),
@@ -550,7 +456,9 @@ def file_missed_overtime(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Overtime that happened but was never clocked in/out (forgot)."""
+    """File overtime: for today (before extending work -- a plan -- or
+    after) or yesterday (forgot to file). The only way overtime is filed;
+    there's no clock in/out."""
     if current_user.role == "superadmin":
         raise HTTPException(
             status_code=403, detail="Superadmin accounts cannot file overtime requests."
@@ -564,34 +472,39 @@ def file_missed_overtime(
     if not employee:
         raise HTTPException(status_code=400, detail="Your account isn't linked to an employee.")
 
-    _check_late_window(db, employee.id, ot_date)
-
-    attendance = _attendance_on(db, employee.id, ot_date)
-    if not attendance or not attendance.check_in_time:
+    today = now_ph().date()
+    if ot_date not in (today, today - timedelta(days=1)):
         raise HTTPException(
             status_code=400,
-            detail="You have no attendance on that day, so overtime can't be filed for it.",
+            detail="Overtime can only be filed for today or yesterday.",
+        )
+    if _payroll_approved(db, employee.id, ot_date):
+        raise HTTPException(
+            status_code=400,
+            detail="Payroll has already approved overtime for this cutoff.",
         )
 
-    start_t = _parse_hhmm(time_in, "Time in")
-    end_t = _parse_hhmm(time_out, "Time out")
+    attendance = _attendance_on(db, employee.id, ot_date)
+    if ot_date < today and (not attendance or not attendance.check_in_time):
+        raise HTTPException(
+            status_code=400,
+            detail="You have no attendance yesterday, so overtime can't be filed for it.",
+        )
+
+    start_t = _parse_hhmm(time_in, "Start")
+    end_t = _parse_hhmm(time_out, "End")
     start, end = _span(ot_date, start_t, end_t)
     hours = round((end - start).total_seconds() / 3600, 2)
     if hours > MAX_OT_HOURS:
         raise HTTPException(status_code=400, detail=f"That's more than {MAX_OT_HOURS} hours.")
-    _check_end_time(db, employee.id, ot_date, end)
+    # A future end is fine -- filing before the overtime is worked.
 
-    # One missed filing per day, and no overlap with other overtime.
+    # No overlap with other overtime that day.
     for other in db.query(OvertimeRequest).filter(
         OvertimeRequest.user_id == current_user.id,
         OvertimeRequest.ot_date == ot_date,
         OvertimeRequest.status.in_(["pending", "approved"]),
     ):
-        if other.filed_late:
-            raise HTTPException(
-                status_code=400,
-                detail="You already filed missed overtime for that day.",
-            )
         if other.time_out is None:
             raise HTTPException(
                 status_code=400,
@@ -621,9 +534,9 @@ def file_missed_overtime(
         computed_hours=hours,
         reason=reason.strip(),
         status="pending",
-        filed_late=True,
-        manual_time_out=True,
-        late_note="Filed after the fact (forgot to clock in/out).",
+        # Filed the next day (forgot to file on the day).
+        filed_late=ot_date < today,
+        filed_via_form=True,
     )
     db.add(request)
     db.flush()
