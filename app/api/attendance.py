@@ -27,6 +27,8 @@ from app.core.dependencies import (
     require_superadmin_or_editable,
 )
 from app.models.attendance import AttendanceRecord
+from app.models.attendance_adjustment import AttendanceAdjustment
+from app.utils.user_display import display_name
 from app.models.employees import Employee
 from app.models.user import User
 from app.models.trips import Trip
@@ -211,6 +213,31 @@ def start_attendance_review(db: Session, record, side: str):
     chain = resolve_chain(db, employee, user, "attendance")
     setattr(record, f"{side}_review_chain", dump_chain(chain))
     setattr(record, f"{side}_review_step", 0)
+
+
+def _ph_stamp(value) -> str | None:
+    """A stored (UTC) time as PH "YYYY-MM-DD 08:05 AM", for the log."""
+    if not value:
+        return None
+    if value.tzinfo is not None:
+        value = value.astimezone(UTC).replace(tzinfo=None)
+    return (value + timedelta(hours=8)).strftime("%Y-%m-%d %I:%M %p")
+
+
+def log_adjustment(db: Session, record, field: str, old, new, user, reason=None):
+    """One line of the attendance audit trail (AttendanceAdjustment)."""
+    if old == new:
+        return
+    db.add(
+        AttendanceAdjustment(
+            attendance_id=record.id,
+            field=field,
+            old_value=None if old is None else str(old)[:255],
+            new_value=None if new is None else str(new)[:255],
+            reason=(reason or "").strip() or None,
+            changed_by_user_id=user.id if user else None,
+        )
+    )
 
 
 def format_attendance_time_only(value):
@@ -620,6 +647,15 @@ def mark_attendance(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    # Entering attendance by hand: same people who can edit it.
+    if not has_editable_grant(
+        db, current_user, ["hris.attendance_list_view", "hris.attendance_grid_view"]
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="You don't have edit access to attendance records.",
+        )
+
     employee = db.query(Employee).filter_by(id=attendance_in.employee_id).first()
 
     if not employee:
@@ -648,6 +684,10 @@ def mark_attendance(
             detail="Attendance already recorded for this date.",
         )
 
+    db.flush()
+    log_adjustment(
+        db, record, "created", None, f"Entered manually ({attendance_in.status})", current_user
+    )
     db.commit()
     db.refresh(record)
 
@@ -834,6 +874,26 @@ def get_attendance_records(
     # ---------------------------------------
 
     record_ids = [record.id for record in records]
+
+    # Hand-edits per record (audit trail), oldest first.
+    adjustments_map: dict[int, list] = {}
+    if record_ids:
+        for adj in (
+            db.query(AttendanceAdjustment)
+            .options(joinedload(AttendanceAdjustment.changed_by).joinedload(User.employee))
+            .filter(AttendanceAdjustment.attendance_id.in_(record_ids))
+            .order_by(AttendanceAdjustment.changed_at.asc(), AttendanceAdjustment.id.asc())
+        ):
+            adjustments_map.setdefault(adj.attendance_id, []).append(
+                {
+                    "field": adj.field,
+                    "old_value": adj.old_value,
+                    "new_value": adj.new_value,
+                    "reason": adj.reason,
+                    "changed_by": display_name(adj.changed_by) if adj.changed_by else None,
+                    "changed_at": _ph_stamp(adj.changed_at),
+                }
+            )
 
     # --- Profile photos (one lookup for every employee on the page) ---
     profile_photo_map = {}
@@ -1161,6 +1221,8 @@ def get_attendance_records(
                 "status": record.status,
                 "remarks": record.remarks,
                 "created_by_user_id": record.created_by_user_id,
+                # Audit trail of hand-edits (empty when never adjusted).
+                "adjustments": adjustments_map.get(record.id, []),
 
                 "completed_trips": total_count,
                 "trip_tickets": trip_tickets,
@@ -1222,6 +1284,8 @@ def update_attendance(
             detail="Attendance status and remarks are already the same.",
         )
 
+    log_adjustment(db, record, "status", record.status, attendance_in.status, current_user, attendance_in.reason)
+    log_adjustment(db, record, "remarks", record.remarks, attendance_in.remarks, current_user, attendance_in.reason)
     record.status = attendance_in.status
     record.remarks = attendance_in.remarks
 
@@ -1800,35 +1864,51 @@ def adjust_attendance_time(
             detail="Attendance record not found.",
         )
 
-    print("PAYLOAD IN:", payload.check_in_time)
-    print("PAYLOAD OUT:", payload.check_out_time)
-
     try:
-        if payload.check_in_time:
-            local_dt = datetime.strptime(
-                payload.check_in_time,
-                "%Y-%m-%d %H:%M:%S",
+        new_times = {
+            field: PH_TZ.localize(
+                datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
+            ).astimezone(UTC)
+            for field, value in (
+                ("check_in_time", payload.check_in_time),
+                ("check_out_time", payload.check_out_time),
             )
-
-            local_dt = PH_TZ.localize(local_dt)
-
-            attendance.check_in_time = local_dt.astimezone(UTC)
-
-        if payload.check_out_time:
-            local_dt = datetime.strptime(
-                payload.check_out_time,
-                "%Y-%m-%d %H:%M:%S",
-            )
-
-            local_dt = PH_TZ.localize(local_dt)
-
-            attendance.check_out_time = local_dt.astimezone(UTC)
-
+            if value
+        }
     except ValueError:
         raise HTTPException(
             status_code=400,
             detail=("Invalid datetime format. " "Use YYYY-MM-DD HH:MM:SS"),
         )
+
+    # Every change is logged (old -> new, who, when, why). Overwriting a
+    # time that was already there needs a reason.
+    for field, new_value in new_times.items():
+        old_stamp = _ph_stamp(getattr(attendance, field))
+        new_stamp = _ph_stamp(new_value)
+        if old_stamp == new_stamp:
+            continue
+        # A hand-entered record is auto-stamped with the time it was
+        # entered; setting its real time the first time isn't a change.
+        if (
+            attendance.attendance_method == "MANUAL"
+            and not db.query(AttendanceAdjustment.id)
+            .filter(
+                AttendanceAdjustment.attendance_id == attendance.id,
+                AttendanceAdjustment.field == field,
+            )
+            .first()
+        ):
+            old_stamp = None
+        if old_stamp and not (payload.reason or "").strip():
+            raise HTTPException(
+                status_code=400,
+                detail="Give a reason for changing the recorded time.",
+            )
+        log_adjustment(
+            db, attendance, field, old_stamp, new_stamp, current_user, payload.reason
+        )
+        setattr(attendance, field, new_value)
 
     db.commit()
     db.refresh(attendance)

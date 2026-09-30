@@ -21,6 +21,8 @@ class AttendanceUpdate(BaseModel):
     attendance_date: date
     status: str
     remarks: str | None = None
+    # Why it was changed -- saved in the adjustment log.
+    reason: str | None = None
 
 
 class BulkAttendanceMixed(BaseModel):
@@ -30,6 +32,9 @@ class BulkAttendanceMixed(BaseModel):
 class AttendanceTimeAdjust(BaseModel):
     check_in_time: str | None = None
     check_out_time: str | None = None
+    # Required when an existing time is changed -- saved in the
+    # adjustment log (see AttendanceAdjustment).
+    reason: str | None = None
 
 
 class AttendanceResponse(BaseModel):
