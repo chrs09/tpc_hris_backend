@@ -575,6 +575,17 @@ def get_active_trip(
                 "store_id": sid,
                 "store_name": stores_by_id[sid].name if sid in stores_by_id else None,
                 "delivered": sid in delivered_ids,
+                # For the app's Navigate button (Google Maps directions).
+                "latitude": (
+                    float(stores_by_id[sid].latitude)
+                    if sid in stores_by_id and stores_by_id[sid].latitude is not None
+                    else None
+                ),
+                "longitude": (
+                    float(stores_by_id[sid].longitude)
+                    if sid in stores_by_id and stores_by_id[sid].longitude is not None
+                    else None
+                ),
             }
             for sid in planned_ids
         ]

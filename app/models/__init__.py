@@ -60,6 +60,7 @@ from .holiday import Holiday as Holiday
 from .payroll_deductions import PayrollDeduction as PayrollDeduction
 from .payroll_cutoff_rule import PayrollCutoffRule as PayrollCutoffRule
 from .attendance_adjustment import AttendanceAdjustment as AttendanceAdjustment
+from .bank import Bank as Bank
 from .finance_expense import FinanceExpense as FinanceExpense
 from .finance_expense_item import FinanceExpenseItem as FinanceExpenseItem
 from .trip_finance_review import TripFinanceReview as TripFinanceReview
