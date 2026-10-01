@@ -2,7 +2,9 @@
 #
 # Banks offered on the employee 201 form (Bank Type). Anyone logged in can
 # read the list (the form needs it); adding / renaming / hiding is on
-# Administrator -> Settings, same access as that page.
+# Finance -> Bank Master (superadmin, or the finance.bank_master grant).
+# There's no delete -- a bank that's no longer offered is hidden, so
+# employees already on it keep it.
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -17,8 +19,8 @@ from app.models.user import User
 
 router = APIRouter(prefix="/banks", tags=["Banks"])
 
-_require_settings = require_role_or_module(
-    roles=[], module_key="administrator.settings"
+_require_bank_master = require_role_or_module(
+    roles=[], module_key="finance.bank_master"
 )
 
 
@@ -75,7 +77,7 @@ def list_banks(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Active banks for the 201 form ("Other" last); Settings passes
+    """Active banks for the 201 form ("Other" last); Bank Master passes
     include_hidden=true to manage them all."""
     query = db.query(Bank)
     if not include_hidden:
@@ -89,7 +91,7 @@ def list_banks(
 def add_bank(
     payload: BankIn,
     db: Session = Depends(get_db),
-    current_user: User = Depends(_require_settings),
+    current_user: User = Depends(_require_bank_master),
 ):
     name = _clean(payload.name)
     _check_unique(db, name)
@@ -105,7 +107,7 @@ def update_bank(
     bank_id: int,
     payload: BankIn,
     db: Session = Depends(get_db),
-    current_user: User = Depends(_require_settings),
+    current_user: User = Depends(_require_bank_master),
 ):
     """Rename (employees on the old name move to the new one) or
     hide / show it on the 201 form."""
@@ -124,21 +126,3 @@ def update_bank(
     db.refresh(bank)
     return _serialize(bank, _in_use(db))
 
-
-@router.delete("/{bank_id}")
-def delete_bank(
-    bank_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(_require_settings),
-):
-    """Only a bank no employee uses can be deleted; otherwise hide it."""
-    bank = _get(db, bank_id)
-    count = _in_use(db).get(bank.name, 0)
-    if count:
-        raise HTTPException(
-            status_code=400,
-            detail=f"{count} employee(s) use {bank.name} -- hide it instead.",
-        )
-    db.delete(bank)
-    db.commit()
-    return {"message": "Bank deleted."}

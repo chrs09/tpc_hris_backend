@@ -15,6 +15,7 @@ from app.schemas.user import (
 from app.core.dependencies import get_current_user, require_superadmin, require_role_or_module
 from app.core.security import create_access_token
 from app.models.user import User, UserRole
+from app.utils.user_display import display_name
 from app.services.user_service import (
     create_user_service,
     bulk_create_users_service,
@@ -231,6 +232,7 @@ def impersonate_user(
         "user_id": target.id,
         "employee_id": target.employee_id,
         "username": target.username,
+        "full_name": display_name(target),
         # Never force the superadmin through this account's own
         # must-change-password flow -- they're just viewing, not taking
         # over the account permanently.

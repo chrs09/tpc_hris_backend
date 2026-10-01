@@ -15,6 +15,7 @@ from app.models.user import User
 
 # from app.models.employees import Employee
 from app.schemas.user import UserLogin, UserResponse
+from app.utils.user_display import display_name
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
 
@@ -100,6 +101,9 @@ def login(credentials: UserLogin, db: Session = Depends(get_db)):
         "user_id": user.id,
         "employee_id": user.employee_id,
         "username": user.username,
+        # Employee's full name (username when there's no employee record)
+        # -- shown in the sidebar greeting.
+        "full_name": display_name(user),
         "must_change_password": user.must_change_password,
         "expires_at": access_expires_at.isoformat(),
         "expires_in_seconds": int(duration.total_seconds()),

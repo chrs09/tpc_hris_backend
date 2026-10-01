@@ -14,7 +14,7 @@
 # back to the old Reporting Hierarchy / superadmin behaviour.
 
 import json
-from datetime import datetime
+from datetime import date, datetime, timedelta
 
 from sqlalchemy.orm import Session
 
@@ -132,8 +132,103 @@ def append_log(existing: str | None, user: User, action: str, remarks: str | Non
     return json.dumps(log)
 
 
+# =========================================================
+# AWAY TODAY -- skip an approver who's absent / on leave
+#
+# While the approver whose turn it is is out today (attendance Absent or
+# On Leave, or an approved leave covering today), the request moves to
+# the next head up, who can approve straight away. The last approver is
+# never skipped (there's no one above them).
+# =========================================================
+def _today_ph() -> date:
+    return (datetime.utcnow() + timedelta(hours=8)).date()
+
+
+def approver_away(db: Session, user_id: int, on_date: date | None = None) -> str | None:
+    """"absent" / "on leave" when this approver is out that day, else None."""
+    from app.models.attendance import AttendanceRecord
+    from app.models.leave_request import LeaveRequest
+
+    user = db.get(User, user_id)
+    if not user or not user.employee_id:
+        return None
+    on_date = on_date or _today_ph()
+    record = (
+        db.query(AttendanceRecord.status)
+        .filter(
+            AttendanceRecord.employee_id == user.employee_id,
+            AttendanceRecord.attendance_date == on_date,
+        )
+        .first()
+    )
+    if record and record[0] == "Absent":
+        return "absent"
+    if record and record[0] == "On Leave":
+        return "on leave"
+    leave = (
+        db.query(LeaveRequest.id)
+        .filter(
+            LeaveRequest.employee_id == user.employee_id,
+            LeaveRequest.status == "approved",
+            LeaveRequest.start_date <= on_date,
+            LeaveRequest.end_date >= on_date,
+        )
+        .first()
+    )
+    return "on leave" if leave else None
+
+
+def effective_step(db: Session, chain: list[int], step: int | None) -> tuple[int, list]:
+    """Whose turn it really is today: (index, [(skipped index, reason)])."""
+    index = step or 0
+    skipped = []
+    while index < len(chain) - 1:
+        reason = approver_away(db, chain[index])
+        if not reason:
+            break
+        skipped.append((index, reason))
+        index += 1
+    return index, skipped
+
+
+def acting_index(db: Session, chain: list[int], step: int | None, user_id: int):
+    """Which step this user is approving as -- their own turn, or the turn
+    passed to them because the approvers before them are out -- plus the
+    skipped ones. None when it isn't their turn (e.g. a superadmin
+    overriding)."""
+    step = step or 0
+    index, skipped = effective_step(db, chain, step)
+    # Their own step, unless they're out today (then it's passed up and
+    # they can't act on it -- see skipped_for()).
+    if step < len(chain) and chain[step] == user_id and step == index:
+        return step, []
+    if index < len(chain) and chain[index] == user_id:
+        return index, skipped
+    return None, []
+
+
+def skipped_for(db: Session, chain: list[int], step: int | None, user_id: int) -> str | None:
+    """"absent" / "on leave" when this user's step was passed up because
+    they're out today -- so they can see the request but not act on it."""
+    _, skipped = effective_step(db, chain, step)
+    for index, reason in skipped:
+        if chain[index] == user_id:
+            return reason
+    return None
+
+
+def log_skipped(db: Session, log_json: str | None, chain: list[int], skipped: list) -> str | None:
+    """Adds a "skipped -- absent/on leave today" line per skipped approver."""
+    for index, reason in skipped:
+        user = db.get(User, chain[index])
+        if user:
+            log_json = append_log(log_json, user, "skipped", f"{reason} today")
+    return log_json
+
+
 def describe_chain(db: Session, chain_json: str | None, step: int | None, log_json: str | None, status_done: bool) -> dict:
-    """Progress for the UI: every approver with approved / current / waiting."""
+    """Progress for the UI: every approver with approved / current /
+    skipped (out today) / waiting, plus whose turn it really is."""
     chain = [int(i) for i in load_json_list(chain_json)]
     if not chain:
         return {"approval_steps": [], "approval_log": load_json_list(log_json)}
@@ -142,26 +237,105 @@ def describe_chain(db: Session, chain_json: str | None, step: int | None, log_js
         for u in db.query(User).filter(User.id.in_(chain)).all()
     }
     step = step or 0
+    current, skipped = (step, []) if status_done else effective_step(db, chain, step)
+    skipped_reason = dict(skipped)
+    name_of = lambda uid: display_name(users[uid]) if uid in users else f"User #{uid}"
     steps = []
     for index, uid in enumerate(chain):
+        note = None
         if index < step:
             state = "approved"
-        elif index == step and not status_done:
+        elif index in skipped_reason:
+            state = "skipped"
+            note = skipped_reason[index]
+        elif index == current and not status_done:
             state = "current"
         elif status_done and index <= step:
             state = "done"
         else:
             state = "waiting"
-        steps.append(
-            {
-                "user_id": uid,
-                "name": display_name(users[uid]) if uid in users else f"User #{uid}",
-                "state": state,
-            }
-        )
+        steps.append({"user_id": uid, "name": name_of(uid), "state": state, "note": note})
+    away_note = None
+    if skipped:
+        away = ", ".join(f"{name_of(chain[i])} is {reason}" for i, reason in skipped)
+        away_note = f"{away} today -- passed to {name_of(chain[current])}."
     return {
         "approval_steps": steps,
         "approval_step": step,
         "approval_total": len(chain),
         "approval_log": load_json_list(log_json),
+        # Whose turn it really is today (after skipping anyone out).
+        "current_approver_id": None if status_done else chain[current],
+        "approver_away_note": away_note,
     }
+
+
+# =========================================================
+# TEAM SCOPE -- what an org chart head may see
+#
+# A head (any org unit with them as head_user_id) only sees the people
+# in the units they head, plus every unit below those, plus themselves --
+# on the Attendance list/grid and OT approvals. Superadmin and anyone who
+# isn't a head see everyone, as before.
+# =========================================================
+def team_scope(db: Session, user: User | None) -> dict | None:
+    """None = no limit. Otherwise {"employee_ids": set, "unit_names": [...]}."""
+    if not user or (_role(user) or "").lower() == "superadmin":
+        return None
+    units = db.query(OrgUnit).all()
+    headed = [u for u in units if u.head_user_id == user.id]
+    if not headed:
+        return None
+
+    children: dict[int | None, list] = {}
+    for unit in units:
+        children.setdefault(unit.parent_id, []).append(unit)
+    scope_units, stack, seen = [], list(headed), set()
+    while stack:
+        unit = stack.pop()
+        if unit.id in seen:
+            continue
+        seen.add(unit.id)
+        scope_units.append(unit)
+        stack.extend(children.get(unit.id, []))
+
+    employees = db.query(Employee).filter(Employee.is_active == 1).all()
+    users_by_employee = {
+        u.employee_id: u
+        for u in db.query(User).filter(User.employee_id.isnot(None)).all()
+    }
+    ids = {
+        emp.id
+        for emp in employees
+        if any(_is_member(unit, emp, users_by_employee.get(emp.id)) for unit in scope_units)
+    }
+    if user.employee_id:
+        ids.add(user.employee_id)
+    return {
+        "employee_ids": ids,
+        "unit_names": [u.name for u in headed],
+    }
+
+
+def can_view_all_payroll(db: Session, user: User | None) -> bool:
+    """Payroll needs everyone's attendance: superadmin, the payroll roles,
+    or anyone granted the Payroll module."""
+    if not user:
+        return False
+    if (_role(user) or "").lower() in ("superadmin", "admin", "payroll_admin"):
+        return True
+    if not user.employee_id:
+        return False
+    from app.models.employee_module_access import EmployeeModuleAccess
+
+    return (
+        db.query(EmployeeModuleAccess.id)
+        .join(Employee, Employee.id == EmployeeModuleAccess.employee_id)
+        .filter(
+            Employee.id == user.employee_id,
+            Employee.has_custom_module_access.is_(True),
+            EmployeeModuleAccess.module_key == "payroll.payroll",
+        )
+        .first()
+        is not None
+    )

@@ -13,6 +13,10 @@ from app.models.attendance import AttendanceRecord
 from app.models.overtime_approvals import OvertimeApproval
 from app.utils.user_display import display_name
 from app.services.approval_chain import (
+    acting_index,
+    skipped_for,
+    log_skipped,
+    team_scope,
     append_log,
     describe_chain,
     dump_chain,
@@ -264,6 +268,10 @@ def _serialize(req: OvertimeRequest) -> dict:
             and req.time_out
             and to_ph(req.created_at) < _span(req.ot_date, req.time_in, req.time_out)[1]
         ),
+        # False when the viewer's step was passed up because they're
+        # absent / on leave today (see for-my-approval).
+        "can_act": getattr(req, "_can_act", True),
+        "viewer_away": getattr(req, "_away", None),
         # Org chart approval progress (empty when routed the old way).
         **describe_chain(
             object_session(req),
@@ -281,12 +289,14 @@ def _can_review(request: OvertimeRequest, current_user: User, db: Session) -> bo
     (see the Reporting Hierarchy / DepartmentHead page) -- whichever
     applies, since either one may be the actual person who called the
     employee in for overtime."""
-    if request.requested_by_user_id == current_user.id:
+    if not request.approval_chain and request.requested_by_user_id == current_user.id:
         return True
 
     if request.approval_chain:
-        # Org chart routing: only the approver whose turn it is.
-        return False
+        # Org chart routing: only the approver whose turn it is -- passed
+        # up the chain while that approver is absent / on leave today.
+        chain = [int(i) for i in load_json_list(request.approval_chain)]
+        return acting_index(db, chain, request.approval_step, current_user.id)[0] is not None
 
     employee = request.employee
     if not employee or not employee.department:
@@ -680,7 +690,25 @@ def get_requests_for_my_approval(
         .order_by(OvertimeRequest.created_at.asc())
         .all()
     )
-    mine = [r for r in pending if _can_review(r, current_user, db)]
+    mine = []
+    for r in pending:
+        if _can_review(r, current_user, db):
+            r._can_act = True
+            mine.append(r)
+        elif r.approval_chain:
+            # Their step was passed up because they're out today: shown,
+            # but they can't approve / reject it.
+            away = skipped_for(
+                db, [int(i) for i in load_json_list(r.approval_chain)], r.approval_step, current_user.id
+            )
+            if away:
+                r._can_act = False
+                r._away = away
+                mine.append(r)
+    # An org chart head only sees their own team's overtime.
+    team = team_scope(db, current_user)
+    if team is not None:
+        mine = [r for r in mine if r.employee_id in team["employee_ids"]]
     return [_serialize(r) for r in mine]
 
 
@@ -719,6 +747,14 @@ def approve_overtime_request(
         if request.approved_hours is not None
         else request.computed_hours
     )
+    chain = [int(i) for i in load_json_list(request.approval_chain)]
+    acting, skipped = (
+        acting_index(db, chain, request.approval_step, current_user.id)
+        if chain
+        else (None, [])
+    )
+    # Approvers before this one who are out today were skipped.
+    request.approval_log = log_skipped(db, request.approval_log, chain, skipped)
     request.approval_log = append_log(
         request.approval_log,
         current_user,
@@ -728,18 +764,15 @@ def approve_overtime_request(
     )
 
     # Org chart chain: pass it to the next head up.
-    chain = [int(i) for i in load_json_list(request.approval_chain)]
-    if (
-        chain
-        and request.requested_by_user_id == current_user.id
-        and request.approval_step < len(chain) - 1
-    ):
-        request.approval_step += 1
+    if chain and acting is not None and acting < len(chain) - 1:
+        request.approval_step = acting + 1
         request.requested_by_user_id = chain[request.approval_step]
         db.commit()
         db.refresh(request)
         return _serialize(request)
 
+    if chain and acting is not None:
+        request.approval_step = acting
     request.status = "approved"
     request.remarks = payload.remarks
     request.approved_by_user_id = current_user.id

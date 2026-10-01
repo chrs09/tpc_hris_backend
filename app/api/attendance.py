@@ -37,6 +37,11 @@ from app.models.files import File as FileModel
 from app.services.file_service import FileService, _watermark_timestamp
 from app.services.face_recognition_service import FaceRecognitionService
 from app.services.approval_chain import (
+    acting_index,
+    effective_step,
+    log_skipped,
+    can_view_all_payroll,
+    team_scope,
     append_log,
     describe_chain,
     dump_chain,
@@ -238,6 +243,16 @@ def log_adjustment(db: Session, record, field: str, old, new, user, reason=None)
             changed_by_user_id=user.id if user else None,
         )
     )
+
+
+def ensure_in_team(db: Session, user, employee_id: int):
+    """Org chart heads only act on their own people (team_scope)."""
+    scope = team_scope(db, user)
+    if scope is not None and employee_id not in scope["employee_ids"]:
+        raise HTTPException(
+            status_code=403,
+            detail="This employee isn't in your team on the Org Chart.",
+        )
 
 
 def format_attendance_time_only(value):
@@ -660,6 +675,7 @@ def mark_attendance(
 
     if not employee:
         raise HTTPException(status_code=404, detail="Employee not found")
+    ensure_in_team(db, current_user, employee.id)
 
     today = datetime.now(ZoneInfo("Asia/Manila")).date()
 
@@ -763,10 +779,19 @@ def get_attendance_records(
     # needs hours/status/trip data) can skip these two batch queries and
     # the profile/time-in/time-out URL fields entirely by passing false.
     include_photos: bool = True,
+    # "all" = everyone, for the Payroll page -- only honoured for people
+    # with payroll access; an org chart head otherwise sees their team.
+    scope: str | None = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     sync_trip_attendance_records(db, current_user.id)
+
+    team = (
+        None
+        if scope == "all" and can_view_all_payroll(db, current_user)
+        else team_scope(db, current_user)
+    )
 
     # ---------------------------------------
     # ATTENDANCE QUERY
@@ -783,6 +808,11 @@ def get_attendance_records(
     if attendance_date:
         query = query.filter(
             AttendanceRecord.attendance_date == attendance_date
+        )
+
+    if team is not None:
+        query = query.filter(
+            AttendanceRecord.employee_id.in_(team["employee_ids"] or [0])
         )
 
     records = (
@@ -1238,6 +1268,10 @@ def get_attendance_records(
         "admin_count": admin_count,
         "motorpool_count": motorpool_count,
         "active_employee_count": active_employee_count,
+        # Set when the viewer is an org chart head: only these employees
+        # (their team) are included / should be shown.
+        "team_employee_ids": sorted(team["employee_ids"]) if team else None,
+        "team_units": team["unit_names"] if team else None,
     }
 
 
@@ -1274,6 +1308,7 @@ def update_attendance(
 
     if not record:
         raise HTTPException(status_code=404, detail="Attendance record not found")
+    ensure_in_team(db, current_user, record.employee_id)
 
     if (
         record.status == attendance_in.status
@@ -1608,6 +1643,7 @@ def get_geofence_alerts(
     # Superadmin / Attendance grid "Can edit" grant: every one. An org
     # chart head: only the ones whose turn is with them.
     sees_all = has_editable_grant(db, current_user, ["hris.attendance_grid_view"])
+    team = team_scope(db, current_user)
     since = datetime.now(ZoneInfo("Asia/Manila")).date() - timedelta(days=6)
     records = (
         db.query(AttendanceRecord)
@@ -1648,7 +1684,8 @@ def get_geofence_alerts(
                 getattr(record, f"{side}_outside_geofence")
                 and getattr(record, f"{side}_face_review_status")
                 in GEOFENCE_PENDING_STATUSES
-                and (sees_all or _current_approver(record, side) == current_user.id)
+                and (sees_all or _current_approver(db, record, side) == current_user.id)
+                and (team is None or record.employee_id in team["employee_ids"])
             ):
                 alerts.append(
                     {
@@ -1669,10 +1706,14 @@ def get_geofence_alerts(
     return alerts
 
 
-def _current_approver(record, side: str) -> int | None:
+def _current_approver(db: Session, record, side: str) -> int | None:
+    """Whose turn it really is today -- an approver who's absent / on
+    leave today is skipped to the next head up."""
     chain = [int(i) for i in load_json_list(getattr(record, f"{side}_review_chain"))]
-    step = getattr(record, f"{side}_review_step") or 0
-    return chain[step] if step < len(chain) else None
+    if not chain:
+        return None
+    index, _ = effective_step(db, chain, getattr(record, f"{side}_review_step") or 0)
+    return chain[index] if index < len(chain) else None
 
 
 def _get_review_record(db: Session, attendance_id: int, side: str, current_user: User):
@@ -1684,9 +1725,10 @@ def _get_review_record(db: Session, attendance_id: int, side: str, current_user:
     )
     if not attendance:
         raise HTTPException(status_code=404, detail="Attendance record not found.")
+    ensure_in_team(db, current_user, attendance.employee_id)
     is_turn = (
         getattr(attendance, f"{side}_face_review_status") in REVIEW_PENDING_STATUSES
-        and _current_approver(attendance, side) == current_user.id
+        and _current_approver(db, attendance, side) == current_user.id
     )
     if not is_turn and not has_editable_grant(
         db, current_user, ["hris.attendance_grid_view"]
@@ -1706,21 +1748,22 @@ def approve_attendance(
 ):
     attendance, is_turn = _get_review_record(db, attendance_id, side, current_user)
 
-    setattr(
-        attendance,
-        f"{side}_review_log",
-        append_log(getattr(attendance, f"{side}_review_log"), current_user, "approved"),
-    )
-
-    # Org chart chain: the head whose turn it is passes it up to the
-    # next head; the last one (or a superadmin / grant) finishes it.
-    chain = load_json_list(getattr(attendance, f"{side}_review_chain"))
+    # Org chart chain: the head whose turn it is (approvers out today are
+    # skipped) passes it up to the next head; the last one (or a
+    # superadmin / grant) finishes it.
+    chain = [int(i) for i in load_json_list(getattr(attendance, f"{side}_review_chain"))]
     step = getattr(attendance, f"{side}_review_step") or 0
+    acting, skipped = acting_index(db, chain, step, current_user.id) if chain else (None, [])
+    log = log_skipped(db, getattr(attendance, f"{side}_review_log"), chain, skipped)
+    setattr(attendance, f"{side}_review_log", append_log(log, current_user, "approved"))
+
     message = "Attendance approved."
-    if is_turn and step < len(chain) - 1:
-        setattr(attendance, f"{side}_review_step", step + 1)
+    if is_turn and acting is not None and acting < len(chain) - 1:
+        setattr(attendance, f"{side}_review_step", acting + 1)
         message = "Approved -- passed to the next approver."
     else:
+        if acting is not None:
+            setattr(attendance, f"{side}_review_step", acting)
         setattr(attendance, f"{side}_face_review_status", "APPROVED")
 
     db.commit()
@@ -1769,21 +1812,32 @@ def get_attendance_for_my_approval(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Time in/out sides whose turn is with me on the org chart chain
-    (last 30 days), newest first."""
+    """Time in/out sides waiting for review (last 30 days), newest first:
+    the ones whose turn is with me on the org chart chain -- or, for a
+    superadmin / Attendance grid "Can edit" grant, every pending one
+    (an org chart head still only their team)."""
     since = datetime.now(ZoneInfo("Asia/Manila")).date() - timedelta(days=30)
+    sees_all = has_editable_grant(db, current_user, ["hris.attendance_grid_view"])
+    team = team_scope(db, current_user)
     records = (
         db.query(AttendanceRecord)
         .options(joinedload(AttendanceRecord.employee))
         .filter(
             AttendanceRecord.attendance_date >= since,
             or_(
+                AttendanceRecord.time_in_face_review_status.in_(REVIEW_PENDING_STATUSES),
+                AttendanceRecord.time_out_face_review_status.in_(REVIEW_PENDING_STATUSES),
+            )
+            if sees_all
+            else or_(
                 AttendanceRecord.time_in_review_chain.isnot(None),
                 AttendanceRecord.time_out_review_chain.isnot(None),
             ),
         )
         .all()
     )
+    if team is not None:
+        records = [r for r in records if r.employee_id in team["employee_ids"]]
     photos = {
         (f.entity_id, f.document_type): f.file_url
         for f in db.query(FileModel).filter(
@@ -1798,9 +1852,11 @@ def get_attendance_for_my_approval(
             ("time_in", "Time In", record.check_in_time),
             ("time_out", "Time Out", record.check_out_time),
         ):
+            if side == "time_out" and not record.check_out_time:
+                continue
             if (
                 getattr(record, f"{side}_face_review_status") in REVIEW_PENDING_STATUSES
-                and _current_approver(record, side) == current_user.id
+                and (sees_all or _current_approver(db, record, side) == current_user.id)
             ):
                 items.append(
                     {
@@ -1863,6 +1919,7 @@ def adjust_attendance_time(
             status_code=404,
             detail="Attendance record not found.",
         )
+    ensure_in_team(db, current_user, attendance.employee_id)
 
     try:
         new_times = {

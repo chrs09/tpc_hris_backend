@@ -16,6 +16,9 @@ from app.models.employees import Employee
 from app.models.cash_advance_head import CashAdvanceHead
 from app.utils.user_display import display_name
 from app.services.approval_chain import (
+    acting_index,
+    skipped_for,
+    log_skipped,
     append_log,
     describe_chain,
     dump_chain,
@@ -103,6 +106,10 @@ def _serialize(req: CashAdvanceRequest, db: Session) -> dict:
             req.released_by.username if req.released_by else None
         ),
         "created_at": req.created_at,
+        # False when the viewer's step was passed up because they're
+        # absent / on leave today (see for-my-approval).
+        "can_act": getattr(req, "_can_act", True),
+        "viewer_away": getattr(req, "_away", None),
         # Org chart approval progress (empty when routed the old way).
         **describe_chain(
             db,
@@ -115,7 +122,7 @@ def _serialize(req: CashAdvanceRequest, db: Session) -> dict:
 
 
 def _can_review(req: CashAdvanceRequest, current_user: User, db: Session) -> bool:
-    if req.requested_by_user_id == current_user.id:
+    if not req.approval_chain and req.requested_by_user_id == current_user.id:
         return True
     if current_user.role == "superadmin":
         return True
@@ -123,9 +130,10 @@ def _can_review(req: CashAdvanceRequest, current_user: User, db: Session) -> boo
     if has_editable_grant(db, current_user, ["finance.cash_advance"]):
         return True
     if req.approval_chain:
-        # Org chart routing: only the approver whose turn it is (kept in
-        # requested_by_user_id, checked above).
-        return False
+        # Org chart routing: only the approver whose turn it is -- passed
+        # up the chain while that approver is absent / on leave today.
+        chain = [int(i) for i in load_json_list(req.approval_chain)]
+        return acting_index(db, chain, req.approval_step, current_user.id)[0] is not None
     employee = req.employee
     if not employee or not employee.department:
         return False
@@ -413,7 +421,21 @@ def get_requests_for_my_approval(
         .order_by(CashAdvanceRequest.created_at.asc())
         .all()
     )
-    mine = [r for r in pending if _can_review(r, current_user, db)]
+    mine = []
+    for r in pending:
+        if _can_review(r, current_user, db):
+            r._can_act = True
+            mine.append(r)
+        elif r.approval_chain:
+            # Their step was passed up because they're out today: shown,
+            # but they can't approve / reject it.
+            away = skipped_for(
+                db, [int(i) for i in load_json_list(r.approval_chain)], r.approval_step, current_user.id
+            )
+            if away:
+                r._can_act = False
+                r._away = away
+                mine.append(r)
     return [_serialize(r, db) for r in mine]
 
 
@@ -459,6 +481,14 @@ def approve_cash_advance_request(
         # what an earlier head in the chain approved).
         request.approved_amount = request.amount
 
+    chain = [int(i) for i in load_json_list(request.approval_chain)]
+    acting, skipped = (
+        acting_index(db, chain, request.approval_step, current_user.id)
+        if chain
+        else (None, [])
+    )
+    # Approvers before this one who are out today were skipped.
+    request.approval_log = log_skipped(db, request.approval_log, chain, skipped)
     request.approval_log = append_log(
         request.approval_log,
         current_user,
@@ -469,18 +499,15 @@ def approve_cash_advance_request(
 
     # Org chart chain: pass it to the next head up. (A superadmin or a
     # Cash Advance "Can edit" grant who isn't the one up now finishes it.)
-    chain = [int(i) for i in load_json_list(request.approval_chain)]
-    if (
-        chain
-        and request.requested_by_user_id == current_user.id
-        and request.approval_step < len(chain) - 1
-    ):
-        request.approval_step += 1
+    if chain and acting is not None and acting < len(chain) - 1:
+        request.approval_step = acting + 1
         request.requested_by_user_id = chain[request.approval_step]
         db.commit()
         db.refresh(request)
         return _serialize(request, db)
 
+    if chain and acting is not None:
+        request.approval_step = acting
     request.status = "approved"
     request.remarks = payload.remarks
     request.approved_by_user_id = current_user.id

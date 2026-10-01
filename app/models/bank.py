@@ -7,7 +7,7 @@ from app.core.database import Base
 
 class Bank(Base):
     """Banks offered on the employee 201 form (Bank Type), managed on
-    Administrator -> Settings -> Banks instead of hard-coded. Hiding one
+    Finance -> Bank Master instead of hard-coded. Hiding one
     (is_active False) drops it from the form but keeps it on employees
     who already use it."""
 

@@ -75,7 +75,7 @@ MODULE_GROUPS = {
         # Driver fuel requests (app/api/fuel_requests.py).
         "fuel_requests",
     ],
-    "finance": ["finance_trips", "finance_expenses", "cash_advance"],
+    "finance": ["finance_trips", "finance_expenses", "cash_advance", "bank_master"],
     "administrator": [
         "users",
         "hierarchy",
