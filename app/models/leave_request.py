@@ -52,6 +52,13 @@ class LeaveRequest(Base):
     reviewed_by_user_id = Column(Integer, ForeignKey("tpc_users.id"), nullable=True)
     reviewed_at = Column(DateTime, nullable=True)
 
+    # Org chart approval chain (app/services/approval_chain.py): heads
+    # with Leave ticked, in order; whose turn it is; and who did what.
+    # NULL chain = the old way (HR / admin approve).
+    approval_chain = Column(Text, nullable=True)
+    approval_step = Column(Integer, nullable=False, default=0, server_default="0")
+    approval_log = Column(Text, nullable=True)
+
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     employee = relationship(

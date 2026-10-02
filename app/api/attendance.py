@@ -7,6 +7,7 @@ from datetime import datetime, date, timedelta
 from zoneinfo import ZoneInfo
 
 from fastapi import (
+    Body,
     APIRouter,
     Depends,
     HTTPException,
@@ -38,6 +39,7 @@ from app.services.file_service import FileService, _watermark_timestamp
 from app.services.face_recognition_service import FaceRecognitionService
 from app.services.approval_chain import (
     acting_index,
+    team_scope as _team_scope,
     effective_step,
     log_skipped,
     can_view_all_payroll,
@@ -1743,24 +1745,74 @@ def _get_review_record(db: Session, attendance_id: int, side: str, current_user:
 def approve_attendance(
     attendance_id: int,
     side: str = Query("time_in", pattern="^(time_in|time_out)$"),
+    # Required when passing it up to the next head (what they checked).
+    remarks: str | None = Body(None, embed=True),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     attendance, is_turn = _get_review_record(db, attendance_id, side, current_user)
 
+    if getattr(attendance, f"{side}_face_review_status") not in REVIEW_PENDING_STATUSES:
+        raise HTTPException(status_code=400, detail="This attendance isn't waiting for review.")
+
     # Org chart chain: the head whose turn it is (approvers out today are
     # skipped) passes it up to the next head; the last one (or a
-    # superadmin / grant) finishes it.
+    # superadmin) finishes it.
     chain = [int(i) for i in load_json_list(getattr(attendance, f"{side}_review_chain"))]
     step = getattr(attendance, f"{side}_review_step") or 0
     acting, skipped = acting_index(db, chain, step, current_user.id) if chain else (None, [])
+    passes_up = is_turn and acting is not None and acting < len(chain) - 1
+
+    # A head (not superadmin) approving their own team's attendance from
+    # the review grid, when it isn't their chain turn: it still goes up to
+    # the heads above them (Attendance ticked) for the final approval,
+    # instead of being final -- unless there's no one above.
+    is_superadmin = (getattr(current_user.role, "value", current_user.role) or "") == "superadmin"
+    if not is_turn and not is_superadmin and _team_scope(db, current_user) is not None:
+        already = any(
+            entry.get("user_id") == current_user.id and entry.get("action") == "approved"
+            for entry in load_json_list(getattr(attendance, f"{side}_review_log"))
+        )
+        if already:
+            raise HTTPException(
+                status_code=400,
+                detail="You already approved this -- it's waiting for the next head.",
+            )
+        approver_employee = (
+            db.query(Employee).filter(Employee.id == current_user.employee_id).first()
+            if current_user.employee_id
+            else None
+        )
+        upper = resolve_chain(db, approver_employee, current_user, "attendance")
+        if upper:
+            # Record their approval as the first step, then the heads above.
+            chain = [current_user.id] + [uid for uid in upper if uid != current_user.id]
+            step, skipped, acting = 0, [], 0
+            passes_up = True
+    if passes_up and not (remarks or "").strip():
+        raise HTTPException(
+            status_code=400,
+            detail="Add remarks for the next approver (what you checked).",
+        )
     log = log_skipped(db, getattr(attendance, f"{side}_review_log"), chain, skipped)
-    setattr(attendance, f"{side}_review_log", append_log(log, current_user, "approved"))
+    setattr(
+        attendance,
+        f"{side}_review_log",
+        append_log(log, current_user, "approved", (remarks or "").strip() or None),
+    )
 
     message = "Attendance approved."
-    if is_turn and acting is not None and acting < len(chain) - 1:
+    if passes_up:
+        setattr(attendance, f"{side}_review_chain", dump_chain(chain))
         setattr(attendance, f"{side}_review_step", acting + 1)
-        message = "Approved -- passed to the next approver."
+        # Keep it waiting for review (a face-check status stays as is).
+        if getattr(attendance, f"{side}_face_review_status") not in REVIEW_PENDING_STATUSES:
+            setattr(attendance, f"{side}_face_review_status", "NEEDS_REVIEW")
+        next_user = db.get(User, chain[acting + 1])
+        message = (
+            f"Approved -- passed to {display_name(next_user) if next_user else 'the next head'}"
+            " for the final approval."
+        )
     else:
         if acting is not None:
             setattr(attendance, f"{side}_review_step", acting)
@@ -1781,6 +1833,7 @@ def approve_attendance(
 def reject_attendance(
     attendance_id: int,
     side: str = Query("time_in", pattern="^(time_in|time_out)$"),
+    remarks: str | None = Body(None, embed=True),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -1789,7 +1842,12 @@ def reject_attendance(
     setattr(
         attendance,
         f"{side}_review_log",
-        append_log(getattr(attendance, f"{side}_review_log"), current_user, "rejected"),
+        append_log(
+            getattr(attendance, f"{side}_review_log"),
+            current_user,
+            "rejected",
+            (remarks or "").strip() or None,
+        ),
     )
     setattr(attendance, f"{side}_face_review_status", "REJECTED")
 

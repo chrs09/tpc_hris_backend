@@ -24,7 +24,7 @@ from app.models.user import User
 from app.utils.timezone import utc_to_ph
 from app.utils.user_display import display_name
 
-APPROVAL_KINDS = ("cash_advance", "overtime", "attendance")
+APPROVAL_KINDS = ("cash_advance", "overtime", "attendance", "leave")
 
 
 def load_json_list(value) -> list:

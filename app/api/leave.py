@@ -1,13 +1,30 @@
 from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm import Session, joinedload, object_session
 
 from app.core.database import get_db
-from app.core.dependencies import get_current_user, get_current_admin, require_role_or_module
+from app.core.dependencies import (
+    get_current_admin,
+    get_current_user,
+    has_editable_grant,
+    require_role_or_module,
+)
 from app.models.user import User
 from app.models.leave_request import LeaveRequest
 from app.models.attendance import AttendanceRecord
+from app.models.employees import Employee
+from app.services.approval_chain import (
+    acting_index,
+    append_log,
+    describe_chain,
+    dump_chain,
+    load_json_list,
+    log_skipped,
+    resolve_chain,
+    skipped_for,
+    team_scope,
+)
 from app.schemas.leave import LeaveRequestCreate, LeaveReviewAction
 
 router = APIRouter(prefix="/leave", tags=["Leave"])
@@ -76,6 +93,17 @@ def _ensure_can_review(leave: LeaveRequest, current_user: User):
         )
 
 
+def _has_leave_module(db: Session, user: User) -> bool:
+    """HR / admin side (the Leave module): admin, superadmin, or the
+    hris.leave grant with "Can edit: Yes"."""
+    role = user.role.value if hasattr(user.role, "value") else user.role
+    return role in ("admin", "superadmin") or has_editable_grant(db, user, ["hris.leave"])
+
+
+def _chain(leave: LeaveRequest) -> list[int]:
+    return [int(i) for i in load_json_list(leave.approval_chain)]
+
+
 def _serialize(leave: LeaveRequest) -> dict:
     employee = leave.employee
     requester = leave.requester
@@ -98,6 +126,21 @@ def _serialize(leave: LeaveRequest) -> dict:
         "reviewed_by_user_id": leave.reviewed_by_user_id,
         "reviewed_at": leave.reviewed_at,
         "created_at": leave.created_at,
+        # False when the viewer's step was passed up (they're away today).
+        "can_act": getattr(leave, "_can_act", True),
+        "viewer_away": getattr(leave, "_away", None),
+        # Org chart approval progress (empty when routed the old way).
+        **(
+            describe_chain(
+                object_session(leave),
+                leave.approval_chain,
+                leave.approval_step,
+                leave.approval_log,
+                leave.status != "pending",
+            )
+            if object_session(leave) is not None
+            else {}
+        ),
     }
 
 
@@ -138,6 +181,15 @@ def file_leave_request(
             detail="You already have a pending or approved leave request that overlaps these dates.",
         )
 
+    # Org chart first: every head up the layers with Leave ticked, in
+    # order. Nobody set up there -> HR / admin approve as before.
+    employee = (
+        db.query(Employee).filter(Employee.id == current_user.employee_id).first()
+        if current_user.employee_id
+        else None
+    )
+    chain = resolve_chain(db, employee, current_user, "leave")
+
     leave = LeaveRequest(
         user_id=current_user.id,
         employee_id=current_user.employee_id,
@@ -146,6 +198,8 @@ def file_leave_request(
         end_date=payload.end_date,
         reason=payload.reason,
         status="pending",
+        approval_chain=dump_chain(chain),
+        approval_step=0,
     )
 
     db.add(leave)
@@ -201,6 +255,38 @@ def cancel_leave_request(
     return _serialize(leave)
 
 
+@router.get("/for-my-approval")
+def list_leave_for_my_approval(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Pending leave whose turn is with me on the Org Chart chain (or
+    passed up past me because I'm away today -- shown read-only)."""
+    pending = (
+        db.query(LeaveRequest)
+        .options(joinedload(LeaveRequest.employee), joinedload(LeaveRequest.requester))
+        .filter(LeaveRequest.status == "pending", LeaveRequest.approval_chain.isnot(None))
+        .order_by(LeaveRequest.created_at.asc())
+        .all()
+    )
+    team = team_scope(db, current_user)
+    mine = []
+    for leave in pending:
+        if team is not None and leave.employee_id not in team["employee_ids"]:
+            continue
+        chain = _chain(leave)
+        if acting_index(db, chain, leave.approval_step, current_user.id)[0] is not None:
+            leave._can_act = True
+            mine.append(leave)
+        else:
+            away = skipped_for(db, chain, leave.approval_step, current_user.id)
+            if away:
+                leave._can_act = False
+                leave._away = away
+                mine.append(leave)
+    return [_serialize(leave) for leave in mine]
+
+
 @router.get("/list")
 def list_leave_requests(
     status: str | None = None,
@@ -220,25 +306,54 @@ def list_leave_requests(
     return [_serialize(leave) for leave in leaves]
 
 
+def _reviewer_step(db: Session, leave: LeaveRequest, current_user: User):
+    """(acting chain step or None, skipped approvers). A head whose turn it
+    is acts on their step; otherwise the HR / admin side (Leave module)
+    can approve or reject at any point, as before."""
+    chain = _chain(leave)
+    acting, skipped = (
+        acting_index(db, chain, leave.approval_step, current_user.id) if chain else (None, [])
+    )
+    if acting is None:
+        if not _has_leave_module(db, current_user):
+            raise HTTPException(
+                status_code=403, detail="You can't review this leave request."
+            )
+        _ensure_can_review(leave, current_user)
+    return chain, acting, skipped
+
+
 @router.post("/{leave_id}/approve")
 def approve_leave_request(
     leave_id: int,
     payload: LeaveReviewAction,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role_or_module(roles=["admin", "superadmin"], module_key="hris.leave")),
+    current_user: User = Depends(get_current_user),
 ):
     leave = db.query(LeaveRequest).filter(LeaveRequest.id == leave_id).first()
 
     if not leave:
         raise HTTPException(status_code=404, detail="Leave request not found.")
 
-    _ensure_can_review(leave, current_user)
-
     if leave.status != "pending":
         raise HTTPException(
             status_code=400,
             detail="Only pending leave requests can be approved.",
         )
+
+    chain, acting, skipped = _reviewer_step(db, leave, current_user)
+    leave.approval_log = log_skipped(db, leave.approval_log, chain, skipped)
+    leave.approval_log = append_log(leave.approval_log, current_user, "approved", payload.remarks)
+
+    # Org chart chain: pass it to the next head up; the last one (or the
+    # HR / admin side) gives the final approval.
+    if chain and acting is not None and acting < len(chain) - 1:
+        leave.approval_step = acting + 1
+        db.commit()
+        db.refresh(leave)
+        return _serialize(leave)
+    if chain and acting is not None:
+        leave.approval_step = acting
 
     leave.status = "approved"
     leave.review_remarks = payload.remarks
@@ -258,20 +373,22 @@ def reject_leave_request(
     leave_id: int,
     payload: LeaveReviewAction,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role_or_module(roles=["admin", "superadmin"], module_key="hris.leave")),
+    current_user: User = Depends(get_current_user),
 ):
     leave = db.query(LeaveRequest).filter(LeaveRequest.id == leave_id).first()
 
     if not leave:
         raise HTTPException(status_code=404, detail="Leave request not found.")
 
-    _ensure_can_review(leave, current_user)
-
     if leave.status != "pending":
         raise HTTPException(
             status_code=400,
             detail="Only pending leave requests can be rejected.",
         )
+
+    chain, acting, skipped = _reviewer_step(db, leave, current_user)
+    leave.approval_log = log_skipped(db, leave.approval_log, chain, skipped)
+    leave.approval_log = append_log(leave.approval_log, current_user, "rejected", payload.remarks)
 
     leave.status = "rejected"
     leave.review_remarks = payload.remarks

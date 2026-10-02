@@ -45,6 +45,8 @@ MODULE_GROUPS = {
         # trip_management.trip_dashboard). Distinct from the always-
         # visible top-level "Dashboard" nav group (Overview/home page).
         "trip_dashboard",
+        # Monthly Coca-Cola delivery report (app/api/admin/delivery_summary.py).
+        "delivery_summary",
         "trips",
         "office_trip_review",
         # Renamed from "trip_bypass" -- this is dispatch (assigning a
