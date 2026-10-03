@@ -5,7 +5,6 @@ from app.core.database import get_db
 from app.core.dependencies import get_current_user, require_superadmin
 from app.models.user import User
 from app.models.employees import Employee
-from app.models.department_head import DepartmentHead
 from app.models.mobile_page_access import MobilePageAccess
 from app.schemas.mobile_page_access import MobilePageAccessSet
 
@@ -49,12 +48,12 @@ ALL_PAGE_KEYS = set(MOBILE_PAGES.keys())
 
 
 def is_department_head(user_id: int, db: Session) -> bool:
-    return (
-        db.query(DepartmentHead)
-        .filter(DepartmentHead.head_user_id == user_id)
-        .first()
-        is not None
-    )
+    """Approves overtime on the Org Chart (a head whose unit ticks
+    Overtime) -- shows the mobile OT Approvals page."""
+    from app.services.approval_chain import my_approver_kinds
+
+    user = db.query(User).filter(User.id == user_id).first()
+    return bool(user and my_approver_kinds(db, user)["overtime"])
 
 
 @router.get("/pages")

@@ -13,7 +13,6 @@ from app.core.dependencies import (
 )
 from app.models.user import User
 from app.models.employees import Employee
-from app.models.cash_advance_head import CashAdvanceHead
 from app.utils.user_display import display_name
 from app.services.approval_chain import (
     acting_index,
@@ -134,21 +133,7 @@ def _can_review(req: CashAdvanceRequest, current_user: User, db: Session) -> boo
         # up the chain while that approver is absent / on leave today.
         chain = [int(i) for i in load_json_list(req.approval_chain)]
         return acting_index(db, chain, req.approval_step, current_user.id)[0] is not None
-    employee = req.employee
-    if not employee or not employee.department:
-        return False
-    # Live check against the CURRENT cash-advance head, not just whoever
-    # was recorded as requested_by_user_id at filing time -- so if the
-    # assignment changes after a request is already pending, the new
-    # head can still review it (matches the equivalent DepartmentHead
-    # fallback this used to do, just pointed at the cash-advance-specific
-    # hierarchy now).
-    head_entry = (
-        db.query(CashAdvanceHead)
-        .filter(CashAdvanceHead.department == employee.department)
-        .first()
-    )
-    return bool(head_entry and head_entry.head_user_id == current_user.id)
+    return False
 
 
 @router.post("/")
@@ -254,8 +239,8 @@ def file_cash_advance_request(
             detail="Your account isn't linked to an employee.",
         )
 
-    # Org chart first: every head up the layers who approves cash
-    # advances, in order. Nobody set up there -> the old routing below.
+    # Org Chart: every head up the layers who approves cash advances, in
+    # order. Nobody set up there -> a superadmin reviews it.
     chain = resolve_chain(db, employee, current_user, "cash_advance")
     if not chain and not employee.department:
         raise HTTPException(
@@ -263,24 +248,8 @@ def file_cash_advance_request(
             detail="Your account isn't linked to an employee department.",
         )
 
-    # Cash advance requests route to the department's Cash Advance
-    # Immediate Head (a hierarchy separate from the general/overtime
-    # DepartmentHead -- see app/models/cash_advance_head.py). If the
-    # department hasn't had one configured yet, fall back to a
-    # superadmin rather than blocking the request outright -- an
-    # unconfigured hierarchy shouldn't stop an employee from filing.
-    head_entry = (
-        None
-        if chain
-        else db.query(CashAdvanceHead)
-        .filter(CashAdvanceHead.department == employee.department)
-        .first()
-    )
-
     if chain:
         approver_user_id = chain[0]
-    elif head_entry:
-        approver_user_id = head_entry.head_user_id
     else:
         fallback_superadmin = (
             db.query(User).filter(User.role == "superadmin").first()
@@ -289,10 +258,8 @@ def file_cash_advance_request(
             raise HTTPException(
                 status_code=400,
                 detail=(
-                    f"No cash advance head has been set for the "
-                    f"{employee.department} department yet, and no "
-                    "superadmin account exists to fall back to. Ask an "
-                    "admin to set this up in Reporting Hierarchy."
+                    "No one approves cash advances for you yet. Ask an "
+                    "admin to tick Cash Advance for your head on the Org Chart."
                 ),
             )
         approver_user_id = fallback_superadmin.id

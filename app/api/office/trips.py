@@ -5,6 +5,7 @@ from datetime import datetime
 from fastapi import APIRouter, Body, Depends, HTTPException
 from sqlalchemy.orm import Session, joinedload
 
+from app.services.payroll_lock import ensure_trip_unlocked
 from app.core.database import get_db
 from app.core.dependencies import get_current_user, require_role_or_module
 
@@ -612,6 +613,7 @@ def forward_trip_to_finance(
             status_code=404,
             detail="Trip not found.",
         )
+    ensure_trip_unlocked(db, trip, "this trip")
 
     if trip.status != TripStatus.PENDING_OFFICE_REVIEW:
         raise HTTPException(
@@ -707,6 +709,7 @@ def return_trip_to_approval(
 
     if not trip:
         raise HTTPException(status_code=404, detail="Trip not found.")
+    ensure_trip_unlocked(db, trip, "this trip")
 
     if trip.status != TripStatus.PENDING_OFFICE_REVIEW:
         raise HTTPException(
@@ -779,6 +782,7 @@ def archive_office_review_trip(
 
     if not trip:
         raise HTTPException(status_code=404, detail="Trip not found.")
+    ensure_trip_unlocked(db, trip, "this trip")
 
     if trip.is_archived:
         raise HTTPException(status_code=400, detail="Trip is already archived.")

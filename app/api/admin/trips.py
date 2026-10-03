@@ -1,5 +1,6 @@
 # app/api/admin/trips.py
 
+from app.services.payroll_lock import ensure_trip_unlocked
 from app.models.gps_log import GPSLog
 from app.models.trip_models import GPSActionType
 from app.schemas import trip
@@ -938,6 +939,7 @@ def approve_trip(
             status_code=404,
             detail="Trip not found",
         )
+    ensure_trip_unlocked(db, trip, "this trip")
 
     # =========================================================
     # 2. VERIFY TRIP IS WAITING FOR COORDINATOR
@@ -1084,6 +1086,7 @@ def reject_trip(
 
     if not trip:
         raise HTTPException(status_code=404, detail="Trip not found.")
+    ensure_trip_unlocked(db, trip, "this trip")
 
     if trip.status != TripStatus.PENDING_APPROVAL:
         raise HTTPException(status_code=400, detail="Trip not pending approval.")
@@ -1895,6 +1898,7 @@ def archive_trip(
 
     if not trip_row:
         raise HTTPException(status_code=404, detail="Trip not found.")
+    ensure_trip_unlocked(db, trip_row, "this trip")
 
     if trip_row.status not in ARCHIVABLE_STATUSES:
         raise HTTPException(

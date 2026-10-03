@@ -56,6 +56,10 @@ class Store(Base):
     # name-matching with a real, admin-editable flag on the store record.
     is_hub = Column(Boolean, default=False, nullable=False)
 
+    # The area the store is in (e.g. Consolacion, Bohol) -- a lane's
+    # destination for trip rates (app/services/trip_rates.py).
+    area = Column(String(100), nullable=True, index=True)
+
     # LEGACY: kept temporarily for safe rollout. Do not write new code
     # that depends on this column -- use trip_rate_profile_id instead.
     # Remove this column + the StoreProfile enum once trip_rate_profile_id

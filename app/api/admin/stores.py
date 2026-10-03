@@ -68,6 +68,9 @@ class StoreCreateRequest(BaseModel):
     # the "select store" dropdown) and complete_trip() (a trip can only
     # be completed near a hub).
     is_hub: bool = False
+    # Area the store is in (e.g. Consolacion, Bohol) -- a lane's
+    # destination for trip rates.
+    area: Optional[str] = None
 
 class StoreUpdateRequest(BaseModel):
     name: Optional[str] = None
@@ -80,6 +83,7 @@ class StoreUpdateRequest(BaseModel):
     trip_rate_profile_id: Optional[int] = None
     profile: Optional[str] = None
     is_hub: Optional[bool] = None
+    area: Optional[str] = None
 
     class Config:
         orm_mode = True
@@ -131,6 +135,7 @@ def build_store_response(store: Store) -> dict:
         "required_helper": store.required_helper,
         "profile": store.profile,
         "is_hub": store.is_hub,
+        "area": store.area,
     }
 
 
@@ -371,6 +376,7 @@ def create_store(
         # (and any lingering references) still work during rollout.
         profile=trip_rate_profile.code,
         is_hub=payload.is_hub,
+        area=(payload.area or "").strip() or None,
     )
 
     db.add(new_store)
@@ -649,6 +655,9 @@ def update_store(
 
     if payload.is_hub is not None:
         store.is_hub = payload.is_hub
+
+    if payload.area is not None:
+        store.area = payload.area.strip() or None
 
     db.commit()
     db.refresh(store)

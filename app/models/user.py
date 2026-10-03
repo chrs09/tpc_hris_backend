@@ -1,5 +1,5 @@
 import enum
-from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, Enum
+from sqlalchemy import Text, Column, Integer, String, Boolean, ForeignKey, Enum
 from sqlalchemy.orm import relationship
 from app.core.database import Base
 
@@ -50,6 +50,9 @@ class User(Base):
     # start with a fixed, known temporary password and are never forced to
     # change it on first login.
     must_change_password = Column(Boolean, default=False, nullable=False)
+    # Personal theme: JSON {"mode": "light|dark|system", "accent": "#rrggbb"}
+    # -- see app/api/preferences.py. NULL = the default theme.
+    theme_preference = Column(Text, nullable=True)
 
     # =============================
     # RELATIONSHIPS

@@ -55,19 +55,13 @@ def am_i_department_head(
     request's specifically-designated approver, checked separately per
     request) can review overtime. Open to any authenticated user, unlike
     the rest of this router, since it's just checking your own status."""
-    departments = [
-        h.department
-        for h in db.query(DepartmentHead)
-        .filter(DepartmentHead.head_user_id == current_user.id)
-        .all()
-    ]
-    # Org chart heads with overtime ticked review overtime too.
+    # Org Chart is the source of truth: a head whose unit ticks Overtime.
+    # (The old Reporting Hierarchy no longer counts.)
     from app.services.approval_chain import my_approver_kinds
 
-    approves_overtime = my_approver_kinds(db, current_user)["overtime"]
     return {
-        "is_department_head": bool(departments) or approves_overtime,
-        "departments": departments,
+        "is_department_head": my_approver_kinds(db, current_user)["overtime"],
+        "departments": [],
     }
 
 

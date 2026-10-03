@@ -30,13 +30,22 @@ MODULE_GROUPS = {
             # canSeeGridView on the frontend).
             "children": ["attendance_list_view", "attendance_grid_view"],
         },
-        "leave",
+        # Leave approvals come only from the Org Chart (a unit with Leave
+        # ticked) -- there's no assignable "leave" module any more.
         "employees",
         "applicants",
         "questionnaire",
         "schedule_templates",
     ],
-    "payroll": ["payroll"],
+    "payroll": [
+        {
+            "key": "payroll",
+            # Payroll steps (app/api/payroll/payroll_runs.py) -- who
+            # prepares, who approves, who locks/pays. Role never grants
+            # these; only ticking them here does (superadmin always can).
+            "children": ["payroll_prepare", "payroll_approve", "payroll_release"],
+        },
+    ],
     "trip_management": [
         # Assigned/Active trip monitoring, with each active trip's live
         # driver-triggered step (Checkout, Arrived, Unloading,

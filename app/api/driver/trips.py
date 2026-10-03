@@ -33,6 +33,7 @@ from app.models.trip_models import GPSActionType
 from app.models.app_setting import AppSetting
 from app.services.gps_service import calculate_distance_meters, find_nearest_store
 from app.services.notification_service import create_notification
+from app.services.trip_rates import load_rules, resolve_trip_rates
 from app.services.trip_payroll_service import (
     to_ph,
     now_ph,
@@ -593,6 +594,9 @@ def get_active_trip(
     # =========================
     # 5️⃣ Build Active Trip Data
     # =========================
+    active_rates = resolve_trip_rates(
+        trip, to_ph(trip.start_time or trip.created_at).date(), load_rules(db)
+    )
     active_trip_data = {
         "id": trip.id,
         "driver_id": trip.driver_id,
@@ -620,8 +624,10 @@ def get_active_trip(
                 "id": trip.trip_rate_profile.id,
                 "profile_name": trip.trip_rate_profile.profile_name,
                 "helper_count": trip.trip_rate_profile.helper_count,
-                "driver_first_trip_rate": trip.trip_rate_profile.driver_first_trip_rate,
-                "driver_next_trip_rate": trip.trip_rate_profile.driver_next_trip_rate,
+                # This trip's own rate (truck type / lane / effective date
+                # rules applied) -- app/services/trip_rates.py.
+                "driver_first_trip_rate": active_rates["driver_first_trip_rate"],
+                "driver_next_trip_rate": active_rates["driver_next_trip_rate"],
             }
             if trip.trip_rate_profile
             else None
@@ -2084,6 +2090,19 @@ def _wallet_settlement_column(source: str):
     return getattr(TripFinanceReview, WALLET_SETTLEMENT_ATTR[source])
 
 
+def _driver_trip_rate(trip, idx: int, rules) -> float | None:
+    """Driver pay for one trip: first or next trip of the day, with the
+    truck type / lane / effective date rules applied. None when the trip
+    has no category and no rule pays it."""
+    rates = resolve_trip_rates(
+        trip, to_ph(trip.start_time or trip.created_at).date(), rules
+    )
+    rate = rates["driver_first_trip_rate" if idx == 0 else "driver_next_trip_rate"]
+    if not trip.trip_rate_profile and not rate:
+        return None
+    return rate
+
+
 def _wallet_settlement_value(review: TripFinanceReview, source: str):
     """Actual datetime value on a loaded review, for the given settlement source."""
     return getattr(review, WALLET_SETTLEMENT_ATTR[source])
@@ -2236,18 +2255,13 @@ def get_wallet(
 
     total_earnings = 0.0
     raw_transactions = []
+    rate_rules = load_rules(db)
 
     for day_key, day_items in trips_by_day.items():
         for idx, (trip, review) in enumerate(day_items):
-            profile = trip.trip_rate_profile
-            if not profile:
+            rate = _driver_trip_rate(trip, idx, rate_rules)
+            if rate is None:
                 continue
-
-            rate = float(
-                profile.driver_first_trip_rate
-                if idx == 0
-                else profile.driver_next_trip_rate
-            )
             total_earnings += rate
 
             raw_transactions.append({
@@ -2307,15 +2321,9 @@ def get_wallet(
     expected_earnings = 0.0
     for day_items in expected_by_day.values():
         for idx, trip in enumerate(day_items):
-            profile = trip.trip_rate_profile
-            if not profile:
+            rate = _driver_trip_rate(trip, idx, rate_rules)
+            if rate is None:
                 continue
-
-            rate = float(
-                profile.driver_first_trip_rate
-                if idx == 0
-                else profile.driver_next_trip_rate
-            )
             expected_earnings += rate
 
     log_wallet_event(

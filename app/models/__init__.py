@@ -89,3 +89,5 @@ from .ticket import Ticket as Ticket
 from .fuel_request import FuelRequest as FuelRequest
 from .ticket_comment import TicketComment as TicketComment
 from .org_unit import OrgUnit as OrgUnit
+from .trip_rate_rule import TripRateRule as TripRateRule
+from .payroll_run import PayrollRun as PayrollRun

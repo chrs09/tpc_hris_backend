@@ -3,12 +3,12 @@ from datetime import datetime, date, time as time_cls, timedelta
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy.orm import Session, joinedload, object_session
 
+from app.services.payroll_lock import ensure_unlocked
 from app.core.database import get_db
 from app.core.dependencies import get_current_user
 from app.models.user import User
 from app.models.employees import Employee
 from app.models.overtime_request import OvertimeRequest
-from app.models.department_head import DepartmentHead
 from app.models.attendance import AttendanceRecord
 from app.models.overtime_approvals import OvertimeApproval
 from app.utils.user_display import display_name
@@ -44,17 +44,6 @@ def _compute_hours(ot_date: date, time_in: time_cls, time_out: time_cls) -> floa
     if end <= start:
         end += timedelta(days=1)
     return round((end - start).total_seconds() / 3600, 2)
-
-
-def _get_department_head(employee: Employee | None, db: Session) -> int | None:
-    if not employee or not employee.department:
-        return None
-    head_entry = (
-        db.query(DepartmentHead)
-        .filter(DepartmentHead.department == employee.department)
-        .first()
-    )
-    return head_entry.head_user_id if head_entry else None
 
 
 # =========================================================
@@ -132,6 +121,7 @@ def _span(ot_date: date, time_in: time_cls, time_out: time_cls) -> tuple[datetim
 
 
 def _check_late_window(db: Session, employee_id: int | None, ot_date: date):
+    ensure_unlocked(db, employee_id, ot_date, "overtime")
     today = now_ph().date()
     start, end = _current_cutoff(today)
     if not (start <= ot_date <= today):
@@ -172,18 +162,21 @@ def _after_attendance(req: OvertimeRequest, attendance) -> bool:
 
 
 def _approver_for(db: Session, employee: Employee, user: User):
+    # Org Chart is the only source of approvers. Nobody above them ticks
+    # Overtime -> a superadmin reviews it (same as cash advance).
     chain = resolve_chain(db, employee, user, "overtime")
-    requested_by = chain[0] if chain else _get_department_head(employee, db)
-    if not requested_by:
+    if chain:
+        return chain, chain[0]
+    superadmin = db.query(User).filter(User.role == "superadmin").first()
+    if not superadmin:
         raise HTTPException(
             status_code=400,
             detail=(
                 "No one has been set to approve your overtime yet. Ask an "
-                "admin to tick Overtime for your head on the Org Chart (or "
-                "set your department's immediate head in Reporting Hierarchy)."
+                "admin to tick Overtime for your head on the Org Chart."
             ),
         )
-    return chain, requested_by
+    return chain, superadmin.id
 
 
 def _get_scheduled_time_out(employee: Employee | None, on_date: date) -> time_cls | None:
@@ -284,11 +277,12 @@ def _serialize(req: OvertimeRequest) -> dict:
 
 
 def _can_review(request: OvertimeRequest, current_user: User, db: Session) -> bool:
-    """A request can be reviewed by whoever was picked as "requested by"
-    when it was filed, OR by the requester's department's immediate head
-    (see the Reporting Hierarchy / DepartmentHead page) -- whichever
-    applies, since either one may be the actual person who called the
-    employee in for overtime."""
+    """Org Chart chain: the approver whose turn it is. Requests filed
+    without a chain: whoever was set as approver when filed. A superadmin
+    can always review (as with every other approval type)."""
+    role = current_user.role.value if hasattr(current_user.role, "value") else current_user.role
+    if role == "superadmin":
+        return True
     if not request.approval_chain and request.requested_by_user_id == current_user.id:
         return True
 
@@ -298,16 +292,7 @@ def _can_review(request: OvertimeRequest, current_user: User, db: Session) -> bo
         chain = [int(i) for i in load_json_list(request.approval_chain)]
         return acting_index(db, chain, request.approval_step, current_user.id)[0] is not None
 
-    employee = request.employee
-    if not employee or not employee.department:
-        return False
-
-    head_entry = (
-        db.query(DepartmentHead)
-        .filter(DepartmentHead.department == employee.department)
-        .first()
-    )
-    return bool(head_entry and head_entry.head_user_id == current_user.id)
+    return False
 
 
 @router.get("/eligibility")
@@ -729,6 +714,7 @@ def approve_overtime_request(
         raise HTTPException(status_code=404, detail="Overtime request not found")
     if request.status != "pending":
         raise HTTPException(status_code=400, detail="Only pending requests can be approved")
+    ensure_unlocked(db, request.employee_id, request.ot_date, "overtime")
     if request.time_out is None:
         raise HTTPException(
             status_code=400,
@@ -800,6 +786,7 @@ def reject_overtime_request(
         raise HTTPException(status_code=404, detail="Overtime request not found")
     if request.status != "pending":
         raise HTTPException(status_code=400, detail="Only pending requests can be reviewed")
+    ensure_unlocked(db, request.employee_id, request.ot_date, "overtime")
     if not _can_review(request, current_user, db):
         raise HTTPException(
             status_code=403, detail="You are not authorized to reject this request."

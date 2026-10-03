@@ -3,12 +3,12 @@ from datetime import datetime, timedelta
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session, joinedload, object_session
 
+from app.services.payroll_lock import ensure_unlocked
 from app.core.database import get_db
 from app.core.dependencies import (
     get_current_admin,
     get_current_user,
-    has_editable_grant,
-    require_role_or_module,
+    require_superadmin,
 )
 from app.models.user import User
 from app.models.leave_request import LeaveRequest
@@ -94,10 +94,12 @@ def _ensure_can_review(leave: LeaveRequest, current_user: User):
 
 
 def _has_leave_module(db: Session, user: User) -> bool:
-    """HR / admin side (the Leave module): admin, superadmin, or the
-    hris.leave grant with "Can edit: Yes"."""
+    """Who may see and act on every leave request, outside the Org Chart
+    chain: superadmin only. Everyone else approves leave only as a head on
+    the requester's chain (Org Chart unit with Leave ticked) -- role and
+    module grants no longer count."""
     role = user.role.value if hasattr(user.role, "value") else user.role
-    return role in ("admin", "superadmin") or has_editable_grant(db, user, ["hris.leave"])
+    return role == "superadmin"
 
 
 def _chain(leave: LeaveRequest) -> list[int]:
@@ -163,6 +165,9 @@ def file_leave_request(
             status_code=400,
             detail="End date cannot be before the start date.",
         )
+    ensure_unlocked(
+        db, current_user.employee_id, payload.start_date, "leave", payload.end_date
+    )
 
     overlapping = (
         db.query(LeaveRequest)
@@ -235,6 +240,7 @@ def cancel_leave_request(
 
     if not leave:
         raise HTTPException(status_code=404, detail="Leave request not found.")
+    ensure_unlocked(db, leave.employee_id, leave.start_date, "this leave", leave.end_date)
 
     if leave.user_id != current_user.id:
         raise HTTPException(
@@ -291,7 +297,7 @@ def list_leave_for_my_approval(
 def list_leave_requests(
     status: str | None = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role_or_module(roles=["admin", "superadmin"], module_key="hris.leave")),
+    current_user: User = Depends(require_superadmin),
 ):
     query = db.query(LeaveRequest).options(
         joinedload(LeaveRequest.employee),
@@ -308,8 +314,8 @@ def list_leave_requests(
 
 def _reviewer_step(db: Session, leave: LeaveRequest, current_user: User):
     """(acting chain step or None, skipped approvers). A head whose turn it
-    is acts on their step; otherwise the HR / admin side (Leave module)
-    can approve or reject at any point, as before."""
+    is acts on their step; otherwise only a superadmin can approve or
+    reject (at any point)."""
     chain = _chain(leave)
     acting, skipped = (
         acting_index(db, chain, leave.approval_step, current_user.id) if chain else (None, [])
@@ -334,6 +340,7 @@ def approve_leave_request(
 
     if not leave:
         raise HTTPException(status_code=404, detail="Leave request not found.")
+    ensure_unlocked(db, leave.employee_id, leave.start_date, "this leave", leave.end_date)
 
     if leave.status != "pending":
         raise HTTPException(
@@ -379,6 +386,7 @@ def reject_leave_request(
 
     if not leave:
         raise HTTPException(status_code=404, detail="Leave request not found.")
+    ensure_unlocked(db, leave.employee_id, leave.start_date, "this leave", leave.end_date)
 
     if leave.status != "pending":
         raise HTTPException(

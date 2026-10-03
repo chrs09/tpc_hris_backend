@@ -1,4 +1,9 @@
 from datetime import date, datetime
+from app.services.payroll_lock import (
+    PAYROLL_PREPARE,
+    ensure_can_payroll,
+    ensure_payroll_editable,
+)
 from app.models.attendance import AttendanceRecord
 from app.models.overtime_approval_details import OvertimeApprovalDetail
 from fastapi import (
@@ -90,6 +95,10 @@ def approve_overtime(
             status_code=404,
             detail="Employee not found.",
         )
+    ensure_can_payroll(db, current_user, PAYROLL_PREPARE)
+    ensure_payroll_editable(
+        db, employee.department, f"{payload['cutoff_start']}_{payload['cutoff_end']}"
+    )
 
     existing = (
         db.query(OvertimeApproval)
@@ -183,6 +192,13 @@ def reverse_overtime(
     db: Session = Depends(get_db),
     current_user: User = Depends(_require_payroll),
 ):
+    employee = db.query(Employee).filter(Employee.id == payload["employee_id"]).first()
+    ensure_can_payroll(db, current_user, PAYROLL_PREPARE)
+    ensure_payroll_editable(
+        db,
+        employee.department if employee else None,
+        f"{payload['cutoff_start']}_{payload['cutoff_end']}",
+    )
 
     overtime = (
         db.query(OvertimeApproval)

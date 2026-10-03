@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session, joinedload
 from app.core.database import get_db
 from app.core.dependencies import require_role_or_module
 from app.models.attendance import AttendanceRecord
+from app.models.employees import Employee
 from app.models.stores import Store
 from app.models.truck_type import TruckType
 from app.models.trip_helper import TripHelper
@@ -80,7 +81,19 @@ def get_delivery_summary(
         .all()
     )
 
-    # ---- one record per driver per day (grouped by the day's first truck)
+    # Only active employees -- an inactive employee (or disabled account)
+    # is left out of every list and total.
+    def _active(user) -> bool:
+        return bool(
+            user
+            and user.is_active
+            and (user.employee is None or user.employee.is_active == 1)
+        )
+
+    trips = [trip for trip in trips if _active(trip.driver)]
+
+    # ---- one record per driver, per day, per truck actually used (a
+    # driver who switched trucks that day has a row on each truck's tab)
     days: dict[tuple, dict] = {}
     driver_trucks: dict[int, Counter] = defaultdict(Counter)
     for trip in trips:
@@ -93,7 +106,7 @@ def get_delivery_summary(
         )
         driver_trucks[trip.driver_id][truck] += 1
         row = days.setdefault(
-            (day, trip.driver_id),
+            (day, trip.driver_id, truck),
             {
                 "date": str(day),
                 "driver_id": trip.driver_id,
@@ -138,17 +151,17 @@ def get_delivery_summary(
             AttendanceRecord.status.in_(["Absent", "On Leave"]),
         ):
             user = by_employee[rec.employee_id]
-            key = (rec.attendance_date, user.id)
-            if key in days:
+            if any(k[0] == rec.attendance_date and k[1] == user.id for k in days):
                 continue
-            days[key] = {
+            usual_truck = driver_trucks[user.id].most_common(1)[0][0]
+            days[(rec.attendance_date, user.id, usual_truck)] = {
                 "date": str(rec.attendance_date),
                 "driver_id": user.id,
                 "driver": display_name(user),
                 "origin": None,
                 "plate": None,
                 # Their usual truck this month, so they land on its tab.
-                "truck_type": driver_trucks[user.id].most_common(1)[0][0],
+                "truck_type": usual_truck,
                 "categories": [],
                 "helpers": [],
                 "status": "LEAVE" if rec.status == "On Leave" else "Absent",
@@ -157,6 +170,17 @@ def get_delivery_summary(
                 "trips": 0,
                 "_last_end": None,
             }
+
+    per_driver_day: dict[tuple, list] = defaultdict(list)
+    for (day, driver_id, truck), row in days.items():
+        if row["trips"]:
+            per_driver_day[(day, driver_id)].append((truck, row["trips"]))
+    for (day, driver_id, truck), row in days.items():
+        row["other_trucks"] = [
+            {"truck_type": t, "trips": n}
+            for t, n in per_driver_day[(day, driver_id)]
+            if t != truck
+        ]
 
     records: dict[str, list] = defaultdict(list)
     for row in sorted(days.values(), key=lambda r: (r["date"], r["first_time"] or "~", r["driver"] or "")):
@@ -190,12 +214,14 @@ def get_delivery_summary(
 
     # Every active driver: under this month's truck(s), else the truck of
     # their latest trip, else "No truck type".
-    all_drivers = (
-        db.query(User)
+    all_drivers = [
+        user
+        for user in db.query(User)
         .options(joinedload(User.employee))
         .filter(User.role == UserRole.DRIVER, User.is_active.is_(True))
         .all()
-    )
+        if _active(user)
+    ]
     latest_truck = {}
     for driver_id, truck_name in (
         db.query(Trip.driver_id, TruckType.name)
@@ -211,12 +237,18 @@ def get_delivery_summary(
         seen.add(driver_id)
         user = drivers.get(driver_id) or db.get(User, driver_id)
         driver_rows.append(
-            {"driver": display_name(user) if user else "Unknown", "truck_type": truck, "trips": n}
+            {
+                "driver_id": driver_id,
+                "driver": display_name(user) if user else "Unknown",
+                "truck_type": truck,
+                "trips": n,
+            }
         )
     for user in all_drivers:
         if user.id not in seen:
             driver_rows.append(
                 {
+                    "driver_id": user.id,
                     "driver": display_name(user),
                     "truck_type": latest_truck.get(user.id, NO_TRUCK_TYPE),
                     "trips": 0,
@@ -237,6 +269,13 @@ def get_delivery_summary(
         if per_location.get((loc, t), 0) or t != NO_TRUCK_TYPE
     ]
 
+    untyped = Counter()
+    for trip in trips:
+        vehicle = trip.vehicle_unit
+        if not (vehicle and vehicle.truck_type):
+            label = (vehicle.unit_code or vehicle.plate_number) if vehicle else "No vehicle"
+            untyped[(vehicle.id if vehicle else None, label)] += 1
+
     all_days = [str(first + timedelta(days=i)) for i in range((last - first).days + 1)]
     hub_label = " + ".join(hubs) if hubs else ""
 
@@ -255,4 +294,9 @@ def get_delivery_summary(
             for d in all_days
         ],
         "records": {t: records.get(t, []) for t in truck_types},
+        # Trips on vehicles without a truck type (set it in Fleet).
+        "no_truck_type": [
+            {"vehicle_id": vid, "vehicle": label, "trips": n}
+            for (vid, label), n in sorted(untyped.items(), key=lambda x: -x[1])
+        ],
     }

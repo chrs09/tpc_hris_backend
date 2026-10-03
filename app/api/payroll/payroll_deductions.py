@@ -14,6 +14,11 @@ from app.core.dependencies import get_current_user, require_role_or_module
 from app.models.user import User
 from app.models.employees import Employee
 from app.models.payroll_deductions import PayrollDeduction
+from app.services.payroll_lock import (
+    PAYROLL_PREPARE,
+    ensure_can_payroll,
+    ensure_payroll_editable,
+)
 from app.services.cash_advance_payroll import (
     apply_payroll_deduction,
     payroll_suggestions,
@@ -31,9 +36,8 @@ _require_payroll = require_role_or_module(
 )
 
 
-def _save_deduction(
-    db: Session, payload: dict, user_id: int | None = None
-) -> PayrollDeduction:
+def _save_deduction(db: Session, payload: dict, user: User) -> PayrollDeduction:
+    user_id = user.id
     employee = (
         db.query(Employee).filter(Employee.id == payload["employee_id"]).first()
     )
@@ -43,6 +47,8 @@ def _save_deduction(
             status_code=404,
             detail="Employee not found.",
         )
+    ensure_payroll_editable(db, payload.get("department"), payload.get("cutoff_period"))
+    ensure_can_payroll(db, user, PAYROLL_PREPARE)
 
     existing = (
         db.query(PayrollDeduction)
@@ -126,7 +132,7 @@ def save_payroll_deduction(
     current_user: User = Depends(_require_payroll),
 ):
 
-    deduction = _save_deduction(db, payload, current_user.id)
+    deduction = _save_deduction(db, payload, current_user)
 
     return {
         "message": "Deduction saved.",
@@ -141,7 +147,7 @@ def save_payroll_deductions_bulk(
     current_user: User = Depends(_require_payroll),
 ):
 
-    ids = [_save_deduction(db, item, current_user.id).id for item in payload]
+    ids = [_save_deduction(db, item, current_user).id for item in payload]
 
     return {
         "message": f"{len(ids)} deduction(s) saved.",

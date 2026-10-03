@@ -18,6 +18,7 @@ from datetime import datetime, timedelta
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
 from sqlalchemy.orm import Session, joinedload
 
+from app.services.payroll_lock import ensure_trip_unlocked, ensure_unlocked
 from app.core.database import get_db
 from app.core.dependencies import require_role_or_module, require_superadmin
 from app.models.employees import Employee
@@ -452,6 +453,12 @@ async def create_manual_entry(
         if not helper or (helper.position or "").upper() != "HELPER":
             raise HTTPException(status_code=400, detail=f"Helper {hid} not found.")
 
+    # ---- payroll lock: no new trips in a locked cutoff
+    trip_day = (start_time + timedelta(hours=8)).date()
+    ensure_unlocked(db, driver.employee_id, trip_day, "trips on this date")
+    for hid in helper_ids:
+        ensure_unlocked(db, hid, trip_day, "trips on this date")
+
     try:
         odometer = int(form.get("odometer_reading") or 0)
     except ValueError:
@@ -575,6 +582,7 @@ def approve_manual_entry(
     """Superadmin accepts a coordinator_admin's entry -- it moves on to
     Trip Approvals like any finished trip."""
     trip = _get_waiting_entry(db, trip_id)
+    ensure_trip_unlocked(db, trip, "this trip")
     trip.status = TripStatus.PENDING_APPROVAL
     db.add(
         TripBypassLog(
@@ -601,6 +609,7 @@ def reject_manual_entry(
     if not reason:
         raise HTTPException(status_code=400, detail="A reason is required.")
     trip = _get_waiting_entry(db, trip_id)
+    ensure_trip_unlocked(db, trip, "this trip")
     trip.status = TripStatus.CANCELLED
     trip.current_step = "CANCELLED"
     if trip.ticket_no:

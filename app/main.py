@@ -33,8 +33,9 @@ from app.api import (
     fuel_requests,
     org_chart,
     banks,
+    preferences,
 )
-from app.api.payroll import overtime_approval, payroll_cutoffs, payroll_deductions
+from app.api.payroll import overtime_approval, payroll_cutoffs, payroll_deductions, payroll_runs
 from app.api import schedule_template as schedule_template_router
 from app.api.driver import trips
 from app.api.admin import trips as admin_trips
@@ -52,6 +53,7 @@ from app.api.public.applicant_onboarding import router as applicant_onboarding_r
 from app.api.public.applicant_questions import router as applicant_questions_router
 from app.api.admin.applicant_questions import router as admin_applicant_questions_router
 from app.api.tripProfile import trip_maintenance as trip_maintenance_router
+from app.api.tripProfile import trip_rate_rules
 from app.api.office import trips as office_trip_review_router
 from app.api import holidays as holiday_router
 from app.api.finance import trips as finance_trips_router
@@ -255,14 +257,17 @@ app.include_router(cash_advance_request.router, prefix="/api")
 app.include_router(fuel_requests.router, prefix="/api")
 app.include_router(org_chart.router, prefix="/api")
 app.include_router(banks.router, prefix="/api")
+app.include_router(preferences.router, prefix="/api")
 app.include_router(cash_advance_settings.router, prefix="/api")
 app.include_router(mobile_app_version.router, prefix="/api")
 app.include_router(overtime_approval.router, prefix="/api")
 app.include_router(payroll_deductions.router, prefix="/api")
 app.include_router(payroll_cutoffs.router, prefix="/api")
+app.include_router(payroll_runs.router, prefix="/api")
 app.include_router(schedule_template_router.router, prefix="/api")
 app.include_router(trips.router, prefix="/api")
 app.include_router(trip_maintenance_router.router, prefix="/api")
+app.include_router(trip_rate_rules.router, prefix="/api")
 
 app.include_router(admin_trips.router, prefix="/api")
 app.include_router(admin_trip_bypass.router, prefix="/api")

@@ -35,6 +35,8 @@ from app.models.user import User
 from app.models.trips import Trip
 from app.models.trip_helper import TripHelper
 from app.models.files import File as FileModel
+from app.services.trip_rates import load_rules, resolve_trip_rates
+from app.services.payroll_lock import ensure_unlocked
 from app.services.file_service import FileService, _watermark_timestamp
 from app.services.face_recognition_service import FaceRecognitionService
 from app.services.approval_chain import (
@@ -678,6 +680,7 @@ def mark_attendance(
     if not employee:
         raise HTTPException(status_code=404, detail="Employee not found")
     ensure_in_team(db, current_user, employee.id)
+    ensure_unlocked(db, employee.id, attendance_in.attendance_date, "attendance")
 
     today = datetime.now(ZoneInfo("Asia/Manila")).date()
 
@@ -967,6 +970,7 @@ def get_attendance_records(
     #     the trips table again. ---
     trips_by_employee_date = defaultdict(list)
     seen_trip_ids_by_key = defaultdict(set)
+    rate_rules = load_rules(db)
 
     if employee_ids:
         driver_trips = (
@@ -975,6 +979,7 @@ def get_attendance_records(
             .options(
                 joinedload(Trip.vehicle_unit),
                 joinedload(Trip.trip_rate_profile),
+                joinedload(Trip.destination_store),
             )
             .filter(
                 User.employee_id.in_(employee_ids),
@@ -989,6 +994,7 @@ def get_attendance_records(
             .options(
                 joinedload(Trip.vehicle_unit),
                 joinedload(Trip.trip_rate_profile),
+                joinedload(Trip.destination_store),
             )
             .filter(
                 TripHelper.helper_id.in_(employee_ids),
@@ -1073,48 +1079,10 @@ def get_attendance_records(
                         else None
                     ),
 
-                    "driver_first_trip_rate": (
-                        float(
-                            trip.trip_rate_profile.driver_first_trip_rate
-                        )
-                        if (
-                            trip.trip_rate_profile
-                            and trip.trip_rate_profile.driver_first_trip_rate
-                        )
-                        else 0
-                    ),
-
-                    "driver_next_trip_rate": (
-                        float(
-                            trip.trip_rate_profile.driver_next_trip_rate
-                        )
-                        if (
-                            trip.trip_rate_profile
-                            and trip.trip_rate_profile.driver_next_trip_rate
-                        )
-                        else 0
-                    ),
-
-                    "helper_first_trip_rate": (
-                        float(
-                            trip.trip_rate_profile.helper_first_trip_rate
-                        )
-                        if (
-                            trip.trip_rate_profile
-                            and trip.trip_rate_profile.helper_first_trip_rate
-                        )
-                        else 0
-                    ),
-
-                    "helper_next_trip_rate": (
-                        float(
-                            trip.trip_rate_profile.helper_next_trip_rate
-                        )
-                        if (
-                            trip.trip_rate_profile
-                            and trip.trip_rate_profile.helper_next_trip_rate
-                        )
-                        else 0
+                    # Rates with truck type / lane / effective date rules
+                    # applied (app/services/trip_rates.py).
+                    **resolve_trip_rates(
+                        trip, record.attendance_date, rate_rules
                     ),
 
                     "helper_count": (
@@ -1311,6 +1279,7 @@ def update_attendance(
     if not record:
         raise HTTPException(status_code=404, detail="Attendance record not found")
     ensure_in_team(db, current_user, record.employee_id)
+    ensure_unlocked(db, record.employee_id, record.attendance_date, "attendance")
 
     if (
         record.status == attendance_in.status
@@ -1751,6 +1720,7 @@ def approve_attendance(
     current_user: User = Depends(get_current_user),
 ):
     attendance, is_turn = _get_review_record(db, attendance_id, side, current_user)
+    ensure_unlocked(db, attendance.employee_id, attendance.attendance_date, "attendance")
 
     if getattr(attendance, f"{side}_face_review_status") not in REVIEW_PENDING_STATUSES:
         raise HTTPException(status_code=400, detail="This attendance isn't waiting for review.")
@@ -1838,6 +1808,7 @@ def reject_attendance(
     current_user: User = Depends(get_current_user),
 ):
     attendance, _ = _get_review_record(db, attendance_id, side, current_user)
+    ensure_unlocked(db, attendance.employee_id, attendance.attendance_date, "attendance")
 
     setattr(
         attendance,
@@ -1978,6 +1949,7 @@ def adjust_attendance_time(
             detail="Attendance record not found.",
         )
     ensure_in_team(db, current_user, attendance.employee_id)
+    ensure_unlocked(db, attendance.employee_id, attendance.attendance_date, "attendance")
 
     try:
         new_times = {
