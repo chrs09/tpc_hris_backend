@@ -224,6 +224,87 @@ def start_attendance_review(db: Session, record, side: str):
     setattr(record, f"{side}_review_step", 0)
 
 
+WORK_PROOF_MAX_BYTES = 50 * 1024 * 1024
+NO_PROOF_NOTE = "No work photo/video uploaded."
+
+
+def work_report_head(db: Session, employee_id: int | None, user: User | None) -> int | None:
+    """The immediate head who checks this person's work accomplished --
+    the first head above them whose Org Chart unit ticks "Work
+    accomplished". None = they don't need to report it."""
+    if not employee_id:
+        return None
+    employee = db.query(Employee).filter(Employee.id == employee_id).first()
+    chain = resolve_chain(db, employee, user, "work_report")
+    return chain[0] if chain else None
+
+
+def check_work_report(db: Session, record, employee_id: int, user, work_accomplished, proof):
+    """Validates and saves the work accomplished typed at time out.
+    Returns (head_id, proof or None, missing_proof). Text is required
+    when their head checks work; the photo/video proof is optional."""
+    head_id = work_report_head(db, employee_id, user)
+    text = (work_accomplished or "").strip()
+    if head_id and not text:
+        raise HTTPException(
+            status_code=400, detail="Please write what you worked on today."
+        )
+    record.work_accomplished = text[:2000] or None
+    if proof is not None and not (proof.filename or "").strip():
+        proof = None
+    if proof is not None:
+        kind = (proof.content_type or "").split("/")[0]
+        if kind not in ("image", "video"):
+            raise HTTPException(
+                status_code=400, detail="Work proof must be a photo or a video."
+            )
+        proof.file.seek(0, 2)
+        size = proof.file.tell()
+        proof.file.seek(0)
+        if size > WORK_PROOF_MAX_BYTES:
+            raise HTTPException(
+                status_code=400,
+                detail="The video is too large (50 MB max). Record a shorter one.",
+            )
+    missing = bool(head_id) and proof is None
+    record.work_proof_missing = missing if head_id else None
+    return head_id, proof, missing
+
+
+def review_time_out(db: Session, record, head_id, missing_proof: bool):
+    """Starts the time-out review. A missing work proof sends it to the
+    immediate head who checks work -- unless something else (outside
+    the work area, face check) already needs the attendance approvers."""
+    already_flagged = record.time_out_face_review_status in REVIEW_PENDING_STATUSES
+    if missing_proof:
+        reason = record.time_out_face_review_reason
+        record.time_out_face_review_status = "NEEDS_REVIEW"
+        record.time_out_face_review_reason = (
+            f"{reason} {NO_PROOF_NOTE}".strip() if reason else NO_PROOF_NOTE
+        )
+    start_attendance_review(db, record, "time_out")
+    if missing_proof and (not already_flagged or not record.time_out_review_chain):
+        record.time_out_review_chain = dump_chain([head_id])
+        record.time_out_review_step = 0
+
+
+def save_work_proof(db: Session, file_service, record, proof, label, lat, lng, uploader_id):
+    if proof is None:
+        return
+    db.add(
+        FileModel(
+            entity_type="attendance",
+            entity_id=record.id,
+            document_type="WORK_PROOF",
+            file_url=file_service.upload(
+                _watermark_timestamp(proof, label, lat, lng),
+                f"attendance/{record.id}/work-proof",
+            ),
+            uploaded_by=uploader_id,
+        )
+    )
+
+
 def _ph_stamp(value) -> str | None:
     """A stored (UTC) time as PH "YYYY-MM-DD 08:05 AM", for the log."""
     if not value:
@@ -406,6 +487,11 @@ def time_out_selfie(
     longitude: float = Form(...),
     address: str = Form(...),
     photo: UploadFile = File(...),
+    # Work accomplished (required when their head's unit ticks "Work
+    # accomplished") and its photo/video proof (optional -- leaving it
+    # out sends this time out to that head for review).
+    work_accomplished: str | None = Form(None),
+    proof: UploadFile | None = File(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -450,12 +536,20 @@ def time_out_selfie(
         latitude, longitude
     )
     flag_side_for_geofence(record, "time_out", outside, geofence_note)
-    start_attendance_review(db, record, "time_out")
+
+    # Work accomplished (asked when their head's Org Chart unit ticks it).
+    head_id, proof, missing_proof = check_work_report(
+        db, record, employee_id, current_user, work_accomplished, proof
+    )
+    review_time_out(db, record, head_id, missing_proof)
 
     file_service = FileService()
     photo_url = file_service.upload(
         _watermark_timestamp(photo, photo_label, latitude, longitude),
         f"attendance/{record.id}/time-out",
+    )
+    save_work_proof(
+        db, file_service, record, proof, photo_label, latitude, longitude, current_user.id
     )
 
     db.add(
@@ -580,15 +674,26 @@ def get_my_attendance_today(
         .first()
     )
 
+    # Whether time out asks for work accomplished + photo/video.
+    head_id = work_report_head(db, current_user.employee_id, current_user)
+    head = db.query(User).filter(User.id == head_id).first() if head_id else None
+    work_report = {
+        "work_report_required": bool(head_id),
+        "work_report_head": display_name(head) if head else None,
+    }
+
     if not record:
         return {
             "has_record": False,
             "check_in_time": None,
             "check_out_time": None,
             "status": None,
+            **work_report,
         }
 
     return {
+        **work_report,
+        "work_accomplished": record.work_accomplished,
         "has_record": True,
         "id": record.id,
         "attendance_date": str(record.attendance_date),
@@ -955,7 +1060,7 @@ def get_attendance_records(
                 FileModel.entity_type == "attendance",
                 FileModel.entity_id.in_(record_ids),
                 FileModel.document_type.in_(
-                    ["ATTENDANCE_TIME_IN", "ATTENDANCE_TIME_OUT"]
+                    ["ATTENDANCE_TIME_IN", "ATTENDANCE_TIME_OUT", "WORK_PROOF"]
                 ),
             )
             .all()
@@ -1169,6 +1274,12 @@ def get_attendance_records(
                     (record.id, "ATTENDANCE_TIME_OUT")
                 ),
 
+                "work_accomplished": record.work_accomplished,
+                "work_proof_missing": record.work_proof_missing,
+                "work_proof_url": attendance_photo_map.get(
+                    (record.id, "WORK_PROOF")
+                ),
+
                 "time_in_face_match_score": record.time_in_face_match_score,
                 "time_in_face_review_status": record.time_in_face_review_status,
                 "time_in_face_review_reason": record.time_in_face_review_reason,
@@ -1374,9 +1485,16 @@ def get_kiosk_attendance_status(
         next_action = "time_in"
         message = "Ready for time in."
 
+    kiosk_user = db.query(User).filter(User.employee_id == employee.id).first()
+    head_id = work_report_head(db, employee.id, kiosk_user)
+    head = db.query(User).filter(User.id == head_id).first() if head_id else None
+
     return {
         "employee_id": employee.id,
         "employee_name": employee_name,
+        # Time out asks for work accomplished + photo/video (Org Chart).
+        "work_report_required": bool(head_id),
+        "work_report_head": display_name(head) if head else None,
         "has_record": True,
         "has_timed_in": has_timed_in,
         "has_timed_out": has_timed_out,
@@ -1395,6 +1513,9 @@ def kiosk_selfie_attendance(
     longitude: float = Form(...),
     address: str = Form(...),
     photo: UploadFile = File(...),
+    # Time out only: work accomplished + optional photo/video proof.
+    work_accomplished: str | None = Form(None),
+    proof: UploadFile | None = File(None),
     db: Session = Depends(get_db),
 ):
     logger.info("KIOSK SELFIE ENDPOINT HIT")
@@ -1507,6 +1628,10 @@ def kiosk_selfie_attendance(
         record.time_out_longitude = longitude
         record.time_out_address = address
         record.attendance_method = "KIOSK_SELFIE"
+        kiosk_user = db.query(User).filter(User.employee_id == employee_id).first()
+        head_id, proof, missing_proof = check_work_report(
+            db, record, employee_id, kiosk_user, work_accomplished, proof
+        )
 
         document_type = "ATTENDANCE_TIME_OUT"
         upload_folder = f"attendance/{record.id}/time-out"
@@ -1551,7 +1676,13 @@ def kiosk_selfie_attendance(
         record.time_out_face_checked_at = face_result["checked_at"]
 
     flag_side_for_geofence(record, action, outside_geofence, geofence_note)
-    start_attendance_review(db, record, action)
+    if action == "time_out":
+        review_time_out(db, record, head_id, missing_proof)
+        save_work_proof(
+            db, file_service, record, proof, photo_label, latitude, longitude, None
+        )
+    else:
+        start_attendance_review(db, record, action)
 
     logger.info(f"PHOTO URL: {photo_url}")
 
@@ -1629,7 +1760,10 @@ def get_geofence_alerts(
                     ),
                 ),
                 and_(
-                    AttendanceRecord.time_out_outside_geofence.is_(True),
+                    or_(
+                        AttendanceRecord.time_out_outside_geofence.is_(True),
+                        AttendanceRecord.work_proof_missing.is_(True),
+                    ),
                     AttendanceRecord.time_out_face_review_status.in_(
                         GEOFENCE_PENDING_STATUSES
                     ),
@@ -1651,8 +1785,9 @@ def get_geofence_alerts(
             ("time_in", "Time In", record.check_in_time),
             ("time_out", "Time Out", record.check_out_time),
         ):
+            no_proof = side == "time_out" and bool(record.work_proof_missing)
             if (
-                getattr(record, f"{side}_outside_geofence")
+                (getattr(record, f"{side}_outside_geofence") or no_proof)
                 and getattr(record, f"{side}_face_review_status")
                 in GEOFENCE_PENDING_STATUSES
                 and (sees_all or _current_approver(db, record, side) == current_user.id)
@@ -1667,7 +1802,14 @@ def get_geofence_alerts(
                         "side_label": label,
                         "attendance_date": str(record.attendance_date),
                         "time": format_attendance_time_only(when),
-                        "note": getattr(record, f"{side}_geofence_note"),
+                        "note": " ".join(
+                            n
+                            for n in (
+                                getattr(record, f"{side}_geofence_note"),
+                                NO_PROOF_NOTE if no_proof else None,
+                            )
+                            if n
+                        ),
                         "_sort": when or datetime.min,
                     }
                 )
@@ -1910,6 +2052,15 @@ def get_attendance_for_my_approval(
                         ),
                         "review_status": getattr(record, f"{side}_face_review_status"),
                         "review_reason": getattr(record, f"{side}_face_review_reason"),
+                        **(
+                            {
+                                "work_accomplished": record.work_accomplished,
+                                "work_proof_missing": bool(record.work_proof_missing),
+                                "work_proof_url": photos.get((record.id, "WORK_PROOF")),
+                            }
+                            if side == "time_out"
+                            else {}
+                        ),
                         **describe_chain(
                             db,
                             getattr(record, f"{side}_review_chain"),

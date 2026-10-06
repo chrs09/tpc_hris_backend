@@ -72,6 +72,8 @@ class AttendanceResponse(BaseModel):
     time_in_geofence_note: Optional[str] = None
     time_out_outside_geofence: Optional[bool] = None
     time_out_geofence_note: Optional[str] = None
+    work_accomplished: Optional[str] = None
+    work_proof_missing: Optional[bool] = None
 
     # =========================
     # OTHER

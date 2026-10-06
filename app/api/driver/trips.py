@@ -824,8 +824,9 @@ def dispatch_trip(
         raise HTTPException(status_code=400, detail="Selected vehicle is unavailable.")
 
     origin_store = db.query(Store).filter(Store.id == origin_store_id).first()
-    if not origin_store or not origin_store.is_hub:
-        raise HTTPException(status_code=400, detail="Selected origin is not a valid hub.")
+    # Any location: hub, supplier (pick-up) or customer (e.g. returns).
+    if not origin_store:
+        raise HTTPException(status_code=400, detail="Pick a start point.")
 
     driver_employee = (
         db.query(Employee).filter(Employee.id == target_user.employee_id).first()

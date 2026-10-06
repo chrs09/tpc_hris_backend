@@ -31,6 +31,8 @@ _WEIGHTS = {
     "truck_type_id": 2,
     "origin_store_id": 4,
     "destination_area": 4,
+    # One exact outlet beats an area.
+    "destination_store_id": 6,
 }
 
 
@@ -52,6 +54,7 @@ def trip_facts(trip) -> dict:
         "truck_type_id": vehicle.truck_type_id if vehicle else None,
         "origin_store_id": trip.origin_store_id,
         "destination_area": _norm(destination.area) if destination else None,
+        "destination_store_id": trip.destination_store_id,
     }
 
 
@@ -78,9 +81,14 @@ def describe_rule(rule: TripRateRule) -> str:
         parts.append(rule.trip_rate_profile.profile_name)
     if rule.truck_type:
         parts.append(rule.truck_type.name)
-    if rule.origin_store_id or rule.destination_area:
+    if rule.origin_store_id or rule.destination_area or rule.destination_store_id:
         origin = rule.origin_store.name if rule.origin_store else "Any"
-        parts.append(f"{origin} → {rule.destination_area or 'Any'}")
+        to = (
+            rule.destination_store.name
+            if rule.destination_store
+            else rule.destination_area or "Any"
+        )
+        parts.append(f"{origin} → {to}")
     label = " · ".join(parts) or "All trips"
     return f"{label} (from {rule.effective_from:%b %d, %Y})"
 

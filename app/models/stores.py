@@ -56,6 +56,10 @@ class Store(Base):
     # name-matching with a real, admin-editable flag on the store record.
     is_hub = Column(Boolean, default=False, nullable=False)
 
+    # Also a supplier: listed in Suppliers, can be a trip's start point
+    # and a driver rate's "From" (linked Supplier.store_id).
+    is_supplier = Column(Boolean, default=False, nullable=False)
+
     # The area the store is in (e.g. Consolacion, Bohol) -- a lane's
     # destination for trip rates (app/services/trip_rates.py).
     area = Column(String(100), nullable=True, index=True)

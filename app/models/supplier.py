@@ -4,6 +4,7 @@ from sqlalchemy import (
     Boolean,
     Column,
     DateTime,
+    ForeignKey,
     Integer,
     String,
 )
@@ -26,6 +27,10 @@ class Supplier(Base):
     phone = Column(String(50), nullable=True)
     email = Column(String(150), nullable=True)
     address = Column(String(255), nullable=True)
+
+    # The supplier's map location (a Store row with is_supplier) -- having
+    # one makes it a customer / delivery point and a trip start point too.
+    store_id = Column(Integer, ForeignKey("tpc_stores.id"), nullable=True)
 
     is_active = Column(Boolean, nullable=False, default=True, server_default="true")
 

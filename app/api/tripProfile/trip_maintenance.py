@@ -825,6 +825,12 @@ def get_suppliers(
     current_user: User = Depends(get_current_user),
 ):
     suppliers = db.query(Supplier).order_by(Supplier.name.asc()).all()
+    locations = {
+        s.id: s.name
+        for s in db.query(Store).filter(
+            Store.id.in_([x.store_id for x in suppliers if x.store_id] or [0])
+        )
+    }
 
     response = [
         {
@@ -835,6 +841,9 @@ def get_suppliers(
             "email": supplier.email,
             "address": supplier.address,
             "is_active": supplier.is_active,
+            # Its map location makes it a customer / trip start point too.
+            "store_id": supplier.store_id,
+            "location_name": locations.get(supplier.store_id),
         }
         for supplier in suppliers
     ]

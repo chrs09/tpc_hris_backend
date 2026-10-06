@@ -24,7 +24,9 @@ from app.models.user import User
 from app.utils.timezone import utc_to_ph
 from app.utils.user_display import display_name
 
-APPROVAL_KINDS = ("cash_advance", "overtime", "attendance", "leave")
+# "work_report": people under this head report their work accomplished
+# (text + photo/video) at time out; no proof -> this head reviews it.
+APPROVAL_KINDS = ("cash_advance", "overtime", "attendance", "leave", "work_report")
 
 
 def load_json_list(value) -> list:

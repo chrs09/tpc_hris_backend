@@ -61,6 +61,12 @@ class AttendanceRecord(Base):
     time_out_outside_geofence = Column(Boolean, nullable=True)
     time_out_geofence_note = Column(String(255), nullable=True)
 
+    # What they worked on, typed at time out, and whether they left out
+    # the photo/video proof (FileModel WORK_PROOF) -- asked only when
+    # their head's Org Chart unit ticks "Work accomplished".
+    work_accomplished = Column(Text, nullable=True)
+    work_proof_missing = Column(Boolean, nullable=True)
+
     # Org chart approval chain for a side that needs review (outside the
     # geofence / face check) -- same idea as CashAdvanceRequest's
     # approval_chain: approvers in order, who's up now, and the log.

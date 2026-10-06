@@ -6,7 +6,7 @@ from datetime import datetime
 
 import boto3
 from azure.storage.blob import BlobServiceClient, ContentSettings
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 from app.core.config import settings
 from app.utils.timezone import utc_to_ph
@@ -33,6 +33,11 @@ def _watermark_timestamp(
 
         file.file.seek(0)
         image = Image.open(file.file)
+        # Phones (iPhones especially) save photos sideways with an EXIF
+        # "rotate me" tag. Re-saving below drops that tag, so turn the
+        # pixels upright first -- otherwise the stored selfie is rotated
+        # and face matching scores it low.
+        image = ImageOps.exif_transpose(image)
         image = image.convert("RGB")
 
         draw = ImageDraw.Draw(image)

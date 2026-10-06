@@ -34,6 +34,10 @@ class TripRateRule(Base):
         Integer, ForeignKey("tpc_stores.id"), nullable=True, index=True
     )
     destination_area = Column(String(100), nullable=True, index=True)
+    # One exact outlet (beats an area).
+    destination_store_id = Column(
+        Integer, ForeignKey("tpc_stores.id"), nullable=True, index=True
+    )
 
     driver_first_trip_rate = Column(Numeric(10, 2), nullable=True)
     driver_next_trip_rate = Column(Numeric(10, 2), nullable=True)
@@ -52,4 +56,5 @@ class TripRateRule(Base):
 
     trip_rate_profile = relationship("TripRateProfile")
     truck_type = relationship("TruckType")
-    origin_store = relationship("Store")
+    origin_store = relationship("Store", foreign_keys=[origin_store_id])
+    destination_store = relationship("Store", foreign_keys=[destination_store_id])

@@ -31,14 +31,29 @@ class Ticket(Base):
     # POST /tickets/{id}/image (see app/api/tickets.py).
     image_url = Column(String(500), nullable=True)
 
-    created_by_user_id = Column(Integer, ForeignKey("tpc_users.id"), nullable=False)
-    # Who handles it: always an IT employee (Employee.position "IT"),
-    # assigned automatically on create -- never the creator. Null only
-    # if no IT employee exists yet.
+    # Null for tickets filed on the public support form.
+    created_by_user_id = Column(Integer, ForeignKey("tpc_users.id"), nullable=True)
+    # Who handles it: picked by the creator (any active user), else the
+    # least-busy person in the category's Org Chart unit.
     assigned_to_user_id = Column(Integer, ForeignKey("tpc_users.id"), nullable=True)
+
+    # What it's about -> which Org Chart unit handles it.
+    category_id = Column(Integer, ForeignKey("tpc_ticket_categories.id"), nullable=True)
+    # "internal" (staff) or "public" (support form, no login).
+    source = Column(String(10), nullable=False, default="internal")
+    # Public requester (customer / store): how to reach them.
+    requester_name = Column(String(150), nullable=True)
+    requester_phone = Column(String(50), nullable=True)
+    requester_email = Column(String(150), nullable=True)
+    requester_company = Column(String(150), nullable=True)
+    requester_ip = Column(String(64), nullable=True)
+    # Timeline JSON: [{"action", "by", "at", "note", ...}] -- created,
+    # assigned, forwarded, status changes.
+    history = Column(Text, nullable=True)
 
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     created_by = relationship("User", foreign_keys=[created_by_user_id])
     assigned_to = relationship("User", foreign_keys=[assigned_to_user_id])
+    category = relationship("TicketCategory")

@@ -297,8 +297,9 @@ async def create_manual_entry(
         raise HTTPException(status_code=400, detail="Selected vehicle not found.")
 
     origin = db.query(Store).filter(Store.id == origin_store_id).first()
-    if not origin or not origin.is_hub:
-        raise HTTPException(status_code=400, detail="Selected origin is not a valid hub.")
+    # Any location: hub, supplier (pick-up) or customer (e.g. returns).
+    if not origin:
+        raise HTTPException(status_code=400, detail="Pick a start point.")
 
     # ---- times
     start_time = _parse_ph_time(form.get("start_time"), "Start (Checkout) time")

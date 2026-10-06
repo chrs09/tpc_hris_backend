@@ -39,6 +39,8 @@ def _serialize(rule: TripRateRule) -> dict:
         "origin_store_id": rule.origin_store_id,
         "origin_store": rule.origin_store.name if rule.origin_store else None,
         "destination_area": rule.destination_area,
+        "destination_store_id": rule.destination_store_id,
+        "destination_store": rule.destination_store.name if rule.destination_store else None,
         **{field: _num(getattr(rule, field)) for field in RATE_FIELDS},
         "effective_from": rule.effective_from.isoformat(),
         "notes": rule.notes,
@@ -56,6 +58,7 @@ def list_rate_rules(
             joinedload(TripRateRule.trip_rate_profile),
             joinedload(TripRateRule.truck_type),
             joinedload(TripRateRule.origin_store),
+            joinedload(TripRateRule.destination_store),
         )
         .order_by(TripRateRule.effective_from.desc(), TripRateRule.id.desc())
         .all()
@@ -75,10 +78,19 @@ def list_rate_rules(
                 {"id": t.id, "name": t.name}
                 for t in db.query(TruckType).filter(TruckType.is_active.is_(True)).order_by(TruckType.name).all()
             ],
+            # From: any location -- hubs, then suppliers, then customers.
             "origins": [
-                {"id": s.id, "name": s.name, "is_hub": s.is_hub}
+                {"id": s.id, "name": s.name, "is_hub": s.is_hub, "is_supplier": s.is_supplier}
                 for s in db.query(Store)
-                .order_by(Store.is_hub.desc(), Store.name)
+                .order_by(Store.is_hub.desc(), Store.is_supplier.desc(), Store.name)
+                .all()
+            ],
+            # To: any outlet (customers and supplier locations).
+            "destinations": [
+                {"id": s.id, "name": s.name, "area": s.area, "is_supplier": s.is_supplier}
+                for s in db.query(Store)
+                .filter(Store.is_hub.is_(False))
+                .order_by(Store.name)
                 .all()
             ],
             "areas": areas,
@@ -93,6 +105,7 @@ class RuleIn(BaseModel):
     truck_type_id: int | None = None
     origin_store_id: int | None = None
     destination_area: str | None = None
+    destination_store_id: int | None = None
     driver_first_trip_rate: float | None = None
     driver_next_trip_rate: float | None = None
     helper_first_trip_rate: float | None = None
@@ -129,6 +142,7 @@ def _apply(db: Session, rule: TripRateRule, payload: RuleIn):
             TripRateRule.truck_type_id == payload.truck_type_id,
             TripRateRule.origin_store_id == payload.origin_store_id,
             TripRateRule.destination_area == area,
+            TripRateRule.destination_store_id == payload.destination_store_id,
             TripRateRule.effective_from == payload.effective_from,
             TripRateRule.id != (rule.id or 0),
         )
@@ -143,7 +157,9 @@ def _apply(db: Session, rule: TripRateRule, payload: RuleIn):
     rule.trip_rate_profile_id = payload.trip_rate_profile_id
     rule.truck_type_id = payload.truck_type_id
     rule.origin_store_id = payload.origin_store_id
-    rule.destination_area = area
+    # An exact outlet replaces the area.
+    rule.destination_store_id = payload.destination_store_id or None
+    rule.destination_area = None if rule.destination_store_id else area
     for field, value in rates.items():
         setattr(rule, field, value)
     rule.effective_from = payload.effective_from

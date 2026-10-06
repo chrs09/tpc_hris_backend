@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Column, DateTime, ForeignKey, Integer, Text
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, Text
 from sqlalchemy.orm import relationship
 
 from app.core.database import Base
@@ -18,6 +18,8 @@ class TicketComment(Base):
     )
     user_id = Column(Integer, ForeignKey("tpc_users.id"), nullable=False)
     body = Column(Text, nullable=False)
+    # Sent to the public requester (emailed, shown on their status page).
+    to_customer = Column(Boolean, nullable=False, default=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     user = relationship("User", foreign_keys=[user_id])

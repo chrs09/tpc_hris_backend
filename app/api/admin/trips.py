@@ -830,8 +830,9 @@ def update_assigned_trip(
         raise HTTPException(status_code=400, detail="Selected vehicle is unavailable.")
 
     origin = db.query(Store).filter(Store.id == payload.origin_store_id).first()
-    if not origin or not origin.is_hub:
-        raise HTTPException(status_code=400, detail="Selected origin is not a valid hub.")
+    # Any location: hub, supplier (pick-up) or customer (e.g. returns).
+    if not origin:
+        raise HTTPException(status_code=400, detail="Pick a start point.")
 
     # ---- helpers
     if len(payload.helper_ids) != len(set(payload.helper_ids)):

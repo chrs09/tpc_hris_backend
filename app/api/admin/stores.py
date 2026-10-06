@@ -12,6 +12,7 @@ from app.core.dependencies import get_current_trip_manager, require_role_or_modu
 from app.models.trip_stops import TripStop
 from app.models.TripRate import TripRateProfile
 from app.models.stores import Store, StoreProfile
+from app.models.supplier import Supplier
 from app.models.notification import Notification
 from app.models.trips import Trip
 from app.services.gps_service import calculate_distance_meters
@@ -71,6 +72,11 @@ class StoreCreateRequest(BaseModel):
     # Area the store is in (e.g. Consolacion, Bohol) -- a lane's
     # destination for trip rates.
     area: Optional[str] = None
+    # Also a supplier (listed in Suppliers, can be a trip start point).
+    is_supplier: bool = False
+    # Creating a location for an existing supplier (Suppliers page ->
+    # "Add map location"): link it to that supplier.
+    supplier_id: Optional[int] = None
 
 class StoreUpdateRequest(BaseModel):
     name: Optional[str] = None
@@ -84,6 +90,7 @@ class StoreUpdateRequest(BaseModel):
     profile: Optional[str] = None
     is_hub: Optional[bool] = None
     area: Optional[str] = None
+    is_supplier: Optional[bool] = None
 
     class Config:
         orm_mode = True
@@ -136,7 +143,33 @@ def build_store_response(store: Store) -> dict:
         "profile": store.profile,
         "is_hub": store.is_hub,
         "area": store.area,
+        "is_supplier": bool(store.is_supplier),
     }
+
+
+def sync_supplier_link(db: Session, store: Store, supplier_id: int | None = None):
+    """A location marked "Also a supplier" has a Supplier record linked
+    to it (created if needed); unmarking it unlinks that record (the
+    supplier itself stays in Suppliers)."""
+    linked = db.query(Supplier).filter(Supplier.store_id == store.id).all()
+    if store.is_supplier:
+        if supplier_id:
+            supplier = db.query(Supplier).filter(Supplier.id == supplier_id).first()
+            if not supplier:
+                raise HTTPException(status_code=404, detail="Supplier not found.")
+            supplier.store_id = store.id
+        elif not linked:
+            db.add(
+                Supplier(
+                    name=store.name,
+                    address=store.address,
+                    store_id=store.id,
+                    is_active=True,
+                )
+            )
+    else:
+        for supplier in linked:
+            supplier.store_id = None
 
 
 # ==========================================
@@ -377,9 +410,12 @@ def create_store(
         profile=trip_rate_profile.code,
         is_hub=payload.is_hub,
         area=(payload.area or "").strip() or None,
+        is_supplier=bool(payload.is_supplier or payload.supplier_id),
     )
 
     db.add(new_store)
+    db.flush()
+    sync_supplier_link(db, new_store, payload.supplier_id)
     db.commit()
     db.refresh(new_store)
 
@@ -658,6 +694,10 @@ def update_store(
 
     if payload.area is not None:
         store.area = payload.area.strip() or None
+
+    if payload.is_supplier is not None and payload.is_supplier != bool(store.is_supplier):
+        store.is_supplier = payload.is_supplier
+        sync_supplier_link(db, store)
 
     db.commit()
     db.refresh(store)
