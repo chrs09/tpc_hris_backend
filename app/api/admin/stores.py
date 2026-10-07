@@ -328,7 +328,8 @@ def approve_store_from_stop(
 # ==========================================
 @router.get("/")
 def get_stores(
-    db: Session = Depends(get_db), current_admin=Depends(require_role_or_module(roles=["admin", "superadmin", "coordinator_admin", "coordinator"], module_key="customers.customers"))
+    # Also the store picker of trip pages (dispatch, edit trip, manual entries).
+    db: Session = Depends(get_db), current_admin=Depends(require_role_or_module(roles=["admin", "superadmin", "coordinator_admin", "coordinator"], module_key=["customers.customers", "trip_management.trip_assignment", "trip_management.trip_dashboard", "trip_management.trips"]))
 ):
     stores = db.query(Store).order_by(Store.name.asc()).all()
     return [build_store_response(store) for store in stores]

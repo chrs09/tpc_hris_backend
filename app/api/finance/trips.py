@@ -15,6 +15,7 @@ from app.models.gps_log import GPSLog
 from app.models.files import File
 from app.utils.timezone import utc_to_ph
 from app.services.trip_remarks import serialize_trip_remarks
+from app.api.driver.trips import shipments_for_store
 
 router = APIRouter(prefix="/finance/trips", tags=["Finance Trips"])
 
@@ -341,6 +342,7 @@ def get_finance_trip_detail(
                     if stop.store
                     else "Unknown"
                 ),
+                "shipment_numbers": shipments_for_store(trip, stop.store_id),
                 "check_in_time": to_ph(stop.check_in_time),
                 "check_out_time": to_ph(stop.check_out_time),
                 "lat_in": stop.lat_in,

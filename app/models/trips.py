@@ -67,6 +67,11 @@ class Trip(Base):
     # DRs/manifests). ticket_no above is always ", ".join(shipment_numbers).
     shipment_numbers = Column(Text, nullable=True)
 
+    # Which destination store each shipment number goes to, JSON
+    # {"<shipment no>": <store id>} -- picked at dispatch, shown per
+    # stop in Trip Review. Empty on trips dispatched before this.
+    shipment_stores = Column(Text, nullable=True)
+
     origin_store_id = Column(Integer, ForeignKey("tpc_stores.id"), nullable=True)
 
     # The trip's PRIMARY destination store -- always planned_store_ids[0],

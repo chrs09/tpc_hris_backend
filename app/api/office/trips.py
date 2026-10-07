@@ -27,6 +27,7 @@ from app.services.trip_remarks import (
     serialize_trip_remarks,
 )
 from app.utils.user_display import display_name as _display_name
+from app.api.driver.trips import shipments_for_store
 
 
 router = APIRouter(
@@ -438,6 +439,7 @@ def review_office_trip(
                     if stop.store
                     else "Unknown"
                 ),
+                "shipment_numbers": shipments_for_store(trip, stop.store_id),
                 "check_in_time": to_ph(stop.check_in_time),
                 "check_out_time": to_ph(stop.check_out_time),
                 "lat_in": stop.lat_in,

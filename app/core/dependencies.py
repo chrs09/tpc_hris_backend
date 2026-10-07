@@ -84,7 +84,7 @@ def require_superadmin(current_user: User = Depends(get_current_user)):
     return current_user
 
 
-def require_role_or_module(roles: list[str], module_key: str):
+def require_role_or_module(roles: list[str], module_key: str | list[str]):
     """Returns a FastAPI dependency that allows a request through if
     EITHER the caller's role is in `roles` (superadmin always allowed),
     OR the caller has been explicitly granted `module_key` on the
@@ -101,7 +101,10 @@ def require_role_or_module(roles: list[str], module_key: str):
     an inline `if current_user.role not in [...]` check on any endpoint
     that backs a module listed in MODULE_GROUPS (both here and in
     tpc_hris_frontend/src/constants/modules.js -- module_key must match
-    exactly, e.g. "hris.leave", "trip_management.stores")."""
+    exactly, e.g. "hris.leave", "trip_management.stores"). A list of
+    keys lets any one of those modules through (e.g. a lookup list a few
+    pages share)."""
+    module_keys = [module_key] if isinstance(module_key, str) else list(module_key)
 
     # `request` is filled in by FastAPI when used via Depends(). Endpoints
     # that call this directly pass it themselves; without it (e.g. an
@@ -138,12 +141,12 @@ def require_role_or_module(roles: list[str], module_key: str):
                 .filter(
                     Employee.id == current_user.employee_id,
                     Employee.has_custom_module_access.is_(True),
-                    EmployeeModuleAccess.module_key == module_key,
+                    EmployeeModuleAccess.module_key.in_(module_keys),
                     EmployeeModuleAccess.can_edit.is_(False),
                 )
                 .first()
             )
-            if view_only:
+            if view_only and not has_editable_grant(db, current_user, module_keys):
                 raise HTTPException(
                     status_code=403,
                     detail="You have view-only access to this module.",
@@ -168,7 +171,7 @@ def require_role_or_module(roles: list[str], module_key: str):
                     db.query(EmployeeModuleAccess)
                     .filter(
                         EmployeeModuleAccess.employee_id == employee.id,
-                        EmployeeModuleAccess.module_key == module_key,
+                        EmployeeModuleAccess.module_key.in_(module_keys),
                     )
                     .first()
                 )

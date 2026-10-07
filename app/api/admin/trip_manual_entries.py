@@ -41,6 +41,8 @@ from app.api.driver.trips import (
     _generate_trip_code,
     _invalid_shipment_number,
     _load_planned_store_ids,
+    _parse_shipment_stores,
+    shipments_for_store,
 )
 
 router = APIRouter(prefix="/admin/trip-manual-entries", tags=["Trip Manual Entries"])
@@ -259,6 +261,7 @@ async def create_manual_entry(
     """Multipart form:
     driver_id, vehicle_unit_id, origin_store_id, reason (required)
     shipment_numbers: JSON list of 8-digit numbers
+    shipment_stores: JSON {"<shipment no>": <store id>} (2+ stores)
     stops: JSON list in visiting order, each {store_id, arrived_at?,
       delivered_at?} (PH local "YYYY-MM-DDTHH:MM"; missing times are
       spread evenly between start and end)
@@ -390,6 +393,9 @@ async def create_manual_entry(
     for sid in store_ids:
         if sid not in stores_by_id:
             raise HTTPException(status_code=400, detail=f"Store {sid} not found.")
+    shipment_store_map = _parse_shipment_stores(
+        form.get("shipment_stores"), shipment_numbers, store_ids
+    )
 
     primary = stores_by_id[store_ids[0]]
     rate_profile = (
@@ -475,6 +481,7 @@ async def create_manual_entry(
         trip_rate_profile_id=rate_profile.id,
         ticket_no=", ".join(shipment_numbers),
         shipment_numbers=json.dumps(shipment_numbers),
+        shipment_stores=json.dumps(shipment_store_map),
         # A coordinator_admin's entry waits for a superadmin first.
         status=(
             TripStatus.PENDING_APPROVAL
@@ -810,6 +817,7 @@ def get_manual_entry(
         "stops": [
             {
                 "store_name": store_names.get(st.store_id, "Unknown store"),
+                "shipment_numbers": shipments_for_store(trip, st.store_id),
                 "arrived_at": _fmt(st.check_in_time),
                 "delivered_at": _fmt(st.check_out_time),
                 "pod_url": pod_by_stop.get(st.id),

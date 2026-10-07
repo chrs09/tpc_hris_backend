@@ -15,7 +15,7 @@ from typing import List
 from app.core.database import get_db
 from app.utils.response import api_response
 from app.schemas.trip import LocationRequest
-from app.core.dependencies import get_current_user
+from app.core.dependencies import get_current_user, require_role_or_module
 from app.models.user import User, UserRole
 from app.models.trips import Trip, TripStatus
 from app.models.trip_finance_review import TripFinanceReview, FinanceReviewStatus
@@ -50,6 +50,20 @@ router = APIRouter(prefix="/driver/trips", tags=["Driver Trips"])
 # get_current_trip_manager in app/core/dependencies.py.
 TRIP_MANAGER_ROLES = {"admin", "superadmin", "coordinator_admin", "coordinator"}
 
+# Dispatching (web Trip Assignment / mobile Assign Trip): a trip manager
+# role, or an Org Chart grant of Trip Assignment ("Can edit: No" blocks).
+_require_dispatch = require_role_or_module(
+    roles=sorted(TRIP_MANAGER_ROLES), module_key="trip_management.trip_assignment"
+)
+
+
+def _can_dispatch(db: Session, user: User) -> bool:
+    try:
+        _require_dispatch(None, user, db)
+        return True
+    except HTTPException:
+        return False
+
 # A trip can cover multiple delivery stores (the coordinator picks them
 # all at dispatch time) -- capped to keep a single trip/route sane.
 MAX_PLANNED_STOPS = 20
@@ -78,6 +92,53 @@ def _load_shipment_numbers(trip: Trip) -> list[str]:
         except Exception:
             pass
     return [trip.ticket_no] if trip.ticket_no else []
+
+
+def _parse_shipment_stores(
+    raw, shipment_numbers: list[str], destination_ids: list[int]
+) -> dict[str, int]:
+    """Which destination each shipment number goes to, from the
+    dispatch form's JSON {"<shipment no>": <store id>}. One destination:
+    every shipment goes there. Several: each shipment needs one."""
+    if len(destination_ids) == 1:
+        return {n: destination_ids[0] for n in shipment_numbers}
+    try:
+        pairs = json.loads(raw) if isinstance(raw, str) and raw.strip() else (raw or {})
+        pairs = {str(k).strip(): int(v) for k, v in dict(pairs).items() if v not in (None, "")}
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Invalid shipment store format.")
+    for number in shipment_numbers:
+        store_id = pairs.get(number)
+        if store_id is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f'Pick the store for shipment number "{number}".',
+            )
+        if store_id not in destination_ids:
+            raise HTTPException(
+                status_code=400,
+                detail=f'Shipment number "{number}" must go to one of the trip\'s stores.',
+            )
+    return {n: pairs[n] for n in shipment_numbers}
+
+
+def _load_shipment_stores(trip: Trip) -> dict[str, int]:
+    if not trip.shipment_stores:
+        return {}
+    try:
+        return {str(k): int(v) for k, v in json.loads(trip.shipment_stores).items()}
+    except Exception:
+        return {}
+
+
+def shipments_for_store(trip: Trip, store_id: int | None) -> list[str]:
+    """Shipment numbers going to this store. Trips dispatched before
+    shipments were paired with stores show all the trip's numbers."""
+    pairs = _load_shipment_stores(trip)
+    numbers = _load_shipment_numbers(trip)
+    if not pairs:
+        return numbers
+    return [n for n in numbers if pairs.get(n) == store_id]
 
 
 def _load_planned_store_ids(trip: Trip) -> list[int]:
@@ -305,7 +366,7 @@ def get_available_helpers(
     # ---------------------------------------
     employee_id = current_user.employee_id
 
-    if driver_id and _role_value(current_user.role) in TRIP_MANAGER_ROLES:
+    if driver_id and _can_dispatch(db, current_user):
         target_user = (
             db.query(User)
             .filter(User.id == driver_id, User.role == UserRole.DRIVER)
@@ -662,9 +723,11 @@ def dispatch_trip(
     origin_store_id: int = Form(...),
     destination_store_ids: str = Form(...),
     shipment_no: str = Form(...),
+    # JSON {"<shipment no>": <store id>}; required with 2+ stores.
+    shipment_stores: str = Form(""),
     helper_ids: str = Form("[]"),
     db: Session = Depends(get_db),
-    current_user=Depends(get_current_user),
+    current_user=Depends(_require_dispatch),
 ):
     """The office/coordinator's first step in the driver flow: pick a
     driver, a vehicle, the hub they're dispatching from, one or more
@@ -677,9 +740,6 @@ def dispatch_trip(
     picked explicitly here. Creates the Trip in TripStatus.ASSIGNED /
     current_step "ASSIGNED"; the driver sees it on their dashboard and
     performs Checkout -> Start Trip from there."""
-    if _role_value(current_user.role) not in TRIP_MANAGER_ROLES:
-        raise HTTPException(status_code=403, detail="Not authorized to dispatch trips.")
-
     try:
         shipment_numbers = [
             str(x).strip() for x in json.loads(shipment_no) if str(x).strip()
@@ -757,6 +817,9 @@ def dispatch_trip(
             status_code=400,
             detail=f"Maximum of {MAX_PLANNED_STOPS} destination stores allowed.",
         )
+    shipment_store_map = _parse_shipment_stores(
+        shipment_stores, shipment_numbers, destination_store_ids
+    )
 
     destination_stores = (
         db.query(Store).filter(Store.id.in_(destination_store_ids)).all()
@@ -860,6 +923,7 @@ def dispatch_trip(
             trip_rate_profile_id=trip_category.id,
             ticket_no=shipment_no_display,
             shipment_numbers=json.dumps(shipment_numbers),
+            shipment_stores=json.dumps(shipment_store_map),
             status=TripStatus.ASSIGNED,
             current_step="ASSIGNED",
             dispatched_by_user_id=current_user.id,

@@ -42,6 +42,9 @@ from app.api.driver.trips import (
     _load_planned_store_ids,
     _delivered_store_ids,
     _load_shipment_numbers,
+    _load_shipment_stores,
+    _parse_shipment_stores,
+    shipments_for_store,
     _invalid_shipment_number,
     _helper_departments_for,
     MAX_PLANNED_STOPS,
@@ -178,7 +181,7 @@ def get_trip_summary(
 # =========================
 @router.get("/available-drivers")
 def get_available_drivers(
-    db: Session = Depends(get_db), current_admin=Depends(require_role_or_module(roles=["admin", "superadmin", "coordinator_admin", "coordinator"], module_key="trip_management.trips"))
+    db: Session = Depends(get_db), current_admin=Depends(require_role_or_module(roles=["admin", "superadmin", "coordinator_admin", "coordinator"], module_key=["trip_management.trips", "trip_management.trip_assignment", "trip_management.trip_dashboard"]))
 ):
     drivers_with_active_trip = {
         row[0]
@@ -572,6 +575,7 @@ def get_assigned_trips(
                 "origin_store_id": trip.origin_store_id,
                 "destination_store_ids": planned_ids,
                 "shipment_numbers": _load_shipment_numbers(trip),
+                "shipment_stores": _load_shipment_stores(trip),
                 "helpers": [
                     {
                         "id": th.helper.id,
@@ -680,6 +684,8 @@ class AssignedTripUpdate(BaseModel):
     origin_store_id: int
     destination_store_ids: list[int]
     shipment_numbers: list[str]
+    # {"<shipment no>": <store id>}; required with 2+ stores.
+    shipment_stores: dict[str, int] = {}
     helper_ids: list[int] = []
     reason: str | None = None
 
@@ -774,6 +780,9 @@ def update_assigned_trip(
     for sid in dest_ids:
         if sid not in stores_by_id:
             raise HTTPException(status_code=400, detail=f"Store {sid} not found.")
+    shipment_store_map = _parse_shipment_stores(
+        payload.shipment_stores, shipment_numbers, dest_ids
+    )
     primary_store = stores_by_id[dest_ids[0]]
     if not primary_store.trip_rate_profile_id:
         raise HTTPException(
@@ -868,6 +877,8 @@ def update_assigned_trip(
         changes.append("shipment numbers")
     if dest_ids != _load_planned_store_ids(trip):
         changes.append("destinations")
+    elif shipment_store_map != _load_shipment_stores(trip):
+        changes.append("shipment stores")
     if set(payload.helper_ids) != current_helper_ids:
         changes.append("helpers")
     if not changes:
@@ -896,6 +907,7 @@ def update_assigned_trip(
     trip.planned_store_ids = json.dumps(dest_ids)
     trip.trip_rate_profile_id = rate_profile.id
     trip.shipment_numbers = json.dumps(shipment_numbers)
+    trip.shipment_stores = json.dumps(shipment_store_map)
     trip.ticket_no = ", ".join(shipment_numbers)
 
     summary = "Edited " + ", ".join(changes) + "."
@@ -1432,6 +1444,7 @@ def review_trip(
                     if stop.store
                     else "Unknown"
                 ),
+                "shipment_numbers": shipments_for_store(trip, stop.store_id),
 
                 # CHECKED_IN / UNLOADING / DELIVERED
                 "status": (
@@ -1503,6 +1516,7 @@ def review_trip(
             {
                 "store_id": sid,
                 "store_name": stores_by_id[sid].name if sid in stores_by_id else None,
+                "shipment_numbers": shipments_for_store(trip, sid),
                 "delivered": sid in delivered_ids,
             }
             for sid in planned_ids

@@ -35,7 +35,11 @@ from app.services.gps_service import calculate_distance_meters
 from app.services.notification_service import create_notification
 from app.utils.timezone import ph_to_utc, utc_to_ph
 from app.api.admin.trips import _current_step_label
-from app.api.driver.trips import _load_planned_store_ids, _delivered_store_ids
+from app.api.driver.trips import (
+    _load_planned_store_ids,
+    _delivered_store_ids,
+    shipments_for_store,
+)
 
 router = APIRouter(prefix="/admin/trips/bypass", tags=["Trip Bypass"])
 
@@ -253,6 +257,7 @@ def get_bypass_trip_detail(
                     if sid in planned_stores_by_id
                     else None
                 ),
+                "shipment_numbers": shipments_for_store(trip, sid),
                 "delivered": sid in delivered_ids,
             }
             for sid in planned_ids
