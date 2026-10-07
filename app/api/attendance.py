@@ -39,6 +39,7 @@ from app.services.trip_rates import load_rules, resolve_trip_rates
 from app.services.payroll_lock import ensure_unlocked
 from app.services.file_service import FileService, _watermark_timestamp
 from app.services.face_recognition_service import FaceRecognitionService
+from app.services.photo_orientation import PHOTO_SIDES, rescore_side, rotate_stored_photo
 from app.services.approval_chain import (
     acting_index,
     team_scope as _team_scope,
@@ -1972,6 +1973,44 @@ def reject_attendance(
         "attendance_id": attendance.id,
         "side": side,
         "status": getattr(attendance, f"{side}_face_review_status"),
+    }
+
+
+@router.post("/{attendance_id}/rotate-photo")
+def rotate_attendance_photo(
+    attendance_id: int,
+    side: str = Query("time_in", pattern="^(time_in|time_out)$"),
+    degrees: int = Body(90, embed=True),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Turn a sideways selfie upright (same people who can review it).
+    Saved as a new file -- the original is kept -- then the face match
+    is re-run so the score reflects the upright photo."""
+    attendance, _ = _get_review_record(db, attendance_id, side, current_user)
+    photo = (
+        db.query(FileModel)
+        .filter(
+            FileModel.entity_type == "attendance",
+            FileModel.entity_id == attendance.id,
+            FileModel.document_type == PHOTO_SIDES[side],
+        )
+        .order_by(FileModel.id.desc())
+        .first()
+    )
+    if not photo:
+        raise HTTPException(status_code=404, detail="This side has no photo.")
+    try:
+        photo.file_url = rotate_stored_photo(photo.file_url, degrees)
+    except (ValueError, FileNotFoundError) as error:
+        raise HTTPException(status_code=400, detail=str(error))
+    rescore_side(db, attendance, side, photo.file_url)
+    db.commit()
+    return {
+        "photo_url": photo.file_url,
+        "review_status": getattr(attendance, f"{side}_face_review_status"),
+        "review_reason": getattr(attendance, f"{side}_face_review_reason"),
+        "face_match_score": getattr(attendance, f"{side}_face_match_score"),
     }
 
 
