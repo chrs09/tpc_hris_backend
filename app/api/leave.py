@@ -26,6 +26,31 @@ from app.services.approval_chain import (
     team_scope,
 )
 from app.schemas.leave import LeaveRequestCreate, LeaveReviewAction
+from app.models.notification import Notification
+from app.services.notification_service import create_notification
+from app.utils.timezone import utc_to_ph
+from app.core.dependencies import require_role_or_module
+
+# HR is notified of every leave filed (the Leave bell on the web): a
+# superadmin, or anyone the Org Chart gives HRIS access (Employees or
+# Attendance) -- the role default "admin" (HR Admin) too, same as the
+# web sidebar's HRIS group.
+_require_hr = require_role_or_module(
+    roles=["admin"],
+    module_key=[
+        "hris.employees",
+        "hris.attendance",
+        "hris.attendance_list_view",
+        "hris.attendance_grid_view",
+    ],
+)
+
+
+def _requested_at(leave: LeaveRequest) -> str | None:
+    """When it was filed, PH time, e.g. "Oct 08, 2026 09:15 AM"."""
+    if not leave.created_at:
+        return None
+    return utc_to_ph(leave.created_at).strftime("%b %d, %Y %I:%M %p")
 
 router = APIRouter(prefix="/leave", tags=["Leave"])
 
@@ -128,6 +153,7 @@ def _serialize(leave: LeaveRequest) -> dict:
         "reviewed_by_user_id": leave.reviewed_by_user_id,
         "reviewed_at": leave.reviewed_at,
         "created_at": leave.created_at,
+        "requested_at": _requested_at(leave),
         # False when the viewer's step was passed up (they're away today).
         "can_act": getattr(leave, "_can_act", True),
         "viewer_away": getattr(leave, "_away", None),
@@ -211,7 +237,88 @@ def file_leave_request(
     db.commit()
     db.refresh(leave)
 
+    # Tell HR (Leave bell on the web).
+    name = (
+        f"{employee.first_name} {employee.last_name}" if employee else current_user.username
+    )
+    days = (payload.end_date - payload.start_date).days + 1
+    create_notification(
+        db,
+        "LEAVE_REQUESTED",
+        driver_id=current_user.id,
+        ref_id=leave.id,
+        message=(
+            f"{name} filed {days} day{'s' if days != 1 else ''} of leave "
+            f"({payload.start_date:%b %d}"
+            f"{'' if days == 1 else f' - {payload.end_date:%b %d}'})."
+        )[:255],
+    )
+    db.refresh(leave)
+
     return _serialize(leave)
+
+
+# =========================
+# HR LEAVE BELL -- new leave filed, until HR acknowledges it
+# =========================
+@router.get("/alerts")
+def get_leave_alerts(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(_require_hr),
+):
+    notices = (
+        db.query(Notification)
+        .filter(
+            Notification.type == "LEAVE_REQUESTED",
+            Notification.status == "PENDING",
+        )
+        .order_by(Notification.created_at.desc())
+        .limit(200)
+        .all()
+    )
+    leaves = {
+        leave.id: leave
+        for leave in db.query(LeaveRequest)
+        .options(joinedload(LeaveRequest.employee), joinedload(LeaveRequest.requester))
+        .filter(LeaveRequest.id.in_([n.ref_id for n in notices if n.ref_id] or [0]))
+    }
+    result = []
+    for notice in notices:
+        leave = leaves.get(notice.ref_id)
+        result.append(
+            {
+                "id": notice.id,
+                "message": notice.message,
+                "leave": _serialize(leave) if leave else None,
+                "department": (
+                    leave.employee.department if leave and leave.employee else None
+                ),
+            }
+        )
+    return result
+
+
+@router.post("/alerts/{notification_id}/acknowledge")
+def acknowledge_leave_alert(
+    notification_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(_require_hr),
+):
+    notice = (
+        db.query(Notification)
+        .filter(
+            Notification.id == notification_id,
+            Notification.type == "LEAVE_REQUESTED",
+        )
+        .first()
+    )
+    if not notice:
+        raise HTTPException(status_code=404, detail="Alert not found.")
+    notice.status = "ACKNOWLEDGED"
+    notice.reviewed_by_admin_id = current_user.id
+    notice.reviewed_at = datetime.utcnow()
+    db.commit()
+    return {"message": "Acknowledged."}
 
 
 @router.get("/my-requests")

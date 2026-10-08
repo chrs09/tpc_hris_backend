@@ -1,7 +1,7 @@
 from datetime import datetime
 from math import ceil
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
@@ -30,6 +30,27 @@ from app.models.cash_advance_deduction_log import CashAdvanceDeductionLog
 from app.models.cash_advance_terms import CashAdvanceTerms
 from app.models.notification import Notification
 from app.services.notification_service import create_notification
+from app.models.files import File as FileModel
+from app.services.file_service import FileService
+
+# Photo of the transfer / hand-over (GCash, bank, signed voucher) proving
+# the approved cash advance was sent -- uploaded at the final approval or
+# with Record Release.
+RECEIPT_DOC = "CA_RELEASE_RECEIPT"
+
+
+def _receipt_url(db: Session, request_id: int) -> str | None:
+    row = (
+        db.query(FileModel.file_url)
+        .filter(
+            FileModel.entity_type == "cash_advance",
+            FileModel.entity_id == request_id,
+            FileModel.document_type == RECEIPT_DOC,
+        )
+        .order_by(FileModel.id.desc())
+        .first()
+    )
+    return row[0] if row else None
 from app.schemas.cash_advance_request import (
     CashAdvanceRequestCreate,
     CashAdvanceReviewAction,
@@ -100,6 +121,8 @@ def _serialize(req: CashAdvanceRequest, db: Session) -> dict:
         ),
         "approved_at": req.approved_at,
         "release_reference": req.release_reference,
+        "release_receipt_url": _receipt_url(db, req.id),
+        "is_archived": bool(req.is_archived),
         "released_at": req.released_at,
         "released_by_name": (
             req.released_by.username if req.released_by else None
@@ -828,6 +851,8 @@ def acknowledge_cash_advance_alert(
 
 @router.get("/all")
 def list_all_cash_advance_requests(
+    # true = only the archived ones (the "Show archived" toggle).
+    archived: bool = False,
     db: Session = Depends(get_db),
     current_user: User = Depends(
         require_role_or_module(roles=[], module_key="finance.cash_advance")
@@ -843,7 +868,101 @@ def list_all_cash_advance_requests(
             joinedload(CashAdvanceRequest.employee),
             joinedload(CashAdvanceRequest.requested_by),
         )
+        .filter(CashAdvanceRequest.is_archived.is_(archived))
         .order_by(CashAdvanceRequest.created_at.desc())
         .all()
     )
     return [_serialize(r, db) for r in requests]
+
+
+_require_finance = require_role_or_module(roles=[], module_key="finance.cash_advance")
+
+
+def _get_request(db: Session, request_id: int) -> CashAdvanceRequest:
+    request = db.query(CashAdvanceRequest).filter(CashAdvanceRequest.id == request_id).first()
+    if not request:
+        raise HTTPException(status_code=404, detail="Cash advance request not found")
+    return request
+
+
+@router.post("/{request_id}/archive")
+def archive_cash_advance_request(
+    request_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(_require_finance),
+):
+    """Hide a finished request from All Requests (still counted in
+    balances / payroll deductions)."""
+    request = _get_request(db, request_id)
+    if request.status == "pending":
+        raise HTTPException(
+            status_code=400,
+            detail="Approve or reject it first -- pending requests can't be archived.",
+        )
+    request.is_archived = True
+    request.archived_at = datetime.utcnow()
+    request.archived_by_user_id = current_user.id
+    db.commit()
+    db.refresh(request)
+    return _serialize(request, db)
+
+
+@router.post("/{request_id}/unarchive")
+def unarchive_cash_advance_request(
+    request_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(_require_finance),
+):
+    request = _get_request(db, request_id)
+    request.is_archived = False
+    request.archived_at = None
+    request.archived_by_user_id = None
+    db.commit()
+    db.refresh(request)
+    return _serialize(request, db)
+
+
+@router.post("/{request_id}/receipt")
+def upload_release_receipt(
+    request_id: int,
+    receipt: UploadFile = File(...),
+    release_reference: str | None = Form(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Photo proving the approved cash advance was sent (GCash / bank
+    screenshot, signed voucher). Marks it released. Allowed for whoever
+    gave the final approval, a superadmin, or a Cash Advance "Can edit"
+    grant (Finance); uploading again replaces the shown receipt."""
+    request = _get_request(db, request_id)
+    if request.status != "approved":
+        raise HTTPException(
+            status_code=400, detail="A receipt can only be added to an approved cash advance."
+        )
+    if request.approved_by_user_id != current_user.id and not has_editable_grant(
+        db, current_user, ["finance.cash_advance"]
+    ):
+        raise HTTPException(status_code=403, detail="You can't add a receipt to this cash advance.")
+    if not (receipt.content_type or "").startswith("image/"):
+        raise HTTPException(status_code=400, detail="The receipt must be a photo.")
+
+    url = FileService().upload(receipt, f"cash_advance/{request.id}/receipt")
+    db.add(
+        FileModel(
+            entity_type="cash_advance",
+            entity_id=request.id,
+            document_type=RECEIPT_DOC,
+            file_url=url,
+            uploaded_by=current_user.id,
+        )
+    )
+    if release_reference and release_reference.strip():
+        request.release_reference = release_reference.strip()[:255]
+    elif not request.release_reference:
+        request.release_reference = "Receipt photo"
+    request.released_at = datetime.utcnow()
+    request.released_by_user_id = current_user.id
+    db.commit()
+    db.refresh(request)
+    return _serialize(request, db)
+

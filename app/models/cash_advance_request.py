@@ -91,6 +91,12 @@ class CashAdvanceRequest(Base):
     approval_step = Column(Integer, nullable=False, default=0, server_default="0")
     approval_log = Column(Text, nullable=True)
 
+    # Archived = hidden from Finance's All Requests list only; balances
+    # and payroll deductions keep working.
+    is_archived = Column(Boolean, nullable=False, default=False, server_default="0")
+    archived_at = Column(DateTime, nullable=True)
+    archived_by_user_id = Column(Integer, nullable=True)
+
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     employee = relationship("Employee", foreign_keys=[employee_id])

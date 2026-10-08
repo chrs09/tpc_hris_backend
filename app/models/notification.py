@@ -16,6 +16,10 @@ class Notification(Base):
 
     message = Column(String(255))
 
+    # What the notice is about when it isn't a trip, e.g. the leave
+    # request id of a LEAVE_REQUESTED notice.
+    ref_id = Column(Integer, nullable=True)
+
     status = Column(String(50), default="PENDING")
 
     reviewed_by_admin_id = Column(Integer, ForeignKey("tpc_users.id"), nullable=True)
