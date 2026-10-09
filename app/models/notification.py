@@ -20,6 +20,10 @@ class Notification(Base):
     # request id of a LEAVE_REQUESTED notice.
     ref_id = Column(Integer, nullable=True)
 
+    # For one person (e.g. the head of whoever cancelled a trip); NULL =
+    # for every superadmin.
+    recipient_user_id = Column(Integer, nullable=True, index=True)
+
     status = Column(String(50), default="PENDING")
 
     reviewed_by_admin_id = Column(Integer, ForeignKey("tpc_users.id"), nullable=True)

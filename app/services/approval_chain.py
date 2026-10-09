@@ -107,6 +107,29 @@ def resolve_chain(
     return chain
 
 
+def immediate_head(db: Session, employee: Employee | None, user: User | None) -> int | None:
+    """The first head above this person on the Org Chart, whatever that
+    unit approves (e.g. who hears about a trip they cancelled)."""
+    units = db.query(OrgUnit).all()
+    if not units:
+        return None
+    by_id = {u.id: u for u in units}
+    user_id = user.id if user else None
+    headed = [u for u in units if user_id and u.head_user_id == user_id]
+    if headed:
+        start = _deepest(headed, by_id)
+        current = by_id.get(start.parent_id) if start.parent_id else None
+    else:
+        current = _deepest([u for u in units if _is_member(u, employee, user)], by_id)
+    seen: set[int] = set()
+    while current and current.id not in seen:
+        seen.add(current.id)
+        if current.head_user_id and current.head_user_id != user_id:
+            return current.head_user_id
+        current = by_id.get(current.parent_id) if current.parent_id else None
+    return None
+
+
 def my_approver_kinds(db: Session, user: User) -> dict:
     """Which types this user approves as an org chart head."""
     kinds = set()

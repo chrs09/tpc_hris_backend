@@ -38,6 +38,7 @@ from app.services.trip_remarks import (
 )
 from app.utils.timezone import utc_to_ph
 from app.utils.user_display import display_name as _display_name
+from app.services.approval_chain import immediate_head
 from app.api.driver.trips import (
     _load_planned_store_ids,
     _delivered_store_ids,
@@ -307,6 +308,8 @@ PIPELINE_STATUSES = {
     TripStatus.PENDING_OFFICE_REVIEW: "Pending Office Approval",
     TripStatus.PENDING_FINANCE_REVIEW: "Pending Finance Approval",
     TripStatus.COMPLETED: "Approved",
+    # Only when picked in the filter -- "All statuses" leaves these out.
+    TripStatus.CANCELLED: "Cancelled",
 }
 
 
@@ -378,6 +381,8 @@ def get_approval_pipeline(
         if wanted not in PIPELINE_STATUSES:
             raise HTTPException(status_code=400, detail="Invalid status.")
         query = query.filter(Trip.status == wanted)
+    else:
+        query = query.filter(Trip.status != TripStatus.CANCELLED)
 
     total = query.count()
     trips = (
@@ -393,6 +398,23 @@ def get_approval_pipeline(
 
     trip_ids = [trip.id for trip in trips]
     manual_ids = _manual_entry_trip_ids(db, trip_ids)
+    # Who cancelled and why (latest cancel log per trip).
+    cancels = {}
+    for log in (
+        db.query(TripBypassLog)
+        .filter(
+            TripBypassLog.trip_id.in_(trip_ids or [0]),
+            TripBypassLog.action.in_(["cancel", "cancel-active"]),
+        )
+        .order_by(TripBypassLog.id)
+    ):
+        cancels[log.trip_id] = log
+    cancel_users = {
+        u.id: u
+        for u in db.query(User)
+        .options(joinedload(User.employee))
+        .filter(User.id.in_([c.performed_by_user_id for c in cancels.values()] or [0]))
+    }
     reviews = (
         {
             review.trip_id: review
@@ -455,6 +477,24 @@ def get_approval_pipeline(
                     and review.status == FinanceReviewStatus.RETURNED
                     and trip.status == TripStatus.PENDING_APPROVAL
                 ),
+                **(
+                    {
+                        "cancelled_by": (
+                            _display_name(cancel_users[cancels[trip.id].performed_by_user_id])
+                            if cancels[trip.id].performed_by_user_id in cancel_users
+                            else None
+                        ),
+                        "cancel_reason": cancels[trip.id].reason,
+                        "cancelled_while": (
+                            "on the road"
+                            if cancels[trip.id].action == "cancel-active"
+                            else "before it started"
+                        ),
+                        "cancelled_at": fmt(cancels[trip.id].created_at),
+                    }
+                    if trip.id in cancels
+                    else {}
+                ),
             }
         )
 
@@ -470,7 +510,10 @@ def get_active_trips(
 ):
     trips = (
         db.query(Trip)
-        .options(joinedload(Trip.driver))
+        .options(
+            joinedload(Trip.driver),
+            joinedload(Trip.dispatched_by).joinedload(User.employee),
+        )
         .filter(Trip.status == TripStatus.ACTIVE)
         .order_by(Trip.start_time.desc())
         .all()
@@ -498,6 +541,10 @@ def get_active_trips(
                 "completed_stops": len(delivered_ids) if planned_ids else None,
                 "start_time": utc_to_ph(trip.start_time).strftime("%Y-%m-%d %I:%M:%S %p"),
                 "username": trip.driver.username,
+                # Who assigned it (web Trip Assignment / mobile Assign Trip).
+                "dispatched_by_name": (
+                    _display_name(trip.dispatched_by) if trip.dispatched_by else None
+                ),
                 "started_outside_hub_range": trip.started_outside_hub_range,
             }
         )
@@ -618,11 +665,12 @@ def cancel_unstarted_trip(
         )
     ),
 ):
-    """Undoes a dispatch: a trip the driver hasn't started (still
-    ASSIGNED) is cancelled, and its vehicle and helpers are released.
-    Whoever can dispatch a trip can cancel it. A trip already in progress
-    can't be cancelled here -- it has real steps recorded on it, so it goes
-    through Trip Bypass and the normal approve/reject review instead."""
+    """Cancels a trip with a reason: one the driver hasn't started
+    (ASSIGNED -- a dispatch made by mistake), or one on the road (ACTIVE,
+    from Active Trips). Its vehicle and helpers are released and its
+    shipment numbers freed; steps and photos already recorded stay on it
+    for the record. Cancelling an ACTIVE trip notifies the superadmins and
+    the canceller's Org Chart head (Trip cancellations bell)."""
     reason = reason.strip()
     if not reason:
         raise HTTPException(status_code=400, detail="A reason is required.")
@@ -639,17 +687,22 @@ def cancel_unstarted_trip(
     if not trip:
         raise HTTPException(status_code=404, detail="Trip not found.")
 
-    if trip.status != TripStatus.ASSIGNED:
+    if trip.status not in (TripStatus.ASSIGNED, TripStatus.ACTIVE):
         raise HTTPException(
             status_code=400,
             detail=(
-                "Only a trip the driver hasn't started yet can be "
-                "cancelled. For one already in progress, use Trip Bypass."
+                "Only an assigned or active trip can be cancelled -- this one "
+                "is already cancelled or finished."
             ),
         )
+    was_active = trip.status == TripStatus.ACTIVE
+    if was_active:
+        ensure_trip_unlocked(db, trip)
 
     trip.status = TripStatus.CANCELLED
     trip.current_step = "CANCELLED"
+    if was_active and not trip.end_time:
+        trip.end_time = datetime.utcnow()
 
     if trip.ticket_no:
         marker = f" {CANCELLED_TICKET_MARKER}{trip.id})"
@@ -665,14 +718,119 @@ def cancel_unstarted_trip(
     db.add(
         TripBypassLog(
             trip_id=trip.id,
-            action="cancel",
+            action="cancel-active" if was_active else "cancel",
             performed_by_user_id=current_admin.id,
             reason=reason,
         )
     )
+
+    notified = []
+    if was_active:
+        canceller = db.get(User, current_admin.id)
+        employee = (
+            db.query(Employee).filter(Employee.id == canceller.employee_id).first()
+            if canceller and canceller.employee_id
+            else None
+        )
+        driver = trip.driver.username if trip.driver else "driver"
+        message = (
+            f"{_display_name(canceller)} cancelled trip {trip.trip_code or trip.id} "
+            f"({driver}) -- {reason}"
+        )[:255]
+        # NULL recipient = every superadmin; plus the canceller's head.
+        recipients = [None]
+        head_id = immediate_head(db, employee, canceller)
+        head = db.get(User, head_id) if head_id and head_id != current_admin.id else None
+        if head:
+            # A superadmin head already gets the all-superadmins notice.
+            if not _is_superadmin(head):
+                recipients.append(head.id)
+            notified.append(_display_name(head))
+        for recipient in recipients:
+            db.add(
+                Notification(
+                    type="TRIP_CANCELLED",
+                    driver_id=trip.driver_id,
+                    trip_id=trip.id,
+                    ref_id=current_admin.id,
+                    recipient_user_id=recipient,
+                    message=message,
+                    status="PENDING",
+                    created_at=datetime.utcnow(),
+                )
+            )
     db.commit()
 
-    return {"message": "Trip cancelled.", "trip_id": trip.id}
+    return {
+        "message": "Trip cancelled."
+        + (
+            f" Superadmin{' and ' + ', '.join(notified) if notified else ''} notified."
+            if was_active
+            else ""
+        ),
+        "trip_id": trip.id,
+    }
+
+
+# =========================
+# TRIP CANCELLATIONS BELL -- active trips cancelled from Active Trips.
+# A superadmin sees the ones for all superadmins; a head sees the ones
+# addressed to them (their people's cancellations).
+# =========================
+def _is_superadmin(user: User) -> bool:
+    role = user.role.value if hasattr(user.role, "value") else user.role
+    return role == "superadmin"
+
+
+def _cancel_alert_query(db: Session, user: User):
+    query = db.query(Notification).filter(
+        Notification.type == "TRIP_CANCELLED", Notification.status == "PENDING"
+    )
+    if _is_superadmin(user):
+        return query.filter(
+            or_(Notification.recipient_user_id.is_(None), Notification.recipient_user_id == user.id)
+        )
+    return query.filter(Notification.recipient_user_id == user.id)
+
+
+@router.get("/cancel-alerts")
+def get_trip_cancel_alerts(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    notices = _cancel_alert_query(db, current_user).order_by(Notification.created_at.desc()).all()
+    trips = {
+        t.id: t
+        for t in db.query(Trip).filter(Trip.id.in_([n.trip_id for n in notices] or [0]))
+    }
+    return [
+        {
+            "id": n.id,
+            "message": n.message,
+            "trip_id": n.trip_id,
+            "trip_code": trips[n.trip_id].trip_code if n.trip_id in trips else None,
+            "created_at": utc_to_ph(n.created_at).strftime("%b %d, %Y %I:%M %p")
+            if n.created_at
+            else None,
+        }
+        for n in notices
+    ]
+
+
+@router.post("/cancel-alerts/{notification_id}/acknowledge")
+def acknowledge_trip_cancel_alert(
+    notification_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    notice = _cancel_alert_query(db, current_user).filter(Notification.id == notification_id).first()
+    if not notice:
+        raise HTTPException(status_code=404, detail="Alert not found.")
+    notice.status = "ACKNOWLEDGED"
+    notice.reviewed_by_admin_id = current_user.id
+    notice.reviewed_at = datetime.utcnow()
+    db.commit()
+    return {"message": "Acknowledged."}
 
 
 # =========================
