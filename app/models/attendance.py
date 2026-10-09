@@ -67,6 +67,14 @@ class AttendanceRecord(Base):
     work_accomplished = Column(Text, nullable=True)
     work_proof_missing = Column(Boolean, nullable=True)
 
+    # Forgot to time out: filed at their next time in (the time they say
+    # they left, UTC, and why), then approved by the Org Chart attendance
+    # approvers -- only then is check_out_time set. filed_at is also set
+    # when a head enters the time out directly.
+    missed_out_requested_at = Column(DateTime, nullable=True)
+    missed_out_reason = Column(Text, nullable=True)
+    missed_out_filed_at = Column(DateTime, nullable=True)
+
     # Org chart approval chain for a side that needs review (outside the
     # geofence / face check) -- same idea as CashAdvanceRequest's
     # approval_chain: approvers in order, who's up now, and the log.

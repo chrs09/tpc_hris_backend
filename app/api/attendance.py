@@ -61,7 +61,8 @@ from app.schemas.attendance import (
     AttendanceTimeAdjust,
 )
 
-from app.utils.timezone import utc_to_ph_date
+from app.utils.timezone import utc_to_ph, utc_to_ph_date
+from pydantic import BaseModel
 
 router = APIRouter(prefix="/attendance", tags=["Attendance"])
 
@@ -207,7 +208,135 @@ def flag_side_for_geofence(record, side: str, outside: bool, note: str | None):
 
 
 # A side in one of these still needs someone to approve or reject it.
-REVIEW_PENDING_STATUSES = ("NEEDS_REVIEW", "FACE_MATCH_FAILED", "NO_PROFILE_PHOTO")
+# MISSED_TIME_OUT: forgot to time out -- the time they say they left is
+# waiting for the attendance approvers (see file_missed_time_out).
+REVIEW_PENDING_STATUSES = (
+    "NEEDS_REVIEW",
+    "FACE_MATCH_FAILED",
+    "NO_PROFILE_PHOTO",
+    "MISSED_TIME_OUT",
+)
+
+# =========================
+# MISSED TIME OUT -- forgot to time out. At their next time in (phone or
+# kiosk) they must first enter when they left and why; that goes to the
+# Org Chart attendance approvers, who can change the time and approve
+# (only then is the time out saved). A head can also set it themselves
+# before it's filed (Approvals -> Attendance).
+# =========================
+MISSED_LOOKBACK_DAYS = 7
+# Self-clocked days only -- drivers' attendance comes from their trips.
+SELF_CLOCKED_METHODS = ("SELFIE", "KIOSK_SELFIE")
+
+
+def _ph_today() -> date:
+    return datetime.now(ZoneInfo("Asia/Manila")).date()
+
+
+def missed_time_out_query(db: Session):
+    """Open self-clocked days in the look-back window, not yet filed."""
+    today = _ph_today()
+    return db.query(AttendanceRecord).filter(
+        AttendanceRecord.attendance_date < today,
+        AttendanceRecord.attendance_date >= today - timedelta(days=MISSED_LOOKBACK_DAYS),
+        AttendanceRecord.check_in_time.isnot(None),
+        AttendanceRecord.check_out_time.is_(None),
+        AttendanceRecord.missed_out_filed_at.is_(None),
+        AttendanceRecord.attendance_method.in_(SELF_CLOCKED_METHODS),
+    )
+
+
+def _is_locked(db: Session, record) -> bool:
+    """A day inside locked / paid payroll can't be changed any more, so
+    it isn't asked for (HR handles it)."""
+    try:
+        ensure_unlocked(db, record.employee_id, record.attendance_date, "attendance")
+        return False
+    except HTTPException:
+        return True
+
+
+def open_missed_records(db: Session, employee_id: int | None = None) -> list:
+    query = missed_time_out_query(db)
+    if employee_id is not None:
+        query = query.filter(AttendanceRecord.employee_id == employee_id)
+    records = query.order_by(AttendanceRecord.attendance_date.asc()).all()
+    return [r for r in records if not _is_locked(db, r)]
+
+
+def find_missed_time_out(db: Session, employee_id: int | None):
+    """The oldest day this employee still has to file a time out for."""
+    if not employee_id:
+        return None
+    records = open_missed_records(db, employee_id)
+    return records[0] if records else None
+
+
+def missed_payload(record) -> dict | None:
+    if not record:
+        return None
+    return {
+        "attendance_id": record.id,
+        "attendance_date": str(record.attendance_date),
+        "date_label": record.attendance_date.strftime("%a, %b %d"),
+        "time_in": format_attendance_time_only(record.check_in_time),
+    }
+
+
+def ensure_no_missed_time_out(db: Session, employee_id: int | None):
+    record = find_missed_time_out(db, employee_id)
+    if record:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"You didn't time out on {record.attendance_date:%a, %b %d}. "
+                "Enter your time out for that day first."
+            ),
+        )
+
+
+def _missed_time_utc(record, hhmm: str) -> datetime:
+    """"18:30" on the record's day (PH) -> naive UTC. Earlier than the
+    time in = the next morning (a night shift). Can't be in the future."""
+    try:
+        clock = datetime.strptime((hhmm or "").strip(), "%H:%M").time()
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Enter the time out as HH:MM (24-hour).")
+    local = PH_TZ.localize(datetime.combine(record.attendance_date, clock))
+    check_in = record.check_in_time
+    if check_in is not None:
+        check_in_utc = check_in if check_in.tzinfo else UTC.localize(check_in)
+        if local <= check_in_utc:
+            local = PH_TZ.localize(
+                datetime.combine(record.attendance_date + timedelta(days=1), clock)
+            )
+    out_utc = local.astimezone(UTC)
+    if out_utc > datetime.now(UTC):
+        raise HTTPException(status_code=400, detail="The time out can't be in the future.")
+    return out_utc.replace(tzinfo=None)
+
+
+def file_missed_time_out(db: Session, record, hhmm: str, reason: str, user: User | None):
+    reason = (reason or "").strip()
+    if not reason:
+        raise HTTPException(status_code=400, detail="Say why you didn't time out.")
+    if record.check_out_time is not None or record.missed_out_filed_at is not None:
+        raise HTTPException(status_code=400, detail="That day's time out is already in.")
+    ensure_unlocked(db, record.employee_id, record.attendance_date, "attendance")
+    requested = _missed_time_utc(record, hhmm)
+    record.missed_out_requested_at = requested
+    record.missed_out_reason = reason[:1000]
+    record.missed_out_filed_at = datetime.utcnow()
+    record.time_out_face_review_status = "MISSED_TIME_OUT"
+    record.time_out_face_review_reason = (
+        f"Forgot to time out -- says they left at "
+        f"{format_attendance_time_only(requested)}: {reason}"
+    )[:1000]
+    if user is not None:
+        record.time_out_review_log = append_log(
+            record.time_out_review_log, user, "filed", f"Left at {format_attendance_time_only(requested)}: {reason}"
+        )
+    start_attendance_review(db, record, "time_out")
 
 
 def start_attendance_review(db: Session, record, side: str):
@@ -433,6 +562,8 @@ def time_in_selfie(
             status_code=400,
             detail="Employee already timed in today",
         )
+    # Forgot to time out on an earlier day: file that first.
+    ensure_no_missed_time_out(db, employee_id)
 
     record = existing or AttendanceRecord(
         employee_id=employee_id,
@@ -682,6 +813,11 @@ def get_my_attendance_today(
         "work_report_required": bool(head_id),
         "work_report_head": display_name(head) if head else None,
     }
+
+    # Forgot to time out on an earlier day -> asked before time in.
+    work_report["missed_time_out"] = missed_payload(
+        find_missed_time_out(db, current_user.employee_id)
+    )
 
     if not record:
         return {
@@ -1471,6 +1607,7 @@ def get_kiosk_attendance_status(
             "time_out": None,
             "next_action": "time_in",
             "message": "Ready for time in.",
+            "missed_time_out": missed_payload(find_missed_time_out(db, employee.id)),
         }
 
     has_timed_in = record.check_in_time is not None
@@ -1503,6 +1640,11 @@ def get_kiosk_attendance_status(
         "time_out": format_attendance_time_only(record.check_out_time),
         "next_action": next_action,
         "message": message,
+        "missed_time_out": (
+            missed_payload(find_missed_time_out(db, employee.id))
+            if next_action == "time_in"
+            else None
+        ),
     }
 
 
@@ -1590,6 +1732,7 @@ def kiosk_selfie_attendance(
                 status_code=400,
                 detail="Employee already timed in today.",
             )
+        ensure_no_missed_time_out(db, employee_id)
 
         if not record:
             record = AttendanceRecord(
@@ -1859,10 +2002,15 @@ def approve_attendance(
     side: str = Query("time_in", pattern="^(time_in|time_out)$"),
     # Required when passing it up to the next head (what they checked).
     remarks: str | None = Body(None, embed=True),
+    # Missed time out: the approver may correct the time ("HH:MM").
+    time_out: str | None = Body(None, embed=True),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     attendance, is_turn = _get_review_record(db, attendance_id, side, current_user)
+    missed = side == "time_out" and attendance.time_out_face_review_status == "MISSED_TIME_OUT"
+    if missed and time_out:
+        attendance.missed_out_requested_at = _missed_time_utc(attendance, time_out)
     ensure_unlocked(db, attendance.employee_id, attendance.attendance_date, "attendance")
 
     if getattr(attendance, f"{side}_face_review_status") not in REVIEW_PENDING_STATUSES:
@@ -1930,6 +2078,18 @@ def approve_attendance(
         if acting is not None:
             setattr(attendance, f"{side}_review_step", acting)
         setattr(attendance, f"{side}_face_review_status", "APPROVED")
+        if missed and attendance.missed_out_requested_at:
+            log_adjustment(
+                db,
+                attendance,
+                "check_out_time",
+                None,
+                _ph_stamp(attendance.missed_out_requested_at),
+                current_user,
+                f"Missed time out approved: {attendance.missed_out_reason or ''}".strip(),
+            )
+            attendance.check_out_time = attendance.missed_out_requested_at
+            message = "Time out approved and saved."
 
     db.commit()
     db.refresh(attendance)
@@ -2014,6 +2174,106 @@ def rotate_attendance_photo(
     }
 
 
+def _can_set_missed(db: Session, user: User, record) -> bool:
+    """Superadmin / Attendance grid "Can edit", or one of the employee's
+    Org Chart attendance approvers."""
+    if has_editable_grant(db, user, ["hris.attendance_grid_view"]):
+        return True
+    employee = record.employee or db.get(Employee, record.employee_id)
+    owner = db.query(User).filter(User.employee_id == record.employee_id).first()
+    return user.id in resolve_chain(db, employee, owner, "attendance")
+
+
+@router.post("/{attendance_id}/set-missed-time-out")
+def set_missed_time_out(
+    attendance_id: int,
+    time_out: str = Body(..., embed=True),
+    remarks: str | None = Body(None, embed=True),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """A head enters the time out for a day their person forgot (before
+    the person files it) -- saved right away."""
+    record = db.query(AttendanceRecord).filter(AttendanceRecord.id == attendance_id).first()
+    if not record:
+        raise HTTPException(status_code=404, detail="Attendance record not found.")
+    if not _can_set_missed(db, current_user, record):
+        raise HTTPException(status_code=403, detail="You can't set this time out.")
+    if record.check_out_time is not None:
+        raise HTTPException(status_code=400, detail="That day already has a time out.")
+    ensure_unlocked(db, record.employee_id, record.attendance_date, "attendance")
+    out = _missed_time_utc(record, time_out)
+    note = (remarks or "").strip() or None
+    log_adjustment(
+        db, record, "check_out_time", None, _ph_stamp(out), current_user,
+        f"Missed time out set by head{': ' + note if note else ''}",
+    )
+    record.check_out_time = out
+    record.missed_out_requested_at = out
+    record.missed_out_filed_at = record.missed_out_filed_at or datetime.utcnow()
+    record.time_out_face_review_status = "APPROVED"
+    record.time_out_face_review_reason = "Forgot to time out -- set by head."
+    record.time_out_review_log = append_log(
+        record.time_out_review_log, current_user, "approved", note or "Set the missed time out"
+    )
+    db.commit()
+    return {"message": "Time out saved.", "attendance_id": record.id}
+
+
+class MissedTimeOutIn(BaseModel):
+    attendance_id: int
+    time_out: str  # "HH:MM", PH
+    reason: str
+
+
+@router.get("/missed-time-out")
+def get_my_missed_time_out(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """The earlier day I still have to enter a time out for (or null)."""
+    return {"missed_time_out": missed_payload(find_missed_time_out(db, current_user.employee_id))}
+
+
+@router.post("/missed-time-out")
+def file_my_missed_time_out(
+    payload: MissedTimeOutIn,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    record = db.query(AttendanceRecord).filter(AttendanceRecord.id == payload.attendance_id).first()
+    if not record or record.employee_id != current_user.employee_id:
+        raise HTTPException(status_code=404, detail="Attendance record not found.")
+    file_missed_time_out(db, record, payload.time_out, payload.reason, current_user)
+    db.commit()
+    return {
+        "message": "Sent to your head for approval.",
+        "missed_time_out": missed_payload(find_missed_time_out(db, current_user.employee_id)),
+    }
+
+
+class KioskMissedTimeOutIn(MissedTimeOutIn):
+    employee_id: int
+
+
+@router.post("/kiosk/missed-time-out")
+def kiosk_file_missed_time_out(
+    payload: KioskMissedTimeOutIn,
+    db: Session = Depends(get_db),
+):
+    """Kiosk version (same as kiosk time in -- by employee ID)."""
+    record = db.query(AttendanceRecord).filter(AttendanceRecord.id == payload.attendance_id).first()
+    if not record or record.employee_id != payload.employee_id:
+        raise HTTPException(status_code=404, detail="Attendance record not found.")
+    owner = db.query(User).filter(User.employee_id == payload.employee_id).first()
+    file_missed_time_out(db, record, payload.time_out, payload.reason, owner)
+    db.commit()
+    return {
+        "message": "Sent to the head for approval.",
+        "missed_time_out": missed_payload(find_missed_time_out(db, payload.employee_id)),
+    }
+
+
 # =========================
 # ATTENDANCE WAITING ON ME (org chart heads)
 # =========================
@@ -2062,7 +2322,11 @@ def get_attendance_for_my_approval(
             ("time_in", "Time In", record.check_in_time),
             ("time_out", "Time Out", record.check_out_time),
         ):
-            if side == "time_out" and not record.check_out_time:
+            if (
+                side == "time_out"
+                and not record.check_out_time
+                and record.time_out_face_review_status != "MISSED_TIME_OUT"
+            ):
                 continue
             if (
                 getattr(record, f"{side}_face_review_status") in REVIEW_PENDING_STATUSES
@@ -2093,6 +2357,26 @@ def get_attendance_for_my_approval(
                         "review_reason": getattr(record, f"{side}_face_review_reason"),
                         **(
                             {
+                                "missed_time_out": {
+                                    "time_in": format_attendance_time_only(record.check_in_time),
+                                    "requested_time": format_attendance_time_only(
+                                        record.missed_out_requested_at
+                                    ),
+                                    "requested_hhmm": utc_to_ph(
+                                        record.missed_out_requested_at
+                                    ).strftime("%H:%M")
+                                    if record.missed_out_requested_at
+                                    else None,
+                                    "reason": record.missed_out_reason,
+                                    "filed": True,
+                                }
+                            }
+                            if side == "time_out"
+                            and record.time_out_face_review_status == "MISSED_TIME_OUT"
+                            else {}
+                        ),
+                        **(
+                            {
                                 "work_accomplished": record.work_accomplished,
                                 "work_proof_missing": bool(record.work_proof_missing),
                                 "work_proof_url": photos.get((record.id, "WORK_PROOF")),
@@ -2110,6 +2394,55 @@ def get_attendance_for_my_approval(
                         "_sort": when or datetime.min,
                     }
                 )
+    # Forgot to time out and hasn't filed it yet: the head can enter the
+    # time out themselves.
+    unfiled = open_missed_records(db)
+    if team is not None:
+        unfiled = [r for r in unfiled if r.employee_id in team["employee_ids"]]
+    unfiled_photos = {
+        f.entity_id: f.file_url
+        for f in db.query(FileModel).filter(
+            FileModel.entity_type == "attendance",
+            FileModel.document_type == "ATTENDANCE_TIME_IN",
+            FileModel.entity_id.in_([r.id for r in unfiled] or [0]),
+        )
+    }
+    for record in unfiled:
+        if not (sees_all or _can_set_missed(db, current_user, record)):
+            continue
+        employee = record.employee
+        items.append(
+            {
+                "key": f"{record.id}-missed",
+                "attendance_id": record.id,
+                "side": "time_out",
+                "side_label": "No Time Out",
+                "employee_name": (
+                    f"{employee.first_name} {employee.last_name}"
+                    if employee
+                    else f"Employee #{record.employee_id}"
+                ),
+                "position": employee.position if employee else None,
+                "attendance_date": str(record.attendance_date),
+                "time": None,
+                "address": record.time_in_address,
+                "photo_url": unfiled_photos.get(record.id),
+                "outside_geofence": False,
+                "review_status": "MISSED_TIME_OUT_UNFILED",
+                "review_reason": "Forgot to time out -- not filed yet. You can enter it.",
+                "missed_time_out": {
+                    "time_in": format_attendance_time_only(record.check_in_time),
+                    "requested_time": None,
+                    "requested_hhmm": None,
+                    "reason": None,
+                    "filed": False,
+                },
+                "approval_steps": [],
+                "approval_log": [],
+                "_sort": record.check_in_time or datetime.min,
+            }
+        )
+
     items.sort(key=lambda i: i["_sort"], reverse=True)
     for i in items:
         i.pop("_sort")
