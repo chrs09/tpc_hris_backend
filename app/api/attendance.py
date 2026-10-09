@@ -2274,6 +2274,25 @@ def kiosk_file_missed_time_out(
     }
 
 
+def _my_part(db: Session, record, side: str, user: User) -> dict:
+    """For the Approvals list: whose turn it is, and whether I already
+    approved it (then it just waits for the next head -- no buttons,
+    except for a superadmin who can still finish it)."""
+    current = _current_approver(db, record, side)
+    approved = any(
+        entry.get("user_id") == user.id and entry.get("action") == "approved"
+        for entry in load_json_list(getattr(record, f"{side}_review_log"))
+    )
+    is_superadmin = (getattr(user.role, "value", user.role) or "") == "superadmin"
+    waiting_user = db.get(User, current) if current and current != user.id else None
+    return {
+        "my_turn": current == user.id,
+        "you_approved": approved,
+        "waiting_on": display_name(waiting_user) if waiting_user else None,
+        "can_act": is_superadmin or not (approved and current != user.id),
+    }
+
+
 # =========================
 # ATTENDANCE WAITING ON ME (org chart heads)
 # =========================
@@ -2355,6 +2374,7 @@ def get_attendance_for_my_approval(
                         ),
                         "review_status": getattr(record, f"{side}_face_review_status"),
                         "review_reason": getattr(record, f"{side}_face_review_reason"),
+                        **_my_part(db, record, side, current_user),
                         **(
                             {
                                 "missed_time_out": {
