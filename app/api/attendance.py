@@ -283,6 +283,14 @@ def missed_payload(record) -> dict | None:
     }
 
 
+def missed_list_payload(db: Session, employee_id: int | None) -> list:
+    """Every open earlier day (oldest first) -- the kiosk asks for all of
+    them at once before today's time in."""
+    if not employee_id:
+        return []
+    return [missed_payload(r) for r in open_missed_records(db, employee_id)]
+
+
 def ensure_no_missed_time_out(db: Session, employee_id: int | None):
     record = find_missed_time_out(db, employee_id)
     if record:
@@ -818,6 +826,7 @@ def get_my_attendance_today(
     work_report["missed_time_out"] = missed_payload(
         find_missed_time_out(db, current_user.employee_id)
     )
+    work_report["missed_time_outs"] = missed_list_payload(db, current_user.employee_id)
 
     if not record:
         return {
@@ -1608,6 +1617,7 @@ def get_kiosk_attendance_status(
             "next_action": "time_in",
             "message": "Ready for time in.",
             "missed_time_out": missed_payload(find_missed_time_out(db, employee.id)),
+            "missed_time_outs": missed_list_payload(db, employee.id),
         }
 
     has_timed_in = record.check_in_time is not None
@@ -1644,6 +1654,9 @@ def get_kiosk_attendance_status(
             missed_payload(find_missed_time_out(db, employee.id))
             if next_action == "time_in"
             else None
+        ),
+        "missed_time_outs": (
+            missed_list_payload(db, employee.id) if next_action == "time_in" else []
         ),
     }
 
