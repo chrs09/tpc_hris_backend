@@ -44,6 +44,11 @@ def calculate_attendance_hours(
     actual_in_minutes = check_in.hour * 60 + check_in.minute
 
     actual_out_minutes = check_out.hour * 60 + check_out.minute
+    # Worked past midnight (e.g. 08:27 -> 02:14 next day): count the time
+    # out from the time-in day, not by its clock time.
+    days_later = (check_out.date() - check_in.date()).days
+    if days_later > 0 and schedule_out_minutes > schedule_in_minutes:
+        actual_out_minutes += 1440 * days_later
 
     late_minutes = max(
         0,

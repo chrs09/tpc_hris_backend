@@ -49,8 +49,8 @@ def _compute_hours(ot_date: date, time_in: time_cls, time_out: time_cls) -> floa
 # =========================================================
 # LATE FILING -- forgot to clock in/out
 #
-# Allowed for any day in the CURRENT payroll cutoff (1st-15th or
-# 16th-end of month) up to today, as long as Payroll hasn't already
+# Allowed for any day in the employee's CURRENT payroll cutoff (their
+# department's rule on the Payroll Cutoffs page) up to today, as long as Payroll hasn't already
 # approved that employee's overtime for the cutoff. No selfie/GPS (they
 # can't be captured after the fact); instead the request is flagged
 # "Late filing" and approvers see the attendance time out next to it.
@@ -58,13 +58,13 @@ def _compute_hours(ot_date: date, time_in: time_cls, time_out: time_cls) -> floa
 MAX_OT_HOURS = 16
 
 
-def _current_cutoff(today: date) -> tuple[date, date]:
-    start = date(today.year, today.month, 1 if today.day <= 15 else 16)
-    if today.day <= 15:
-        end = date(today.year, today.month, 15)
-    else:
-        next_month = date(today.year + (today.month == 12), today.month % 12 + 1, 1)
-        end = next_month - timedelta(days=1)
+def _filing_window(db: Session, employee, today: date) -> tuple[date, date]:
+    """Overtime can be filed for any day of the employee's CURRENT payroll
+    cutoff up to today -- Motorpool its week, Admin its semi-monthly
+    cutoff (Payroll Cutoffs page rules)."""
+    from app.services.payroll_cutoffs import employee_cutoff
+
+    start, end = employee_cutoff(db, employee, today)
     return start, end
 
 
@@ -123,7 +123,8 @@ def _span(ot_date: date, time_in: time_cls, time_out: time_cls) -> tuple[datetim
 def _check_late_window(db: Session, employee_id: int | None, ot_date: date):
     ensure_unlocked(db, employee_id, ot_date, "overtime")
     today = now_ph().date()
-    start, end = _current_cutoff(today)
+    employee = db.query(Employee).filter(Employee.id == employee_id).first() if employee_id else None
+    start, end = _filing_window(db, employee, today)
     if not (start <= ot_date <= today):
         raise HTTPException(
             status_code=400,
@@ -398,18 +399,24 @@ def get_overtime_filing_options(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """The days overtime can be filed for -- today (before or after
-    working it) and yesterday (forgot to file) -- each pre-filled:
-    start = scheduled time out, end = attendance time out when it's later
-    than that."""
+    """The days overtime can be filed for -- every day of the current
+    payroll cutoff up to today (today may be filed before or after working
+    it), newest first, each pre-filled: start = scheduled time out, end =
+    attendance time out when it's later than that."""
     today = now_ph().date()
 
     employee = (
         db.query(Employee).filter(Employee.id == current_user.employee_id).first()
     )
 
+    cutoff_start, cutoff_end = _filing_window(db, employee, today)
+    window = [
+        today - timedelta(days=offset)
+        for offset in range((today - cutoff_start).days + 1)
+    ]
+
     days = []
-    for day in (today, today - timedelta(days=1)):
+    for day in window:
         attendance = _attendance_on(db, current_user.employee_id, day)
         scheduled_out = _get_scheduled_time_out(employee, day)
         attendance_out = attendance.check_out_time if attendance else None
@@ -429,7 +436,8 @@ def get_overtime_filing_options(
                 "suggested_time_in": scheduled_out.strftime("%H:%M") if scheduled_out else None,
                 "suggested_time_out": suggested_out,
                 "is_today": day == today,
-                # Yesterday needs attendance; today may be filed ahead.
+                "is_yesterday": day == today - timedelta(days=1),
+                # Past days need attendance; today may be filed ahead.
                 "can_file": (
                     not _payroll_approved(db, current_user.employee_id, day)
                     and (day == today or bool(attendance and attendance.check_in_time))
@@ -438,7 +446,12 @@ def get_overtime_filing_options(
             }
         )
 
-    return {"days": days}
+    return {
+        "days": days,
+        "cutoff_start": str(cutoff_start),
+        "cutoff_end": str(cutoff_end),
+        "cutoff_label": _cutoff_label(cutoff_start, cutoff_end),
+    }
 
 
 @router.post("/file")
@@ -451,9 +464,9 @@ def file_overtime(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """File overtime: for today (before extending work -- a plan -- or
-    after) or yesterday (forgot to file). The only way overtime is filed;
-    there's no clock in/out."""
+    """File overtime for any day of the current payroll cutoff up to today
+    (today: before extending work -- a plan -- or after). The only way
+    overtime is filed; there's no clock in/out."""
     if current_user.role == "superadmin":
         raise HTTPException(
             status_code=403, detail="Superadmin accounts cannot file overtime requests."
@@ -468,11 +481,16 @@ def file_overtime(
         raise HTTPException(status_code=400, detail="Your account isn't linked to an employee.")
 
     today = now_ph().date()
-    if ot_date not in (today, today - timedelta(days=1)):
+    cutoff_start, cutoff_end = _filing_window(db, employee, today)
+    if not (cutoff_start <= ot_date <= today):
         raise HTTPException(
             status_code=400,
-            detail="Overtime can only be filed for today or yesterday.",
+            detail=(
+                "Overtime can only be filed for this payroll cutoff "
+                f"({_cutoff_label(cutoff_start, cutoff_end)}), up to today."
+            ),
         )
+    ensure_unlocked(db, employee.id, ot_date, "overtime")
     if _payroll_approved(db, employee.id, ot_date):
         raise HTTPException(
             status_code=400,
@@ -483,7 +501,10 @@ def file_overtime(
     if ot_date < today and (not attendance or not attendance.check_in_time):
         raise HTTPException(
             status_code=400,
-            detail="You have no attendance yesterday, so overtime can't be filed for it.",
+            detail=(
+                f"You have no attendance on {ot_date:%b %d}, so overtime can't be "
+                "filed for it."
+            ),
         )
 
     start_t = _parse_hhmm(time_in, "Start")
@@ -529,7 +550,7 @@ def file_overtime(
         computed_hours=hours,
         reason=reason.strip(),
         status="pending",
-        # Filed the next day (forgot to file on the day).
+        # Filed after the day (forgot to file on the day).
         filed_late=ot_date < today,
         filed_via_form=True,
     )
