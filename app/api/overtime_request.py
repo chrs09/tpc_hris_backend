@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session, joinedload, object_session
 
 from app.services.payroll_lock import ensure_unlocked
 from app.core.database import get_db
-from app.core.dependencies import get_current_user
+from app.core.dependencies import get_current_user, require_role_or_module
 from app.models.user import User
 from app.models.employees import Employee
 from app.models.overtime_request import OvertimeRequest
@@ -676,6 +676,52 @@ def get_approved_overtime_requests(
             "employee_id": r.employee_id,
             "ot_date": str(r.ot_date),
             "approved_hours": r.approved_hours or 0,
+        }
+        for r in rows
+    ]
+
+
+@router.get("/filed")
+def get_filed_overtime(
+    start: date,
+    end: date,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(
+        require_role_or_module(
+            roles=["admin", "superadmin", "payroll_admin"],
+            module_key=[
+                "payroll.payroll",
+                "hris.attendance",
+                "hris.attendance_list_view",
+                "hris.attendance_grid_view",
+            ],
+        )
+    ),
+):
+    """Overtime filed for days in start..end (pending and approved) -- the
+    "Filed OT" indicator on the Payroll list and the Attendance grid."""
+    rows = (
+        db.query(OvertimeRequest)
+        .filter(
+            OvertimeRequest.employee_id.isnot(None),
+            OvertimeRequest.ot_date >= start,
+            OvertimeRequest.ot_date <= end,
+            OvertimeRequest.status.in_(["pending", "approved"]),
+        )
+        .order_by(OvertimeRequest.ot_date)
+        .all()
+    )
+    return [
+        {
+            "id": r.id,
+            "employee_id": r.employee_id,
+            "ot_date": str(r.ot_date),
+            "time_in": r.time_in.strftime("%H:%M") if r.time_in else None,
+            "time_out": r.time_out.strftime("%H:%M") if r.time_out else None,
+            "hours": float(r.computed_hours or 0),
+            "approved_hours": float(r.approved_hours) if r.approved_hours is not None else None,
+            "status": r.status,
+            "reason": r.reason,
         }
         for r in rows
     ]
