@@ -272,3 +272,105 @@ def transition_payroll_run(
     _log(db, run, payload.action, current_user, note)
     db.commit()
     return _serialize(db, run, current_user, payload.department, payload.cutoff_period)
+
+
+# =========================================================
+# TRIP CHECK -- every trip a driver / helper did in the cutoff, whatever
+# its status, so Payroll sees the ones not paid yet (still waiting for
+# an approval, or no attendance that day) next to the paid ones.
+# Payroll pays a trip only when it's COMPLETED (Finance approved) and
+# there's an attendance record on its day (PayrollList.jsx).
+# =========================================================
+PAID_TRIP_STATUSES = {"COMPLETED", "APPROVED"}
+
+
+@router.get("/trip-check")
+def get_trip_check(
+    start: date,
+    end: date,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(_require_payroll),
+):
+    from datetime import time, timedelta
+
+    import pytz
+    from sqlalchemy.orm import joinedload
+
+    from app.models.attendance import AttendanceRecord
+    from app.models.trip_helper import TripHelper
+    from app.models.trips import Trip
+    from app.services.trip_rates import load_rules, resolve_trip_rates
+    from app.utils.timezone import utc_to_ph_date
+
+    ph = pytz.timezone("Asia/Manila")
+    utc_from = ph.localize(datetime.combine(start, time.min)).astimezone(pytz.utc).replace(tzinfo=None)
+    utc_to = ph.localize(datetime.combine(end + timedelta(days=1), time.min)).astimezone(pytz.utc).replace(tzinfo=None)
+
+    trips = (
+        db.query(Trip)
+        .options(joinedload(Trip.vehicle_unit), joinedload(Trip.trip_rate_profile))
+        .filter(
+            Trip.start_time >= utc_from,
+            Trip.start_time < utc_to,
+            Trip.status != "CANCELLED",
+            Trip.is_archived.is_(False),
+        )
+        .all()
+    )
+    if not trips:
+        return []
+
+    trip_ids = [t.id for t in trips]
+    driver_employee = dict(
+        db.query(User.id, User.employee_id).filter(
+            User.id.in_({t.driver_id for t in trips if t.driver_id})
+        )
+    )
+    helpers = {}
+    for trip_id, helper_id in db.query(TripHelper.trip_id, TripHelper.helper_id).filter(
+        TripHelper.trip_id.in_(trip_ids)
+    ):
+        helpers.setdefault(trip_id, []).append(helper_id)
+
+    people = []  # (trip, employee_id, role)
+    for trip in trips:
+        if driver_employee.get(trip.driver_id):
+            people.append((trip, driver_employee[trip.driver_id], "driver"))
+        for helper_id in helpers.get(trip.id, []):
+            people.append((trip, helper_id, "helper"))
+
+    attended = {
+        (employee_id, day)
+        for employee_id, day in db.query(
+            AttendanceRecord.employee_id, AttendanceRecord.attendance_date
+        ).filter(
+            AttendanceRecord.employee_id.in_({p[1] for p in people}),
+            AttendanceRecord.attendance_date.between(start, end),
+        )
+    }
+    rules = load_rules(db)
+
+    rows = []
+    for trip, employee_id, role in people:
+        day = utc_to_ph_date(trip.start_time)
+        status = getattr(trip.status, "value", trip.status)
+        rates = resolve_trip_rates(trip, day, rules)
+        has_attendance = (employee_id, day) in attended
+        rows.append(
+            {
+                "trip_id": trip.id,
+                "employee_id": employee_id,
+                "role": role,
+                "date": str(day),
+                "ticket_no": trip.ticket_no,
+                "status": status,
+                "vehicle_unit": trip.vehicle_unit.unit_code if trip.vehicle_unit else None,
+                "plate_number": trip.vehicle_unit.plate_number if trip.vehicle_unit else None,
+                "trip_rate_profile": trip.trip_rate_profile.profile_name if trip.trip_rate_profile else None,
+                "first_trip_rate": rates[f"{role}_first_trip_rate"],
+                "has_attendance": has_attendance,
+                "counted": status in PAID_TRIP_STATUSES and has_attendance,
+            }
+        )
+    rows.sort(key=lambda r: (r["date"], r["trip_id"]))
+    return rows
