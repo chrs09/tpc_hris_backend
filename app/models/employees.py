@@ -8,6 +8,7 @@ from sqlalchemy import (
     Date,
     ForeignKey,
     Numeric,
+    Text,
 )
 from sqlalchemy.orm import relationship
 from app.core.database import Base
@@ -28,6 +29,13 @@ class Employee(Base):
     department = Column(String(100), nullable=False)
     is_active = Column(Integer, nullable=False, default=1)
     is_available = Column(Integer, nullable=False, default=1)
+
+    # Attendance (HRIS -> Attendance Locations): the locations this
+    # employee may time in/out from (JSON list of tpc_attendance_locations
+    # ids; empty = any active one), and their own minimum minutes of duty
+    # (NULL = the company default, app setting attendance_min_duty_minutes).
+    attendance_location_ids = Column(Text, nullable=True)
+    min_duty_minutes = Column(Integer, nullable=True)
 
     # True once superadmin has explicitly saved this employee's module
     # access (even to an empty set) via Module Assignment -- distinguishes

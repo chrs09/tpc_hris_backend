@@ -66,6 +66,7 @@ from .finance_expense_item import FinanceExpenseItem as FinanceExpenseItem
 from .trip_finance_review import TripFinanceReview as TripFinanceReview
 from .leave_request import LeaveRequest as LeaveRequest
 from .app_setting import AppSetting as AppSetting
+from .attendance_location import AttendanceLocation as AttendanceLocation
 from .user_revision import UserRevision as UserRevision
 from .overtime_approver import OvertimeApprover as OvertimeApprover
 from .overtime_request import OvertimeRequest as OvertimeRequest

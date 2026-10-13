@@ -71,45 +71,6 @@ logger = logging.getLogger("attendance")
 PH_TZ = pytz.timezone("Asia/Manila")
 UTC = pytz.utc
 
-# Kiosk location - Tytan Corporation Yard
-# KIOSK_ALLOWED_LATITUDE = 10.345240
-# KIOSK_ALLOWED_LONGITUDE = 123.936819
-# KIOSK_ALLOWED_RADIUS_METERS = 150
-
-ATTENDANCE_ALLOWED_LOCATIONS = [
-    {
-        "name": "TPC Yard",
-        "latitude": 10.345240,
-        "longitude": 123.936819,
-        "radius_meters": 150,
-    },
-    {
-        "name": "Test Location",
-        "latitude": 10.359618,
-        "longitude": 123.973413,
-        "radius_meters": 150,
-    },
-    {
-        "name": "Consolacion Office",
-        "latitude": 10.3787,
-        "longitude": 123.9666,
-        "radius_meters": 150,
-    },
-    {
-        "name": "Mandaue Plant",
-        "latitude": 10.3305,
-        "longitude": 123.9333,
-        "radius_meters": 350,
-    },
-    {
-        "name": "Cordova",
-        "latitude": 10.2545,
-        "longitude": 123.9487,
-        "radius_meters": 150,
-    },
-]
-
-
 def calculate_distance_meters(lat1, lon1, lat2, lon2):
     radius = 6371000
 
@@ -129,46 +90,71 @@ def calculate_distance_meters(lat1, lon1, lat2, lon2):
     return radius * c
 
 
+def attendance_locations_for(db: Session, employee_id: int | None = None):
+    """(locations, assigned) -- the active Attendance Locations this
+    employee may time in/out from: the ones assigned to them on HRIS ->
+    Attendance Locations, or every active one when none are assigned."""
+    from app.models.attendance_location import AttendanceLocation
+
+    active = (
+        db.query(AttendanceLocation)
+        .filter(AttendanceLocation.is_active.is_(True))
+        .all()
+    )
+    if employee_id:
+        employee = db.query(Employee).filter(Employee.id == employee_id).first()
+        assigned_ids = {
+            int(i) for i in load_json_list(employee.attendance_location_ids if employee else None)
+        }
+        mine = [location for location in active if location.id in assigned_ids]
+        if mine:
+            return mine, True
+    return active, False
+
+
 def find_nearest_allowed_attendance_location(
+    db: Session,
     latitude: float,
     longitude: float,
+    employee_id: int | None = None,
 ):
-    nearest_location = None
+    """(nearest, distance_m, inside) among the locations this employee may
+    use. nearest is {"name", "radius_meters", "assigned"} or None."""
+    locations, assigned = attendance_locations_for(db, employee_id)
+    nearest = None
     nearest_distance = None
 
-    for location in ATTENDANCE_ALLOWED_LOCATIONS:
+    for location in locations:
         distance = calculate_distance_meters(
-            latitude,
-            longitude,
-            location["latitude"],
-            location["longitude"],
+            latitude, longitude, location.latitude, location.longitude
         )
-
         if nearest_distance is None or distance < nearest_distance:
             nearest_distance = distance
-            nearest_location = location
+            nearest = location
 
-    if not nearest_location:
+    if not nearest:
         return None, None, False
 
-    allowed_radius = nearest_location["radius_meters"]
-
-    is_allowed = nearest_distance <= allowed_radius
-
     return (
-        nearest_location,
+        {
+            "name": nearest.name,
+            "radius_meters": nearest.radius_meters,
+            "assigned": assigned,
+        },
         nearest_distance,
-        is_allowed,
+        nearest_distance <= nearest.radius_meters,
     )
 
 
-def check_attendance_geofence(latitude: float, longitude: float):
-    """Where a time in/out happened relative to the allowed attendance
-    locations. Never refuses -- returns (outside, note, photo_label):
-    `note` explains the flag for reviewers, `photo_label` is the line
-    burned onto the selfie (same watermark as the driver photos)."""
+def check_attendance_geofence(
+    db: Session, latitude: float, longitude: float, employee_id: int | None = None
+):
+    """Where a time in/out happened relative to the employee's attendance
+    locations (their assigned ones, else every active one). Never refuses --
+    returns (outside, note, photo_label): `note` explains the flag for
+    reviewers, `photo_label` is the line burned onto the selfie."""
     nearest, distance, allowed = find_nearest_allowed_attendance_location(
-        latitude, longitude
+        db, latitude, longitude, employee_id
     )
     if not nearest:
         return True, "Outside geofence (no attendance locations set up).", (
@@ -177,13 +163,14 @@ def check_attendance_geofence(latitude: float, longitude: float):
     meters = int(round(distance))
     if allowed:
         return False, None, f"{nearest['name']} ({meters}m)"
+    where = "assigned location" if nearest["assigned"] else "geofence"
     return (
         True,
         (
-            f"Outside geofence: {meters}m from {nearest['name']} "
+            f"Outside {where}: {meters}m from {nearest['name']} "
             f"(allowed {nearest['radius_meters']}m)."
         ),
-        f"Outside geofence - nearest: {nearest['name']} ({meters}m)",
+        f"Outside {where} - nearest: {nearest['name']} ({meters}m)",
     )
 
 
@@ -216,6 +203,63 @@ REVIEW_PENDING_STATUSES = (
     "NO_PROFILE_PHOTO",
     "MISSED_TIME_OUT",
 )
+
+
+# =========================
+# MINIMUM HOURS OF DUTY -- a time out sooner than the employee's minimum
+# (their own, else the company default on HRIS -> Attendance Locations)
+# is still saved, but the day is set to Absent and the time out goes to
+# the attendance approvers. Approving it puts the day back to Present;
+# rejecting leaves it Absent. Stops "time in, time out a minute later"
+# from counting as a day of work.
+# =========================
+MIN_DUTY_SETTING = "attendance_min_duty_minutes"
+
+
+def company_min_duty_minutes(db: Session) -> int:
+    from app.models.app_setting import AppSetting
+
+    setting = db.query(AppSetting).filter(AppSetting.key == MIN_DUTY_SETTING).first()
+    try:
+        return max(0, int(setting.value)) if setting else 0
+    except ValueError:
+        return 0
+
+
+def _hours_minutes(minutes: int) -> str:
+    return f"{minutes // 60} h {minutes % 60:02d} m"
+
+
+def apply_short_duty(db: Session, record) -> str | None:
+    """Flags a too-short day (see above). Returns the note, or None."""
+    if not record.check_in_time or not record.check_out_time:
+        return None
+    employee = record.employee or (
+        db.query(Employee).filter(Employee.id == record.employee_id).first()
+    )
+    minimum = (
+        employee.min_duty_minutes
+        if employee is not None and employee.min_duty_minutes is not None
+        else company_min_duty_minutes(db)
+    )
+    if not minimum or minimum <= 0:
+        return None
+    minutes = max(0, int((record.check_out_time - record.check_in_time).total_seconds() // 60))
+    if minutes >= minimum:
+        return None
+
+    note = (
+        f"Short duty: {_hours_minutes(minutes)} on duty (minimum "
+        f"{_hours_minutes(minimum)}) -- counted Absent until approved."
+    )
+    record.short_duty = True
+    record.status = "Absent"
+    status = record.time_out_face_review_status
+    reason = record.time_out_face_review_reason
+    if status not in REVIEW_PENDING_STATUSES:
+        record.time_out_face_review_status = "NEEDS_REVIEW"
+    record.time_out_face_review_reason = f"{note} {reason}".strip() if reason else note
+    return note
 
 # =========================
 # MISSED TIME OUT -- forgot to time out. At their next time in (phone or
@@ -587,7 +631,7 @@ def time_in_selfie(
     record.time_in_address = address
 
     outside, geofence_note, photo_label = check_attendance_geofence(
-        latitude, longitude
+        db, latitude, longitude, employee_id
     )
     flag_side_for_geofence(record, "time_in", outside, geofence_note)
     start_attendance_review(db, record, "time_in")
@@ -673,9 +717,10 @@ def time_out_selfie(
     record.time_out_address = address
 
     outside, geofence_note, photo_label = check_attendance_geofence(
-        latitude, longitude
+        db, latitude, longitude, employee_id
     )
     flag_side_for_geofence(record, "time_out", outside, geofence_note)
+    apply_short_duty(db, record)
 
     # Work accomplished (asked when their head's Org Chart unit ticks it).
     head_id, proof, missing_proof = check_work_report(
@@ -1708,21 +1753,23 @@ def kiosk_selfie_attendance(
 
     nearest_location, distance_meters, is_allowed_location = (
         find_nearest_allowed_attendance_location(
+            db,
             latitude,
             longitude,
+            employee_id,
         )
     )
 
     logger.info(
         f"LOCATION CHECK | "
-        f"NEAREST={nearest_location['name']} | "
-        f"DISTANCE={round(distance_meters, 2)}"
+        f"NEAREST={nearest_location['name'] if nearest_location else None} | "
+        f"DISTANCE={round(distance_meters, 2) if distance_meters is not None else None}"
     )
 
     # Outside the allowed area is still accepted -- it's flagged for
     # review below instead of refused.
     outside_geofence, geofence_note, photo_label = check_attendance_geofence(
-        latitude, longitude
+        db, latitude, longitude, employee_id
     )
 
     now = datetime.utcnow()
@@ -1833,7 +1880,9 @@ def kiosk_selfie_attendance(
         record.time_out_face_checked_at = face_result["checked_at"]
 
     flag_side_for_geofence(record, action, outside_geofence, geofence_note)
+    short_note = None
     if action == "time_out":
+        short_note = apply_short_duty(db, record)
         review_time_out(db, record, head_id, missing_proof)
         save_work_proof(
             db, file_service, record, proof, photo_label, latitude, longitude, None
@@ -1859,13 +1908,16 @@ def kiosk_selfie_attendance(
     logger.info("KIOSK ATTENDANCE SUCCESS")
 
     done = "Time in successful." if action == "time_in" else "Time out successful."
+    notes = []
+    if outside_geofence:
+        notes.append("You are outside the allowed attendance area, so this was flagged for review.")
+    if short_note:
+        notes.append(
+            "This is shorter than your minimum hours of duty, so today counts as "
+            "Absent until your head approves it."
+        )
     return {
-        "message": (
-            f"{done} You are outside the allowed attendance area, so this "
-            "was flagged for review."
-            if outside_geofence
-            else done
-        ),
+        "message": " ".join([done, *notes]),
         "outside_geofence": outside_geofence,
         "geofence_note": geofence_note,
         "attendance_id": record.id,
@@ -1875,9 +1927,10 @@ def kiosk_selfie_attendance(
         "check_out_time": format_attendance_time_only(record.check_out_time),
         "photo_url": photo_url,
         "next_action": "time_out" if action == "time_in" else "completed",
-        "distance_meters": round(distance_meters, 2),
-        "allowed_radius_meters": nearest_location["radius_meters"],
-        "nearest_allowed_location": nearest_location["name"],
+        "distance_meters": round(distance_meters, 2) if distance_meters is not None else None,
+        "allowed_radius_meters": nearest_location["radius_meters"] if nearest_location else None,
+        "nearest_allowed_location": nearest_location["name"] if nearest_location else None,
+        "short_duty": bool(short_note),
         "face_match_score": face_result["score"],
         "face_review_status": face_result["status"],
         "face_review_reason": face_result["reason"],
@@ -2091,6 +2144,13 @@ def approve_attendance(
         if acting is not None:
             setattr(attendance, f"{side}_review_step", acting)
         setattr(attendance, f"{side}_face_review_status", "APPROVED")
+        if side == "time_out" and attendance.short_duty and attendance.status == "Absent":
+            log_adjustment(
+                db, attendance, "status", "Absent", "Present", current_user,
+                "Short duty approved",
+            )
+            attendance.status = "Present"
+            message = "Approved -- the day counts as Present."
         if missed and attendance.missed_out_requested_at:
             log_adjustment(
                 db,

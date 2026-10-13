@@ -75,6 +75,11 @@ class AttendanceRecord(Base):
     missed_out_reason = Column(Text, nullable=True)
     missed_out_filed_at = Column(DateTime, nullable=True)
 
+    # Timed out sooner than their minimum hours of duty: status was set
+    # to Absent and the time out sent to the attendance approvers --
+    # approving it puts the day back to Present (see apply_short_duty).
+    short_duty = Column(Boolean, nullable=False, default=False, server_default="0")
+
     # Org chart approval chain for a side that needs review (outside the
     # geofence / face check) -- same idea as CashAdvanceRequest's
     # approval_chain: approvers in order, who's up now, and the log.

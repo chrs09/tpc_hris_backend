@@ -36,6 +36,9 @@ MODULE_GROUPS = {
         "applicants",
         "questionnaire",
         "schedule_templates",
+        # Attendance locations + perimeters, each employee's assigned
+        # locations and minimum hours of duty (app/api/attendance_locations.py).
+        "attendance_locations",
     ],
     "payroll": [
         {
