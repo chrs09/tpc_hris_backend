@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from math import ceil
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
@@ -38,6 +38,12 @@ from app.services.file_service import FileService
 # with Record Release.
 RECEIPT_DOC = "CA_RELEASE_RECEIPT"
 
+
+
+def _utc(value):
+    """Stored times are naive UTC; send them marked as UTC ("...+00:00") so
+    browsers and the phone app show Philippine time, not 8 hours early."""
+    return value.replace(tzinfo=timezone.utc).isoformat() if value else None
 
 def _receipt_url(db: Session, request_id: int) -> str | None:
     row = (
@@ -109,7 +115,7 @@ def _serialize(req: CashAdvanceRequest, db: Session) -> dict:
         "is_fully_paid": remaining <= 0,
         "reason": req.reason,
         "terms_accepted": req.terms_accepted,
-        "terms_accepted_at": req.terms_accepted_at,
+        "terms_accepted_at": _utc(req.terms_accepted_at),
         "status": req.status,
         "remarks": req.remarks,
         "requested_by_user_id": req.requested_by_user_id,
@@ -119,15 +125,15 @@ def _serialize(req: CashAdvanceRequest, db: Session) -> dict:
         "approved_by_name": (
             display_name(req.approved_by) if req.approved_by else None
         ),
-        "approved_at": req.approved_at,
+        "approved_at": _utc(req.approved_at),
         "release_reference": req.release_reference,
         "release_receipt_url": _receipt_url(db, req.id),
         "is_archived": bool(req.is_archived),
-        "released_at": req.released_at,
+        "released_at": _utc(req.released_at),
         "released_by_name": (
             req.released_by.username if req.released_by else None
         ),
-        "created_at": req.created_at,
+        "created_at": _utc(req.created_at),
         # False when the viewer's step was passed up because they're
         # absent / on leave today (see for-my-approval).
         "can_act": getattr(req, "_can_act", True),
@@ -668,7 +674,7 @@ def get_deduction_transactions(
             "recorded_by_name": (
                 log.recorded_by.username if log.recorded_by else None
             ),
-            "recorded_at": log.recorded_at,
+            "recorded_at": _utc(log.recorded_at),
         }
         for log in logs
     ]
@@ -810,7 +816,7 @@ def get_cash_advance_alerts(
         {
             "id": alert.id,
             "message": alert.message,
-            "created_at": alert.created_at,
+            "created_at": _utc(alert.created_at),
         }
         for alert in alerts
     ]
