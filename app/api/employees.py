@@ -1289,3 +1289,158 @@ async def parse_cv_endpoint(
     parsed_data = parse_cv(file.file)
 
     return api_response(parsed_data)
+
+
+# ==============================
+# Separation details (inactive employees): date clearance completed and
+# the scanned resignation letter, clearance and waiver & quitclaim, kept
+# on the latest inactive record (shown in the 201's Inactive Employee
+# Details). Files: entity_type "employee_separation", entity_id = record.
+# ==============================
+SEPARATION_ENTITY = "employee_separation"
+SEPARATION_DOCUMENTS = {
+    "RESIGNATION_LETTER": "Resignation letter",
+    "CLEARANCE": "Clearance",
+    "WAIVER_QUITCLAIM": "Waiver and quitclaim",
+}
+
+
+def _latest_inactive_record(db: Session, employee_id: int):
+    employee = db.query(Employee).filter(Employee.id == employee_id).first()
+    if not employee:
+        raise HTTPException(status_code=404, detail="Employee not found")
+    if employee.is_active == 1:
+        raise HTTPException(
+            status_code=400, detail="Separation details are for inactive employees."
+        )
+    record = (
+        db.query(EmployeeInactiveRecord)
+        .filter(EmployeeInactiveRecord.employee_id == employee_id)
+        .order_by(EmployeeInactiveRecord.created_at.desc())
+        .first()
+    )
+    if not record:
+        raise HTTPException(
+            status_code=404, detail="This employee has no inactive record."
+        )
+    return record
+
+
+def _separation_payload(db: Session, record) -> dict:
+    files = (
+        db.query(FileModel)
+        .filter(
+            FileModel.entity_type == SEPARATION_ENTITY,
+            FileModel.entity_id == record.id,
+        )
+        .order_by(FileModel.id.asc())
+        .all()
+    )
+    return {
+        "inactive_record_id": record.id,
+        "inactive_reason": record.inactive_reason,
+        "inactive_date": record.inactive_date,
+        "clearance_completed_date": record.clearance_completed_date,
+        "document_types": [
+            {"key": key, "label": label} for key, label in SEPARATION_DOCUMENTS.items()
+        ],
+        "documents": [
+            {
+                "id": f.id,
+                "document_type": f.document_type,
+                "file_url": f.file_url,
+                "uploaded_at": f.created_at,
+            }
+            for f in files
+        ],
+    }
+
+
+@router.get("/{employee_id}/separation")
+def get_separation_details(
+    employee_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(_require_employee_editor),
+):
+    return _separation_payload(db, _latest_inactive_record(db, employee_id))
+
+
+@router.patch("/{employee_id}/separation")
+def save_separation_details(
+    employee_id: int,
+    # "" clears it.
+    clearance_completed_date: str = Form(""),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(_require_employee_editor),
+):
+    record = _latest_inactive_record(db, employee_id)
+    value = (clearance_completed_date or "").strip()
+    if value:
+        try:
+            day = parse_date(value)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Use a date like 2026-10-14.")
+        if record.inactive_date and day < record.inactive_date:
+            raise HTTPException(
+                status_code=400,
+                detail="Clearance can't be completed before the inactive date.",
+            )
+        record.clearance_completed_date = day
+    else:
+        record.clearance_completed_date = None
+    db.commit()
+    return _separation_payload(db, record)
+
+
+@router.post("/{employee_id}/separation/documents")
+def upload_separation_document(
+    employee_id: int,
+    document_type: str = Form(...),
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(_require_employee_editor),
+):
+    record = _latest_inactive_record(db, employee_id)
+    if document_type not in SEPARATION_DOCUMENTS:
+        raise HTTPException(status_code=400, detail="Unknown document type.")
+    content_type = file.content_type or ""
+    if not (content_type.startswith("image/") or content_type == "application/pdf"):
+        raise HTTPException(status_code=400, detail="Upload an image or a PDF.")
+    url = FileService().upload(
+        file, f"employees/{employee_id}/separation/{document_type.lower()}"
+    )
+    db.add(
+        FileModel(
+            entity_type=SEPARATION_ENTITY,
+            entity_id=record.id,
+            document_type=document_type,
+            file_url=url,
+            uploaded_by=current_user.id,
+        )
+    )
+    db.commit()
+    return _separation_payload(db, record)
+
+
+@router.delete("/{employee_id}/separation/documents/{file_id}")
+def delete_separation_document(
+    employee_id: int,
+    file_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(_require_employee_editor),
+):
+    record = _latest_inactive_record(db, employee_id)
+    document = (
+        db.query(FileModel)
+        .filter(
+            FileModel.id == file_id,
+            FileModel.entity_type == SEPARATION_ENTITY,
+            FileModel.entity_id == record.id,
+        )
+        .first()
+    )
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found.")
+    db.delete(document)
+    db.commit()
+    return _separation_payload(db, record)

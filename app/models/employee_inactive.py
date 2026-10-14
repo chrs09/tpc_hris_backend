@@ -21,6 +21,12 @@ class EmployeeInactiveRecord(Base):
     inactive_date = Column(Date, nullable=False)
     inactive_remarks = Column(Text, nullable=True)
 
+    # Separation (HRIS -> Employees -> 201, Inactive Employee Details):
+    # when clearance was completed. The resignation letter, clearance and
+    # waiver/quitclaim scans are files with entity_type "employee_separation"
+    # and entity_id = this record (app/api/employees.py, /separation).
+    clearance_completed_date = Column(Date, nullable=True)
+
     created_by_user_id = Column(
         Integer,
         ForeignKey("tpc_users.id"),
