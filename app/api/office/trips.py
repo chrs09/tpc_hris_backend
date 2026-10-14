@@ -1,5 +1,6 @@
 # app/api/office/trips.py
 
+from app.services.vehicle_assignment import trip_unit_flags
 from datetime import datetime
 
 from fastapi import APIRouter, Body, Depends, HTTPException
@@ -115,6 +116,7 @@ def get_pending_office_review_trips(
                 "id": trip.id,
                 "trip_id": trip.id,
                 "ticket_no": trip.ticket_no,
+                **trip_unit_flags(trip),
 
                 "status": (
                     trip.status.value
@@ -499,6 +501,7 @@ def review_office_trip(
 
         "trip_id": trip.id,
         "ticket_no": trip.ticket_no,
+        **trip_unit_flags(trip),
         "status": (
             trip.status.value
             if hasattr(trip.status, "value")

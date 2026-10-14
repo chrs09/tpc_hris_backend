@@ -1,6 +1,7 @@
 from datetime import datetime
 
 from sqlalchemy import (
+    Boolean,
     Column,
     DateTime,
     Float,
@@ -41,5 +42,11 @@ class VehicleMaintenance(Base):
 
     created_by = Column(Integer, nullable=True)
     updated_by = Column(Integer, nullable=True)
+
+    # In the shop: while true the unit can't be dispatched (Trip
+    # Assignment shows why). Marked repaired -> repaired_at, unit free.
+    in_repair = Column(Boolean, nullable=False, default=False, server_default="0")
+    expected_return_date = Column(DateTime, nullable=True)
+    repaired_at = Column(DateTime, nullable=True)
 
     vehicle_unit = relationship("VehicleUnit")

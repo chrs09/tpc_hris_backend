@@ -149,6 +149,13 @@ class Trip(Base):
     # on the Active Trips Monitoring page.
     started_outside_hub_range = Column(Boolean, default=False, nullable=False)
 
+    # Trip Assignment: "Urgent" label (reports only), and why the driver
+    # took a unit other than their own (type key + readable text) -- see
+    # app/services/vehicle_assignment.py.
+    is_urgent = Column(Boolean, default=False, nullable=False, server_default="0")
+    unit_reason_type = Column(String(40), nullable=True)
+    unit_reason = Column(Text, nullable=True)
+
     # These columns already existed on the live DB (added outside of a
     # tracked migration at some point) but were never mapped on this
     # model, so the ORM never set is_archived on insert -- since it's

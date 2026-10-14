@@ -19,6 +19,9 @@ from app.models.supplier import Supplier
 from app.models.vehicle_maintenance import VehicleMaintenance
 from app.services.file_service import FileService
 from app.utils.response import api_response
+from app.models.user import UserRole
+from app.services.vehicle_assignment import open_repair, repair_info
+from app.utils.user_display import display_name
 
 ALLOWED_CR_OR_CONTENT_TYPES = {
     "image/png",
@@ -46,6 +49,95 @@ router = APIRouter(
 
 
 # VEHICLE UNITS
+def _unit_extras(db: Session, unit) -> dict:
+    """Assigned driver and repair status (Vehicle List, Trip Assignment)."""
+    driver = unit.assigned_driver
+    return {
+        "assigned_driver_id": unit.assigned_driver_id,
+        "assigned_driver_name": display_name(driver) if driver else None,
+        "is_available": bool(unit.is_available),
+        "in_repair": repair_info(open_repair(db, unit.id)),
+    }
+
+
+@router.get("/vehicle-units/drivers")
+def get_unit_drivers(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Drivers for the Vehicle List's Assigned driver picker, with the
+    unit each one has now."""
+    units = {
+        u.assigned_driver_id: u
+        for u in db.query(VehicleUnit).filter(VehicleUnit.assigned_driver_id.isnot(None))
+    }
+    drivers = (
+        db.query(User)
+        .filter(User.role == UserRole.DRIVER, User.is_active.is_(True))
+        .order_by(User.username)
+        .all()
+    )
+    return api_response(
+        [
+            {
+                "id": d.id,
+                "name": display_name(d),
+                "username": d.username,
+                "unit_id": units[d.id].id if d.id in units else None,
+                "unit_label": (
+                    units[d.id].plate_number or units[d.id].unit_code
+                    if d.id in units
+                    else None
+                ),
+            }
+            for d in drivers
+        ]
+    )
+
+
+@router.put("/vehicle-units/{unit_id}/assigned-driver")
+def set_unit_driver(
+    unit_id: int,
+    driver_id: int | None = Body(None, embed=True),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """One driver per unit and one unit per driver: giving a driver this
+    unit takes them off the unit they had."""
+    unit = db.query(VehicleUnit).filter(VehicleUnit.id == unit_id).first()
+    if not unit:
+        raise HTTPException(status_code=404, detail="Vehicle unit not found")
+    moved_from = None
+    if driver_id:
+        driver = (
+            db.query(User)
+            .filter(User.id == driver_id, User.role == UserRole.DRIVER)
+            .first()
+        )
+        if not driver:
+            raise HTTPException(status_code=400, detail="Pick a driver.")
+        previous = (
+            db.query(VehicleUnit)
+            .filter(VehicleUnit.assigned_driver_id == driver_id, VehicleUnit.id != unit_id)
+            .first()
+        )
+        if previous:
+            previous.assigned_driver_id = None
+            moved_from = previous.plate_number or previous.unit_code
+            db.flush()
+    unit.assigned_driver_id = driver_id or None
+    unit.updated_by = current_user.id
+    db.commit()
+    db.refresh(unit)
+    return api_response(
+        {
+            "message": "Assigned driver saved.",
+            "moved_from": moved_from,
+            **_unit_extras(db, unit),
+        }
+    )
+
+
 @router.get("/vehicle-units")
 def get_vehicle_units(
     db: Session = Depends(get_db),
@@ -74,6 +166,7 @@ def get_vehicle_units(
             "truck_type_id": unit.truck_type_id,
             "truck_type_name": unit.truck_type.name if unit.truck_type else None,
             "truck_type_size": unit.truck_type.size if unit.truck_type else None,
+            **_unit_extras(db, unit),
         }
         for unit in units
     ]
@@ -109,6 +202,7 @@ def get_active_vehicle_units(
             "truck_type_id": unit.truck_type_id,
             "truck_type_name": unit.truck_type.name if unit.truck_type else None,
             "truck_type_size": unit.truck_type.size if unit.truck_type else None,
+            **_unit_extras(db, unit),
         }
         for unit in units
     ]
@@ -983,6 +1077,9 @@ def _serialize_maintenance(record: VehicleMaintenance) -> dict:
         "next_due_date": record.next_due_date,
         "odometer_reading": record.odometer_reading,
         "cost": record.cost,
+        "in_repair": bool(record.in_repair),
+        "expected_return_date": record.expected_return_date,
+        "repaired_at": record.repaired_at,
     }
 
 
@@ -1013,6 +1110,9 @@ def create_vehicle_maintenance_record(
     next_due_date: datetime = Form(None),
     odometer_reading: int = Form(None),
     cost: float = Form(None),
+    # In the shop now -- blocks dispatching the unit until marked repaired.
+    in_repair: bool = Form(False),
+    expected_return_date: datetime = Form(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -1031,6 +1131,8 @@ def create_vehicle_maintenance_record(
         next_due_date=next_due_date,
         odometer_reading=odometer_reading,
         cost=cost,
+        in_repair=in_repair,
+        expected_return_date=expected_return_date if in_repair else None,
         created_by=current_user.id,
     )
 
@@ -1052,6 +1154,8 @@ def update_vehicle_maintenance_record(
     next_due_date: datetime = Form(None),
     odometer_reading: int = Form(None),
     cost: float = Form(None),
+    in_repair: bool = Form(None),
+    expected_return_date: datetime = Form(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -1076,6 +1180,12 @@ def update_vehicle_maintenance_record(
         record.odometer_reading = odometer_reading
     if cost is not None:
         record.cost = cost
+    if expected_return_date is not None:
+        record.expected_return_date = expected_return_date
+    if in_repair is not None and in_repair != bool(record.in_repair):
+        record.in_repair = in_repair
+        # Marked repaired: the unit can be dispatched again.
+        record.repaired_at = None if in_repair else datetime.utcnow()
 
     record.updated_by = current_user.id
     record.updated_at = datetime.utcnow()

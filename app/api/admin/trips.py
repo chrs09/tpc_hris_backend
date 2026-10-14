@@ -53,6 +53,7 @@ from app.api.driver.trips import (
 )
 from app.models.vehicle_unit import VehicleUnit
 from app.models.TripRate import TripRateProfile
+from app.services.vehicle_assignment import check_unit_for_trip, trip_unit_flags
 from pydantic import BaseModel
 import json
 
@@ -282,6 +283,7 @@ def get_pending_trips(
             "username": trip.driver.username,
             "return_reason": return_reasons.get(trip.id),
             "is_manual_entry": trip.id in manual_ids,
+            **trip_unit_flags(trip),
             "awaiting_manual_approval": (
                 trip.status == TripStatus.PENDING_MANUAL_APPROVAL
             ),
@@ -472,6 +474,7 @@ def get_approval_pipeline(
                 "status_label": PIPELINE_STATUSES[trip.status],
                 "status_since": fmt(stage_at),
                 "is_manual_entry": trip.id in manual_ids,
+                **trip_unit_flags(trip),
                 "returned": bool(
                     review
                     and review.status == FinanceReviewStatus.RETURNED
@@ -546,6 +549,7 @@ def get_active_trips(
                     _display_name(trip.dispatched_by) if trip.dispatched_by else None
                 ),
                 "started_outside_hub_range": trip.started_outside_hub_range,
+                **trip_unit_flags(trip),
             }
         )
 
@@ -617,6 +621,7 @@ def get_assigned_trips(
                 # Once the driver has begun Checkout, photos are attached,
                 # so the dispatch details are frozen.
                 "editable": trip.current_step == "ASSIGNED",
+                **trip_unit_flags(trip),
                 "driver_id": trip.driver_id,
                 "vehicle_unit_id": trip.vehicle_unit_id,
                 "origin_store_id": trip.origin_store_id,
@@ -846,6 +851,10 @@ class AssignedTripUpdate(BaseModel):
     shipment_stores: dict[str, int] = {}
     helper_ids: list[int] = []
     reason: str | None = None
+    # Unit other than the driver's own: why. Urgent: label only.
+    unit_reason_type: str | None = None
+    unit_reason_note: str | None = None
+    is_urgent: bool | None = None
 
 
 @router.put("/{trip_id}/assignment")
@@ -995,6 +1004,11 @@ def update_assigned_trip(
         vehicle.id != trip.vehicle_unit_id and not vehicle.is_available
     ):
         raise HTTPException(status_code=400, detail="Selected vehicle is unavailable.")
+    unit_changed = vehicle.id != trip.vehicle_unit_id or driver.id != trip.driver_id
+    if unit_changed:
+        new_reason_type, new_reason = check_unit_for_trip(
+            db, driver.id, vehicle, payload.unit_reason_type, payload.unit_reason_note
+        )
 
     origin = db.query(Store).filter(Store.id == payload.origin_store_id).first()
     # Any location: hub, supplier (pick-up) or customer (e.g. returns).
@@ -1039,10 +1053,16 @@ def update_assigned_trip(
         changes.append("shipment stores")
     if set(payload.helper_ids) != current_helper_ids:
         changes.append("helpers")
+    if payload.is_urgent is not None and bool(payload.is_urgent) != bool(trip.is_urgent):
+        changes.append("urgent")
     if not changes:
         raise HTTPException(status_code=400, detail="No changes to save.")
 
     # ---- apply
+    if unit_changed:
+        trip.unit_reason_type, trip.unit_reason = new_reason_type, new_reason
+    if payload.is_urgent is not None:
+        trip.is_urgent = bool(payload.is_urgent)
     if vehicle.id != trip.vehicle_unit_id:
         if trip.vehicle_unit:
             trip.vehicle_unit.is_available = True
@@ -1698,6 +1718,7 @@ def review_trip(
         "ticket_no": trip.ticket_no,
         "trip_code": trip.trip_code,
         "current_step": trip.current_step,
+        **trip_unit_flags(trip),
         "current_step_label": _current_step_label(trip.current_step),
         "current_stop": _current_stop_name(db, trip),
         "is_manual_entry": bool(_manual_entry_trip_ids(db, [trip.id])),

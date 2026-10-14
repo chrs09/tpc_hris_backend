@@ -15,6 +15,7 @@ from app.models.gps_log import GPSLog
 from app.models.files import File
 from app.utils.timezone import utc_to_ph
 from app.services.trip_remarks import serialize_trip_remarks
+from app.services.vehicle_assignment import trip_unit_flags
 from app.api.driver.trips import shipments_for_store
 
 router = APIRouter(prefix="/finance/trips", tags=["Finance Trips"])
@@ -107,6 +108,7 @@ def get_finance_trips(
             "trip_id": review.trip.id,
             "shipment_number": review.trip.ticket_no,
             "ticket_no": review.trip.ticket_no,
+            **trip_unit_flags(review.trip),
 
             # FinanceReviewCard uses this field.
             "status": review.status.value,
@@ -313,6 +315,7 @@ def get_finance_trip_detail(
         "trip_id": trip.id,
         "shipment_number": trip.ticket_no,
         "ticket_no": trip.ticket_no,
+        **trip_unit_flags(trip),
         "status": review.status.value,
         "driver_first_name": (
             trip.driver.employee.first_name if trip.driver.employee else "-"

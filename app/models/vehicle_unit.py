@@ -94,6 +94,14 @@ class VehicleUnit(Base):
         nullable=True,
     )
 
+    # The driver this unit belongs to (one each way). Trip Assignment
+    # picks it automatically; dispatching anyone else in it -- or this
+    # driver in another unit -- needs a reason (app/services/vehicle_assignment.py).
+    assigned_driver_id = Column(
+        Integer, ForeignKey("tpc_users.id"), nullable=True, unique=True
+    )
+    assigned_driver = relationship("User", foreign_keys=[assigned_driver_id])
+
     truck_type = relationship("TruckType", back_populates="vehicle_units")
 
     trips = relationship(

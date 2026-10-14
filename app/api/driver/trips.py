@@ -34,6 +34,7 @@ from app.models.app_setting import AppSetting
 from app.services.gps_service import calculate_distance_meters, find_nearest_store
 from app.services.notification_service import create_notification
 from app.services.trip_rates import load_rules, resolve_trip_rates
+from app.services.vehicle_assignment import check_unit_for_trip
 from app.services.trip_payroll_service import (
     to_ph,
     now_ph,
@@ -726,6 +727,11 @@ def dispatch_trip(
     # JSON {"<shipment no>": <store id>}; required with 2+ stores.
     shipment_stores: str = Form(""),
     helper_ids: str = Form("[]"),
+    # Unit other than the driver's own: why (see vehicle_assignment.py).
+    unit_reason_type: str = Form(""),
+    unit_reason_note: str = Form(""),
+    # Label for reports only.
+    is_urgent: bool = Form(False),
     db: Session = Depends(get_db),
     current_user=Depends(_require_dispatch),
 ):
@@ -885,6 +891,10 @@ def dispatch_trip(
     )
     if not vehicle:
         raise HTTPException(status_code=400, detail="Selected vehicle is unavailable.")
+    # In repair = blocked; not the driver's own unit = reason required.
+    unit_reason_type, unit_reason = check_unit_for_trip(
+        db, target_user.id, vehicle, unit_reason_type, unit_reason_note
+    )
 
     origin_store = db.query(Store).filter(Store.id == origin_store_id).first()
     # Any location: hub, supplier (pick-up) or customer (e.g. returns).
@@ -927,6 +937,9 @@ def dispatch_trip(
             status=TripStatus.ASSIGNED,
             current_step="ASSIGNED",
             dispatched_by_user_id=current_user.id,
+            is_urgent=bool(is_urgent),
+            unit_reason_type=unit_reason_type,
+            unit_reason=unit_reason,
         )
         db.add(new_trip)
         db.flush()
