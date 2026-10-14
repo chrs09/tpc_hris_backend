@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from math import ceil
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
@@ -114,6 +115,7 @@ def _serialize(req: CashAdvanceRequest, db: Session) -> dict:
         "remaining_balance": max(remaining, 0),
         "is_fully_paid": remaining <= 0,
         "reason": req.reason,
+        "date_needed": req.date_needed.isoformat() if req.date_needed else None,
         "terms_accepted": req.terms_accepted,
         "terms_accepted_at": _utc(req.terms_accepted_at),
         "status": req.status,
@@ -176,6 +178,9 @@ def file_cash_advance_request(
             status_code=403,
             detail="Superadmin accounts cannot file cash advance requests.",
         )
+    today_ph = datetime.now(ZoneInfo("Asia/Manila")).date()
+    if payload.date_needed and payload.date_needed < today_ph:
+        raise HTTPException(status_code=400, detail="Date Needed can't be in the past.")
 
     if payload.amount <= 0:
         raise HTTPException(status_code=400, detail="Amount must be greater than 0.")
@@ -303,6 +308,7 @@ def file_cash_advance_request(
         deduction_option_id=option.id,
         deduction_per_pay_amount=option.amount,
         reason=payload.reason,
+        date_needed=payload.date_needed,
         terms_accepted=bool(payload.terms_accepted),
         terms_accepted_at=(
             datetime.utcnow() if payload.terms_accepted else None

@@ -1,3 +1,4 @@
+from datetime import date
 from pydantic import BaseModel
 
 
@@ -9,6 +10,8 @@ class CashAdvanceRequestCreate(BaseModel):
     deduction_option_id: int
     reason: str
     terms_accepted: bool = False
+    # When the money is needed ("Date Needed"); can't be in the past.
+    date_needed: date | None = None
 
 
 class CashAdvanceReviewAction(BaseModel):

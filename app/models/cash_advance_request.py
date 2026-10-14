@@ -3,6 +3,7 @@ from datetime import datetime
 from sqlalchemy import (
     Boolean,
     Column,
+    Date,
     DateTime,
     ForeignKey,
     Integer,
@@ -51,6 +52,10 @@ class CashAdvanceRequest(Base):
     deduction_per_pay_amount = Column(Numeric(10, 2), nullable=False)
 
     reason = Column(Text, nullable=False)
+
+    # When the driver needs the money (Date Needed on the request form).
+    # Optional so older app versions can still file.
+    date_needed = Column(Date, nullable=True)
 
     # The driver must acknowledge the current CashAdvanceTerms content
     # before filing -- recorded here so there's a record they agreed to
