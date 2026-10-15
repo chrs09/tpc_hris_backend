@@ -21,6 +21,8 @@ from app.services.file_service import FileService
 from app.utils.response import api_response
 from app.models.user import UserRole
 from app.services.vehicle_assignment import open_repair, repair_info
+from app.services.trip_rates import category_rate_changes, category_rates, load_rules
+from zoneinfo import ZoneInfo
 from app.utils.user_display import display_name
 
 ALLOWED_CR_OR_CONTENT_TYPES = {
@@ -596,6 +598,10 @@ def get_rate_profiles(
         .all()
     )
 
+    # Dated rate changes: what each category pays today, and what's set
+    # to change (Trip Categories cards / edit).
+    rules = load_rules(db)
+    today = datetime.now(ZoneInfo("Asia/Manila")).date()
     response = [
         {
             "id": profile.id,
@@ -607,6 +613,8 @@ def get_rate_profiles(
             "helper_next_trip_rate": float(profile.helper_next_trip_rate),
             "is_active": profile.is_active,
             "store_count": store_counts.get(profile.id, 0),
+            "current_rates": category_rates(profile, rules, today),
+            "rate_changes": category_rate_changes(profile, rules),
         }
         for profile in profiles
     ]

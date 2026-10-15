@@ -123,3 +123,66 @@ def resolve_trip_rates(trip, on: date | None, rules: list[TripRateRule]) -> dict
                 break
 
     return {**rates, "rate_source": source}
+
+
+def _is_category_only(rule: TripRateRule) -> bool:
+    return not (
+        rule.truck_type_id
+        or rule.origin_store_id
+        or rule.destination_area
+        or rule.destination_store_id
+    )
+
+
+def category_rates(profile, rules: list[TripRateRule], on: date) -> dict:
+    """A category's own rates on a date (no truck / lane): its base rates
+    with the dated changes in effect then. For the Trip Categories cards."""
+    facts = {
+        "trip_rate_profile_id": profile.id,
+        "truck_type_id": None,
+        "origin_store_id": None,
+        "destination_area": None,
+        "destination_store_id": None,
+    }
+    rates = {field: float(getattr(profile, field) or 0) for field in RATE_FIELDS}
+    since = None
+    ranked = sorted(
+        (
+            (score, rule)
+            for rule in rules
+            if (score := _matches(rule, facts, on)) is not None
+        ),
+        key=lambda pair: (pair[0], pair[1].effective_from, pair[1].id),
+        reverse=True,
+    )
+    for field in RATE_FIELDS:
+        for _, rule in ranked:
+            value = getattr(rule, field)
+            if value is not None:
+                rates[field] = float(value)
+                since = max(since, rule.effective_from) if since else rule.effective_from
+                break
+    return {**rates, "since": since.isoformat() if since else None}
+
+
+def category_rate_changes(profile, rules: list[TripRateRule]) -> list[dict]:
+    """This category's dated rate changes (category-only rules), newest
+    first -- the ones set from the category card."""
+    changes = [
+        rule
+        for rule in rules
+        if rule.trip_rate_profile_id == profile.id and _is_category_only(rule)
+    ]
+    changes.sort(key=lambda r: r.effective_from, reverse=True)
+    return [
+        {
+            "id": rule.id,
+            "effective_from": rule.effective_from.isoformat(),
+            **{
+                field: float(getattr(rule, field)) if getattr(rule, field) is not None else None
+                for field in RATE_FIELDS
+            },
+            "notes": rule.notes,
+        }
+        for rule in changes
+    ]
