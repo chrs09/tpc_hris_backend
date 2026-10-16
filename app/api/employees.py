@@ -831,12 +831,33 @@ async def patch_employee(
         else:
             employee.email = None
 
-    if position is not None:
-        employee.position = position
-    if department is not None:
-        employee.department = department
-    if daily_rate is not None:
-        employee.daily_rate = daily_rate
+    # Department, position, pay type and rates change only through Work
+    # History -> Record a change (effective date + reason). The 201 form
+    # still sends them; same value = fine, a different one is refused.
+    from app.services.job_history import snapshot, snapshot_equal
+
+    sent = {
+        "department": department,
+        "position": position,
+        "employment_type": employment_type,
+        "payroll_type": payroll_type,
+        "daily_rate": daily_rate,
+        "monthly_basic": monthly_basic,
+        "monthly_allow": monthly_allow,
+        "schedule_template_id": schedule_template_id,
+    }
+    current = snapshot(employee)
+    wanted = {**current, **{k: v for k, v in sent.items() if v is not None}}
+    if not snapshot_equal(current, wanted):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Department, position, pay type, rates and work schedule are changed "
+                "in Work History -> Record a change (with an effective date)."
+            ),
+        )
+    position = department = daily_rate = monthly_basic = monthly_allow = None
+    employment_type = payroll_type = schedule_template_id = None
 
     if monthly_basic is not None:
         employee.monthly_basic = monthly_basic
@@ -1444,3 +1465,121 @@ def delete_separation_document(
     db.delete(document)
     db.commit()
     return _separation_payload(db, record)
+
+
+
+# ==============================
+# Work History (internal): department / position / pay changes with an
+# effective date -- app/services/job_history.py.
+# ==============================
+from pydantic import BaseModel as _BaseModel  # noqa: E402
+
+from app.models.employee_job_change import EmployeeJobChange  # noqa: E402
+from app.services import job_history  # noqa: E402
+
+
+class JobChangeIn(_BaseModel):
+    effective_date: str
+    reason: str
+    department: str | None = None
+    position: str | None = None
+    employment_type: str | None = None
+    payroll_type: str | None = None
+    daily_rate: float | None = None
+    monthly_basic: float | None = None
+    monthly_allow: float | None = None
+    schedule_template_id: int | None = None
+
+
+def _job_row(row: EmployeeJobChange) -> dict:
+    return {
+        "id": row.id,
+        "effective_date": row.effective_date.isoformat(),
+        "kind": row.kind,
+        "status": row.status,
+        **job_history.snapshot(row),
+        "schedule_template_name": row.schedule_template.name if row.schedule_template else None,
+        "reason": row.reason,
+        "created_by": row.created_by.username if row.created_by else None,
+        "created_at": row.created_at.isoformat() + "Z" if row.created_at else None,
+    }
+
+
+def _history_payload(db: Session, employee: Employee) -> dict:
+    rows = (
+        db.query(EmployeeJobChange)
+        .filter(EmployeeJobChange.employee_id == employee.id)
+        .order_by(EmployeeJobChange.effective_date.desc(), EmployeeJobChange.id.desc())
+        .all()
+    )
+    return {
+        "employee_id": employee.id,
+        "today": job_history.today_ph().isoformat(),
+        "current": job_history.snapshot(employee),
+        "changes": [_job_row(r) for r in rows],
+    }
+
+
+def _employee_or_404(db: Session, employee_id: int) -> Employee:
+    employee = db.query(Employee).filter(Employee.id == employee_id).first()
+    if not employee:
+        raise HTTPException(status_code=404, detail="Employee not found")
+    return employee
+
+
+@router.get("/{employee_id}/job-history")
+def get_job_history(
+    employee_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(_require_employee_editor),
+):
+    job_history.apply_due_changes(db)
+    employee = _employee_or_404(db, employee_id)
+    job_history.ensure_starting_row(db, employee)
+    db.commit()
+    return _history_payload(db, employee)
+
+
+@router.post("/{employee_id}/job-history")
+def record_job_change(
+    employee_id: int,
+    payload: JobChangeIn,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(_require_employee_editor),
+):
+    employee = _employee_or_404(db, employee_id)
+    try:
+        effective = parse_date(payload.effective_date)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Use a date like 2026-10-20.")
+    if payload.schedule_template_id:
+        validate_schedule_template(db, payload.schedule_template_id)
+    for field in ("daily_rate", "monthly_basic", "monthly_allow"):
+        value = getattr(payload, field)
+        if value is not None and value < 0:
+            raise HTTPException(status_code=400, detail="Rates can't be negative.")
+    values = payload.model_dump(exclude={"effective_date", "reason"}, exclude_none=True)
+    job_history.record_change(db, employee, values, effective, payload.reason, current_user)
+    employee.updated_by_user_id = current_user.id
+    db.commit()
+    return _history_payload(db, employee)
+
+
+@router.delete("/{employee_id}/job-history/{change_id}")
+def cancel_job_change(
+    employee_id: int,
+    change_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(_require_employee_editor),
+):
+    employee = _employee_or_404(db, employee_id)
+    row = (
+        db.query(EmployeeJobChange)
+        .filter(EmployeeJobChange.id == change_id, EmployeeJobChange.employee_id == employee_id)
+        .first()
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Change not found.")
+    job_history.cancel_change(db, employee, row)
+    db.commit()
+    return _history_payload(db, employee)

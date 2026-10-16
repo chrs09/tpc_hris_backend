@@ -374,3 +374,22 @@ def get_trip_check(
         )
     rows.sort(key=lambda r: (r["date"], r["trip_id"]))
     return rows
+
+
+# =========================================================
+# WORK HISTORY SPLITS -- an employee whose department / pay changed inside
+# the cutoff (201 -> Work History) is paid per part: each part in the
+# department and at the pay in effect then. Government contributions and
+# cash advance are taken once, in the last part (is_last).
+# =========================================================
+@router.get("/job-segments")
+def get_job_segments(
+    start: date,
+    end: date,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(_require_payroll),
+):
+    from app.services.job_history import apply_due_changes, segments
+
+    apply_due_changes(db)
+    return {str(emp): spans for emp, spans in segments(db, start, end).items()}

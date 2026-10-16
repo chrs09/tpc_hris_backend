@@ -55,6 +55,8 @@ def _save_deduction(db: Session, payload: dict, user: User) -> PayrollDeduction:
         .filter(
             PayrollDeduction.employee_id == payload["employee_id"],
             PayrollDeduction.cutoff_period == payload["cutoff_period"],
+            PayrollDeduction.department == payload["department"],
+            PayrollDeduction.segment == (payload.get("segment") or ""),
         )
         .first()
     )
@@ -106,6 +108,7 @@ def _save_deduction(db: Session, payload: dict, user: User) -> PayrollDeduction:
         cutoff_period=payload["cutoff_period"],
         employee_id=payload["employee_id"],
         department=payload["department"],
+        segment=payload.get("segment") or "",
         gross_pay=payload["gross_pay"],
         sss_deduction=payload["sss_deduction"],
         philhealth_deduction=payload["philhealth_deduction"],

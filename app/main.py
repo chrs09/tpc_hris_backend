@@ -200,6 +200,21 @@ async def global_exception_handler(request: Request, exc: Exception):
     )
 
 
+@app.on_event("startup")
+def apply_scheduled_job_changes():
+    # Work History changes scheduled for a date that has come.
+    from app.core.database import SessionLocal
+    from app.services.job_history import apply_due_changes
+
+    db = SessionLocal()
+    try:
+        apply_due_changes(db)
+    except Exception as exc:  # never block startup
+        logger.warning("Scheduled job changes not applied: %s", exc)
+    finally:
+        db.close()
+
+
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     logger.info("REQUEST: %s %s", request.method, request.url)

@@ -55,7 +55,10 @@ def ensure_unlocked(
     if not employee_id:
         return
     employee = db.query(Employee).filter(Employee.id == employee_id).first()
-    run = locked_run(db, employee.department if employee else None, day, end)
+    # The department they were in that day (Work History), not today's.
+    from app.services.job_history import department_on
+
+    run = locked_run(db, department_on(db, employee, day), day, end)
     if run:
         raise HTTPException(
             status_code=409,

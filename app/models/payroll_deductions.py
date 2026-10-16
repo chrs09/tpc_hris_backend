@@ -30,6 +30,9 @@ class PayrollDeduction(Base):
 
     # e.g. "motorpol", "admin"
     department = Column(String(50), nullable=False)
+    # A change in the employee's department / pay inside the cutoff
+    # (Work History) splits it into parts: the part's first day, "" = whole.
+    segment = Column(String(20), nullable=False, default="", server_default="")
 
     gross_pay = Column(Numeric(12, 2), nullable=False, default=0)
     sss_deduction = Column(Numeric(12, 2), nullable=False, default=0)
@@ -51,9 +54,13 @@ class PayrollDeduction(Base):
     __table_args__ = (
         # One row per employee per cutoff — re-saving (e.g. clicking
         # Generate Payslip again) updates the row instead of duplicating it.
+        # Per department too: someone moved mid-cutoff (Work History) is
+        # paid in each department for their own days.
         UniqueConstraint(
             "employee_id",
             "cutoff_period",
-            name="uq_payroll_deductions_emp_cutoff",
+            "department",
+            "segment",
+            name="uq_payroll_deductions_emp_cutoff_dept",
         ),
     )
