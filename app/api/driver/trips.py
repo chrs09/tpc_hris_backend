@@ -840,9 +840,14 @@ def dispatch_trip(
     primary_store = stores_by_id[destination_store_ids[0]]
 
     if not primary_store.trip_rate_profile_id:
+        where = (
+            "Trip Management -> Origins (Trip category when it's a destination)"
+            if primary_store.is_hub
+            else "the store"
+        )
         raise HTTPException(
             status_code=400,
-            detail=f'"{primary_store.name}" has no trip rate profile configured. Set one on the store before dispatching to it.',
+            detail=f'"{primary_store.name}" has no trip rate profile configured. Set one on {where} before dispatching to it.',
         )
 
     trip_category = (

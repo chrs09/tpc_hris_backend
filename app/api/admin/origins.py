@@ -28,6 +28,9 @@ class OriginCreateRequest(BaseModel):
     latitude: float
     longitude: float
     allowed_radius_meters: int = 150
+    # Trip category (rates) when the hub is a delivery DESTINATION, e.g.
+    # a wingvan trip Consolacion -> Cebu Plant. Blank = can't be one.
+    trip_rate_profile_id: Optional[int] = None
 
 
 class OriginUpdateRequest(BaseModel):
@@ -35,6 +38,8 @@ class OriginUpdateRequest(BaseModel):
     latitude: Optional[float] = None
     longitude: Optional[float] = None
     allowed_radius_meters: Optional[int] = None
+    # 0 clears it.
+    trip_rate_profile_id: Optional[int] = None
 
 
 def _build_origin_response(store: Store) -> dict:
@@ -44,7 +49,20 @@ def _build_origin_response(store: Store) -> dict:
         "latitude": store.latitude,
         "longitude": store.longitude,
         "allowed_radius_meters": store.allowed_radius_meters,
+        "trip_rate_profile_id": store.trip_rate_profile_id,
+        "trip_rate_profile_name": (
+            store.trip_rate_profile.profile_name if store.trip_rate_profile else None
+        ),
     }
+
+
+def _check_category(db: Session, profile_id: int | None):
+    if not profile_id:
+        return
+    from app.models.TripRate import TripRateProfile
+
+    if not db.query(TripRateProfile).filter(TripRateProfile.id == profile_id).first():
+        raise HTTPException(status_code=400, detail="Trip category not found.")
 
 
 @router.get("/")
@@ -89,6 +107,7 @@ def create_origin(
     existing = db.query(Store).filter(Store.name == name).first()
     if existing:
         raise HTTPException(status_code=400, detail="A store/origin with this name already exists.")
+    _check_category(db, payload.trip_rate_profile_id)
 
     origin = Store(
         name=name,
@@ -97,6 +116,7 @@ def create_origin(
         allowed_radius_meters=payload.allowed_radius_meters,
         required_helper=0,
         is_hub=True,
+        trip_rate_profile_id=payload.trip_rate_profile_id or None,
     )
     db.add(origin)
     db.commit()
@@ -150,6 +170,9 @@ def update_origin(
                 status_code=400, detail="Allowed radius must be greater than zero."
             )
         origin.allowed_radius_meters = payload.allowed_radius_meters
+    if payload.trip_rate_profile_id is not None:
+        _check_category(db, payload.trip_rate_profile_id)
+        origin.trip_rate_profile_id = payload.trip_rate_profile_id or None
 
     db.commit()
     db.refresh(origin)

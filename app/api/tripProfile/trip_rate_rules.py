@@ -85,12 +85,18 @@ def list_rate_rules(
                 .order_by(Store.is_hub.desc(), Store.is_supplier.desc(), Store.name)
                 .all()
             ],
-            # To: any outlet (customers and supplier locations).
+            # To: any outlet -- customers, suppliers and hubs (e.g. a
+            # wingvan trip Consolacion -> Cebu Plant).
             "destinations": [
-                {"id": s.id, "name": s.name, "area": s.area, "is_supplier": s.is_supplier}
+                {
+                    "id": s.id,
+                    "name": s.name,
+                    "area": s.area,
+                    "is_supplier": s.is_supplier,
+                    "is_hub": s.is_hub,
+                }
                 for s in db.query(Store)
-                .filter(Store.is_hub.is_(False))
-                .order_by(Store.name)
+                .order_by(Store.is_hub.desc(), Store.name)
                 .all()
             ],
             "areas": areas,
