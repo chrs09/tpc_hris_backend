@@ -45,6 +45,7 @@ def _serialize(req: FuelRequest) -> dict:
         "plate_number": req.plate_number,
         "city": req.city,
         "odo_photo_url": req.odo_photo_url,
+        "odometer_reading": req.odometer_reading,
         "fuel_code": req.fuel_code,
         "liters": float(req.liters) if req.liters is not None else None,
         "issued_by": display_name(req.issued_by) if req.issued_by else None,
@@ -97,6 +98,8 @@ def create_fuel_request(
     plate_number: str = Form(...),
     city: str = Form(...),
     odo_photo: UploadFile = File(...),
+    # Odometer reading in km (typed; the photo is the proof).
+    odometer_reading: int | None = Form(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -110,6 +113,8 @@ def create_fuel_request(
     if not city:
         raise HTTPException(status_code=400, detail="City is required.")
     _require_image(odo_photo, "Odometer photo")
+    if odometer_reading is not None and not 0 <= odometer_reading <= 9_999_999:
+        raise HTTPException(status_code=400, detail="Enter a valid odometer reading.")
 
     open_request = (
         db.query(FuelRequest.id)
@@ -131,6 +136,7 @@ def create_fuel_request(
         plate_number=plate_number,
         city=city,
         odo_photo_url="",
+        odometer_reading=odometer_reading,
         status="pending",
     )
     db.add(req)

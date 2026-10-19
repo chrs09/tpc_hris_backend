@@ -1,4 +1,6 @@
+import hashlib
 import os
+import secrets
 import uuid
 import mimetypes
 from io import BytesIO
@@ -40,23 +42,43 @@ def _watermark_timestamp(
         image = ImageOps.exif_transpose(image)
         image = image.convert("RGB")
 
-        lines = [
-            utc_to_ph(datetime.utcnow()).strftime("%b %d, %Y %I:%M %p") + " PHT"
-        ]
-        if lat is not None and long is not None:
-            lines.append(f"GPS: {lat:.6f}, {long:.6f}")
-        if geofence_label:
-            lines.append(geofence_label)
+        captured_utc = datetime.utcnow()
+        captured_ph = utc_to_ph(captured_utc)
+        stamp_time = captured_ph.strftime("%b %d, %Y %I:%M %p")
 
-        # Panel with the logo + "Captured By: Tytan Prime System" in the
-        # lower-right corner (look: app/services/watermark.py).
+        # This photo's own code: on the stamp and in the faint pattern over
+        # the whole photo, and recorded with the file's SHA-256 (PhotoSeal)
+        # so a cropped / edited / re-pasted copy can be told apart.
+        ref = _new_photo_ref()
+        info = {
+            "when": captured_ph.strftime("%A, %m/%d/%Y %I:%M %p") + " GMT+08:00",
+            "label": geofence_label,
+            "ref": ref,
+            "tile_text": f"TYTAN PRIME · {ref} · {stamp_time}",
+        }
+        if lat is not None and long is not None:
+            info["lat"], info["lng"] = lat, long
+            # Map with a pin + street address (OpenStreetMap, cached; any
+            # failure just leaves them out).
+            from app.services.map_snapshot import map_thumbnail, reverse_geocode
+
+            place = reverse_geocode(lat, long)
+            if place:
+                info["title"], info["address"] = place.get("title"), place.get("address")
+            info["map"] = map_thumbnail(lat, long)
+
+        # GPS-camera style stamp + the pattern (look: app/services/watermark.py).
         from app.services.watermark import stamp
 
-        image = stamp(image, lines)
+        image = stamp(image, info)
 
         buffer = BytesIO()
         image.save(buffer, format="JPEG", quality=90)
+        data = buffer.getvalue()
         buffer.seek(0)
+        file._seal_id = _save_photo_seal(
+            ref, hashlib.sha256(data).hexdigest(), captured_utc, lat, long, geofence_label
+        )
 
         file.file = buffer
         return file
@@ -66,6 +88,57 @@ def _watermark_timestamp(
         except Exception:
             pass
         return file
+
+
+def _new_photo_ref() -> str:
+    # e.g. TP-7F3K-92QD (no 0/O/1/I to keep it easy to read out)
+    alphabet = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
+    code = "".join(secrets.choice(alphabet) for _ in range(8))
+    return f"TP-{code[:4]}-{code[4:]}"
+
+
+def _save_photo_seal(ref, sha256, captured_utc, lat, long, label):
+    """Records the stamped photo (own session: callers commit their own
+    work separately). Never blocks the upload -- returns the id or None."""
+    try:
+        from app.core.database import SessionLocal
+        from app.models.photo_seal import PhotoSeal
+
+        db = SessionLocal()
+        try:
+            seal = PhotoSeal(
+                ref=ref,
+                sha256=sha256,
+                captured_at=captured_utc,
+                latitude=lat,
+                longitude=long,
+                label=label,
+            )
+            db.add(seal)
+            db.commit()
+            return seal.id
+        finally:
+            db.close()
+    except Exception:
+        return None
+
+
+def _attach_seal_url(file, url):
+    seal_id = getattr(file, "_seal_id", None)
+    if not seal_id or not url:
+        return
+    try:
+        from app.core.database import SessionLocal
+        from app.models.photo_seal import PhotoSeal
+
+        db = SessionLocal()
+        try:
+            db.query(PhotoSeal).filter(PhotoSeal.id == seal_id).update({"file_url": url})
+            db.commit()
+        finally:
+            db.close()
+    except Exception:
+        pass
 
 
 class FileService:
@@ -91,12 +164,14 @@ class FileService:
 
     def upload(self, file, folder_path):
         if self.storage == "azure":
-            return self._upload_azure(file, folder_path)
-
-        if self.storage == "s3":
-            return self._upload_s3(file, folder_path)
-
-        return self._upload_local(file, folder_path)
+            url = self._upload_azure(file, folder_path)
+        elif self.storage == "s3":
+            url = self._upload_s3(file, folder_path)
+        else:
+            url = self._upload_local(file, folder_path)
+        # A stamped photo: remember where it's stored (Verify Photo).
+        _attach_seal_url(file, url)
+        return url
 
     # ===============================
     # LOCAL STORAGE

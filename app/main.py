@@ -38,6 +38,7 @@ from app.api import (
 from app.api.payroll import overtime_approval, payroll_cutoffs, payroll_deductions, payroll_runs
 from app.api import schedule_template as schedule_template_router
 from app.api import attendance_locations as attendance_locations_router
+from app.api import photo_verify as photo_verify_router
 from app.api.driver import trips
 from app.api.admin import trips as admin_trips
 from app.api.admin import trip_bypass as admin_trip_bypass
@@ -283,6 +284,7 @@ app.include_router(payroll_cutoffs.router, prefix="/api")
 app.include_router(payroll_runs.router, prefix="/api")
 app.include_router(schedule_template_router.router, prefix="/api")
 app.include_router(attendance_locations_router.router, prefix="/api")
+app.include_router(photo_verify_router.router, prefix="/api")
 app.include_router(trips.router, prefix="/api")
 app.include_router(trip_maintenance_router.router, prefix="/api")
 app.include_router(trip_rate_rules.router, prefix="/api")

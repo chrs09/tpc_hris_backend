@@ -27,6 +27,9 @@ from app.models.files import File as FileModel
 from app.services.file_service import FileService
 from app.models.employee_inactive import EmployeeInactiveRecord
 
+# tpc_files rows logging every Employment Files upload (history).
+FILE_HISTORY_ENTITY = "employee_file_history"
+
 router = APIRouter(prefix="/employees", tags=["Employees"])
 
 # Changing employee records: admin role by default, or anyone granted
@@ -694,6 +697,18 @@ async def create_employee(
         for file, doc_type in zip(files, document_types):
             file_url = file_service.upload(file, f"employees/{employee.id}")
 
+            # Upload history (Employment Files -> click a tile). Separate
+            # entity so the single "current" row per type stays as is.
+            db.add(
+                FileModel(
+                    entity_type=FILE_HISTORY_ENTITY,
+                    entity_id=employee.id,
+                    document_type=doc_type,
+                    file_url=file_url,
+                    uploaded_by=current_user.id,
+                )
+            )
+
             existing = (
                 db.query(FileModel)
                 .filter_by(
@@ -1222,6 +1237,9 @@ async def patch_employee(
         "ACCOUNTABILITY",
         "ID_FILE",
         "LICENSE",
+        # Drivers: back of the license and police clearance.
+        "LICENSE_BACK",
+        "POLICE_CLEARANCE",
         "HEALTHCARD",
         "XRAY",
         "SSS",
@@ -1245,6 +1263,18 @@ async def patch_employee(
                 )
 
             file_url = file_service.upload(file, f"employees/{employee.id}")
+
+            # Upload history (Employment Files -> click a tile). Separate
+            # entity so the single "current" row per type stays as is.
+            db.add(
+                FileModel(
+                    entity_type=FILE_HISTORY_ENTITY,
+                    entity_id=employee.id,
+                    document_type=doc_type,
+                    file_url=file_url,
+                    uploaded_by=current_user.id,
+                )
+            )
 
             existing = (
                 db.query(FileModel)
@@ -1273,6 +1303,63 @@ async def patch_employee(
     db.commit()
 
     return api_response({"message": "Employee updated successfully"})
+
+
+# ==============================
+# Employment Files: upload history of one document type
+# ==============================
+@router.get("/{employee_id}/files/history")
+def get_employee_file_history(
+    employee_id: int,
+    document_type: str = Query(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    employee = db.query(Employee).filter(Employee.id == employee_id).first()
+    if not employee:
+        raise HTTPException(status_code=404, detail="Employee not found")
+
+    current = (
+        db.query(FileModel)
+        .filter_by(entity_type="employee", entity_id=employee.id, document_type=document_type)
+        .first()
+    )
+    rows = (
+        db.query(FileModel)
+        .filter_by(
+            entity_type=FILE_HISTORY_ENTITY,
+            entity_id=employee.id,
+            document_type=document_type,
+        )
+        .order_by(FileModel.id.desc())
+        .all()
+    )
+    entries = [(r.id, r.file_url, r.uploaded_by, r.created_at) for r in rows]
+    # Uploaded before history was kept: show the current file as the oldest.
+    if current and current.file_url not in {r.file_url for r in rows}:
+        entries.append((current.id, current.file_url, current.uploaded_by, current.created_at))
+
+    user_ids = {e[2] for e in entries if e[2]}
+    names = (
+        {u.id: u.username for u in db.query(User).filter(User.id.in_(user_ids)).all()}
+        if user_ids
+        else {}
+    )
+    return api_response(
+        {
+            "document_type": document_type,
+            "items": [
+                {
+                    "id": file_id,
+                    "file_url": url,
+                    "uploaded_by": names.get(uploader),
+                    "uploaded_at": created.isoformat() + "+00:00" if created else None,
+                    "is_current": bool(current and url == current.file_url),
+                }
+                for file_id, url, uploader, created in entries
+            ],
+        }
+    )
 
 
 # ==============================

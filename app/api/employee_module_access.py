@@ -99,6 +99,8 @@ MODULE_GROUPS = {
         "error_logs",
         "tickets",
         "settings",
+        # Check a photo is an original system photo (app/api/photo_verify.py).
+        "photo_verification",
     ],
 }
 

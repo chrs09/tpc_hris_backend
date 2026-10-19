@@ -30,6 +30,9 @@ class FuelRequest(Base):
     plate_number = Column(String(50), nullable=False)
     city = Column(String(120), nullable=False)
     odo_photo_url = Column(String(500), nullable=False)
+    # Odometer reading (km) typed by the driver, next to the photo.
+    # Optional so older app versions can still send requests.
+    odometer_reading = Column(Integer, nullable=True)
 
     status = Column(String(30), nullable=False, default="pending", index=True)
 
