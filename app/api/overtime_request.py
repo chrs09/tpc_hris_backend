@@ -870,3 +870,76 @@ def reject_overtime_request(
     db.commit()
     db.refresh(request)
     return _serialize(request)
+
+
+# =========================================================
+# MY APPROVAL HISTORY -- overtime this person approved or rejected (their
+# own step in the chain, or the final say), newest first, with where the
+# request stands now. Approvals -> Overtime -> History.
+# =========================================================
+@router.get("/reviewed-by-me")
+def get_overtime_reviewed_by_me(
+    start: date | None = None,
+    end: date | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    from sqlalchemy import or_
+
+    end = end or now_ph().date()
+    start = start or (end - timedelta(days=60))
+    marker = f'"user_id": {current_user.id},'
+    candidates = (
+        db.query(OvertimeRequest)
+        .options(joinedload(OvertimeRequest.employee), joinedload(OvertimeRequest.requested_by))
+        .filter(
+            OvertimeRequest.ot_date >= start,
+            OvertimeRequest.ot_date <= end,
+            or_(
+                OvertimeRequest.approval_log.like(f"%{marker}%"),
+                OvertimeRequest.approved_by_user_id == current_user.id,
+            ),
+        )
+        .all()
+    )
+
+    rows = []
+    for req in candidates:
+        mine = [
+            entry
+            for entry in load_json_list(req.approval_log)
+            if entry.get("user_id") == current_user.id
+            and entry.get("action") in ("approved", "rejected")
+        ]
+        if mine:
+            last = mine[-1]
+            action, at, hours, remarks = (
+                last.get("action"),
+                last.get("at"),
+                last.get("approved_hours"),
+                last.get("remarks"),
+            )
+        elif req.approved_by_user_id == current_user.id and req.status in ("approved", "rejected"):
+            # Before approval logs: only the final decision was kept.
+            action = req.status
+            at = to_ph(req.approved_at).strftime("%Y-%m-%d %I:%M %p") if req.approved_at else None
+            hours, remarks = req.approved_hours, req.remarks
+        else:
+            continue
+        rows.append(
+            {
+                **_serialize(req),
+                "my_action": action,
+                "my_action_at": at,
+                "my_approved_hours": hours,
+                "my_remarks": remarks,
+            }
+        )
+    def _when(row):
+        try:
+            return datetime.strptime(row["my_action_at"] or "", "%Y-%m-%d %I:%M %p")
+        except ValueError:
+            return datetime.min
+
+    rows.sort(key=lambda r: (_when(r), r["id"]), reverse=True)
+    return {"start": str(start), "end": str(end), "items": rows}
