@@ -34,6 +34,14 @@ class TripStop(Base):
     lat_out = Column(Float, nullable=True)
     long_out = Column(Float, nullable=True)
 
+    # GPS when the driver took the unloading photo -- they unload at the
+    # store itself, so these points set the store's coordinates
+    # (app/services/store_location.py).
+    lat_unload = Column(Float, nullable=True)
+    long_unload = Column(Float, nullable=True)
+    unload_accuracy_m = Column(Float, nullable=True)
+    unload_at = Column(DateTime, nullable=True)
+
     requires_review = Column(Boolean, default=False)
 
     created_at = Column(DateTime, default=datetime.utcnow)

@@ -899,17 +899,61 @@ def get_my_attendance_today(
     }
 
 
+@router.get("/my-cutoffs")
+def get_my_cutoffs(
+    count: int = 12,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """The logged-in employee's payroll cutoffs (their department's rule
+    on Payroll Cutoffs), current first, going back `count` periods -- for
+    the "My Attendance Records" cutoff dropdown."""
+    from app.services.payroll_cutoffs import employee_cutoff
+
+    employee = (
+        db.query(Employee).filter(Employee.id == current_user.employee_id).first()
+        if current_user.employee_id
+        else None
+    )
+    if not employee:
+        return []
+    today = datetime.now(ZoneInfo("Asia/Manila")).date()
+    periods = []
+    day = today
+    for i in range(max(1, min(count, 36))):
+        start, end = employee_cutoff(db, employee, day)
+        same_year = start.year == end.year
+        label = (
+            f"{start:%b %d} – {end:%b %d, %Y}"
+            if same_year
+            else f"{start:%b %d, %Y} – {end:%b %d, %Y}"
+        )
+        periods.append(
+            {
+                "start": start.isoformat(),
+                "end": end.isoformat(),
+                "label": label,
+                "is_current": i == 0,
+            }
+        )
+        day = start - timedelta(days=1)
+    return periods
+
+
 @router.get("/my-history")
 def get_my_attendance_history(
     month: str | None = None,
+    # A cutoff (or any range) instead of a month: "YYYY-MM-DD".
+    start: date | None = None,
+    end: date | None = None,
     limit: int = 60,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """Attendance history for the logged-in user's own employee record.
 
-    `month` is an optional "YYYY-MM" filter; defaults to the current
-    PH-timezone month when omitted.
+    `start`/`end` (a payroll cutoff) win over `month` ("YYYY-MM"), which
+    defaults to the current PH-timezone month when neither is given.
     """
     if not current_user.employee_id:
         raise HTTPException(
@@ -917,7 +961,11 @@ def get_my_attendance_history(
             detail="User account is not linked to an employee.",
         )
 
-    if month:
+    if start and end:
+        if end < start or (end - start).days > 62:
+            raise HTTPException(status_code=400, detail="Pick a range of 62 days or fewer.")
+        period_start, period_end = start, end + timedelta(days=1)
+    elif month:
         try:
             year_str, month_str = month.split("-")
             period_start = date(int(year_str), int(month_str), 1)
@@ -926,10 +974,11 @@ def get_my_attendance_history(
     else:
         period_start = datetime.now(ZoneInfo("Asia/Manila")).date().replace(day=1)
 
-    if period_start.month == 12:
-        period_end = date(period_start.year + 1, 1, 1)
-    else:
-        period_end = date(period_start.year, period_start.month + 1, 1)
+    if not (start and end):
+        if period_start.month == 12:
+            period_end = date(period_start.year + 1, 1, 1)
+        else:
+            period_end = date(period_start.year, period_start.month + 1, 1)
 
     records = (
         db.query(AttendanceRecord)

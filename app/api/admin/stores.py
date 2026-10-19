@@ -653,10 +653,16 @@ def update_store(
     if payload.outlet_number is not None:
         store.outlet_number = payload.outlet_number
 
-    if payload.latitude is not None:
-        store.latitude = payload.latitude
-    if payload.longitude is not None:
-        store.longitude = payload.longitude
+    # A coordinate change by hand is logged in Location history.
+    new_lat = payload.latitude if payload.latitude is not None else store.latitude
+    new_long = payload.longitude if payload.longitude is not None else store.longitude
+    if (new_lat, new_long) != (store.latitude, store.longitude) and not (new_lat == 0 and new_long == 0):
+        from app.services.store_location import set_location
+
+        set_location(db, store, new_lat, new_long, "MANUAL", user=current_admin)
+    else:
+        store.latitude = new_lat
+        store.longitude = new_long
     if payload.allowed_radius_meters is not None:
         if payload.allowed_radius_meters <= 0:
             raise HTTPException(
@@ -746,3 +752,116 @@ def remove_store_photo(
     db.commit()
 
     return build_store_response(store)
+
+
+# =========================
+# LOCATION HISTORY -- coordinate changes (from unloading GPS, accepted
+# suggestions, edits), the recent unloading points and the measured spot
+# (app/services/store_location.py).
+# =========================
+def _fmt(dt):
+    from app.utils.timezone import utc_to_ph
+
+    return utc_to_ph(dt).strftime("%Y-%m-%d %I:%M %p") if dt else None
+
+
+def _location_payload(db: Session, store: Store) -> dict:
+    from app.models.store_location_change import StoreLocationChange
+    from app.services import store_location as sl
+
+    changes = (
+        db.query(StoreLocationChange)
+        .filter(StoreLocationChange.store_id == store.id)
+        .order_by(StoreLocationChange.created_at.desc())
+        .all()
+    )
+    points = sl.recent_points(db, store.id)
+    return {
+        "store_id": store.id,
+        "name": store.name,
+        "latitude": store.latitude if sl.has_location(store) else None,
+        "longitude": store.longitude if sl.has_location(store) else None,
+        "allowed_radius_meters": store.allowed_radius_meters,
+        "rules": {
+            "min_samples": sl.MIN_SAMPLES,
+            "min_drivers": sl.MIN_DRIVERS,
+            "cluster_radius_m": sl.CLUSTER_RADIUS_M,
+            "max_accuracy_m": sl.MAX_ACCURACY_M,
+        },
+        "suggestion": sl.suggestion(db, store),
+        "changes": [
+            {
+                "id": c.id,
+                "at": _fmt(c.created_at),
+                "source": c.source,
+                "source_label": sl.SOURCE_LABELS.get(c.source, c.source),
+                "old_latitude": c.old_latitude,
+                "old_longitude": c.old_longitude,
+                "new_latitude": c.new_latitude,
+                "new_longitude": c.new_longitude,
+                "distance_m": (
+                    int(calculate_distance_meters(c.old_latitude, c.old_longitude, c.new_latitude, c.new_longitude))
+                    if c.old_latitude is not None and c.old_longitude is not None
+                    else None
+                ),
+                "sample_count": c.sample_count,
+                "driver_count": c.driver_count,
+                "note": c.note,
+                "changed_by": c.changed_by.username if c.changed_by else None,
+            }
+            for c in changes
+        ],
+        "points": [
+            {
+                **{k: p[k] for k in ("stop_id", "trip_id", "trip_code", "lat", "long", "accuracy_m", "driver_name")},
+                "at": _fmt(p["at"]),
+                "distance_m": (
+                    int(calculate_distance_meters(p["lat"], p["long"], store.latitude, store.longitude))
+                    if sl.has_location(store)
+                    else None
+                ),
+            }
+            for p in points
+        ],
+    }
+
+
+@router.get("/{store_id}/location-history")
+def get_store_location_history(
+    store_id: int,
+    db: Session = Depends(get_db),
+    current_admin=Depends(require_role_or_module(roles=["admin", "superadmin", "coordinator_admin", "coordinator"], module_key="customers.customers")),
+):
+    store = db.query(Store).filter(Store.id == store_id).first()
+    if not store:
+        raise HTTPException(status_code=404, detail="Store not found.")
+    return _location_payload(db, store)
+
+
+@router.post("/{store_id}/use-suggested-location")
+def use_suggested_location(
+    store_id: int,
+    db: Session = Depends(get_db),
+    current_admin=Depends(require_role_or_module(roles=["admin", "superadmin", "coordinator_admin"], module_key="customers.customers")),
+):
+    from app.services import store_location as sl
+
+    store = db.query(Store).filter(Store.id == store_id).first()
+    if not store:
+        raise HTTPException(status_code=404, detail="Store not found.")
+    suggested = sl.suggestion(db, store)
+    if not suggested:
+        raise HTTPException(status_code=400, detail="There's no suggested location for this store right now.")
+    sl.set_location(
+        db,
+        store,
+        suggested["lat"],
+        suggested["long"],
+        "SUGGESTION_ACCEPTED",
+        user=current_admin,
+        samples=suggested["samples"],
+        drivers=suggested["drivers"],
+    )
+    db.commit()
+    db.refresh(store)
+    return _location_payload(db, store)

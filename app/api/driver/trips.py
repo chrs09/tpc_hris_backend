@@ -1323,6 +1323,8 @@ def start_unloading(
     lat: float = Form(...),
     long: float = Form(...),
     photo: UploadFile = File(...),
+    # GPS accuracy in meters, when the phone reports it.
+    accuracy: float | None = Form(None),
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
@@ -1350,7 +1352,18 @@ def start_unloading(
 
     stop.status = StopStatus.UNLOADING
     trip.current_step = "UNLOADING"
+    # Where they unload = where the store really is.
+    stop.lat_unload = lat
+    stop.long_unload = long
+    stop.unload_accuracy_m = accuracy
+    stop.unload_at = datetime.utcnow()
     db.flush()
+    try:
+        from app.services.store_location import update_from_unloading
+
+        update_from_unloading(db, stop.store)
+    except Exception as exc:  # never block the driver
+        logger.warning("Store location not updated from unloading: %s", exc)
 
     file_service = FileService()
     photo_url = file_service.upload_trip_unloading_photo(

@@ -68,6 +68,7 @@ from .leave_request import LeaveRequest as LeaveRequest
 from .app_setting import AppSetting as AppSetting
 from .attendance_location import AttendanceLocation as AttendanceLocation
 from .employee_job_change import EmployeeJobChange as EmployeeJobChange
+from .store_location_change import StoreLocationChange as StoreLocationChange
 from .user_revision import UserRevision as UserRevision
 from .overtime_approver import OvertimeApprover as OvertimeApprover
 from .overtime_request import OvertimeRequest as OvertimeRequest
