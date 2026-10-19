@@ -6,7 +6,7 @@ from datetime import datetime
 
 import boto3
 from azure.storage.blob import BlobServiceClient, ContentSettings
-from PIL import Image, ImageDraw, ImageFont, ImageOps
+from PIL import Image, ImageOps
 
 from app.core.config import settings
 from app.utils.timezone import utc_to_ph
@@ -22,8 +22,8 @@ def _watermark_timestamp(
     available), and a geofence/location line (e.g. "TPC Yard (42m)" or
     "Outside geofence - nearest: ...") onto the bottom-right corner of an
     uploaded photo before storage, so the stored image itself carries
-    proof of when and exactly where it was taken. Matches the same
-    watermarking done on mobile-captured photos. Only touches image
+    proof of when and exactly where it was taken (panel with the Tytan
+    Prime logo, drawn by app/services/watermark.py). Only touches image
     uploads; anything else (or any Pillow failure) passes through
     untouched rather than blocking the action."""
     try:
@@ -40,7 +40,6 @@ def _watermark_timestamp(
         image = ImageOps.exif_transpose(image)
         image = image.convert("RGB")
 
-        draw = ImageDraw.Draw(image)
         lines = [
             utc_to_ph(datetime.utcnow()).strftime("%b %d, %Y %I:%M %p") + " PHT"
         ]
@@ -49,37 +48,11 @@ def _watermark_timestamp(
         if geofence_label:
             lines.append(geofence_label)
 
-        try:
-            font = ImageFont.truetype("arial.ttf", size=max(16, image.width // 45))
-        except Exception:
-            font = ImageFont.load_default()
+        # Panel with the logo + "Captured By: Tytan Prime System" in the
+        # lower-right corner (look: app/services/watermark.py).
+        from app.services.watermark import stamp
 
-        line_metrics = []
-        max_text_w = 0
-        for line in lines:
-            bbox = draw.textbbox((0, 0), line, font=font)
-            w, h = bbox[2] - bbox[0], bbox[3] - bbox[1]
-            line_metrics.append((line, w, h))
-            max_text_w = max(max_text_w, w)
-
-        padding = 8
-        line_spacing = 4
-        total_text_h = sum(h for _, _, h in line_metrics) + line_spacing * (
-            len(line_metrics) - 1
-        )
-
-        bar_top = image.height - total_text_h - padding * 2
-        draw.rectangle([0, bar_top, image.width, image.height], fill=(0, 0, 0))
-
-        y = bar_top + padding
-        for line, w, h in line_metrics:
-            draw.text(
-                (image.width - w - padding, y),
-                line,
-                fill=(255, 255, 255),
-                font=font,
-            )
-            y += h + line_spacing
+        image = stamp(image, lines)
 
         buffer = BytesIO()
         image.save(buffer, format="JPEG", quality=90)
