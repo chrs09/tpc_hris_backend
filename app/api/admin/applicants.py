@@ -21,6 +21,12 @@ from app.models.employee_emergency import EmployeeEmergencyContact
 from app.models.employee_education import EmployeeEducation
 from app.models.employee_employment import EmployeeEmploymentHistory
 from app.models.employee_reference import EmployeeReference
+from app.models.employee_bank import EmployeeBank
+from app.services.onboarding_documents import (
+    APPLICANT_FILE_ENTITY,
+    CARRY_OVER_EXTRA,
+    ONBOARDING_DOCUMENTS,
+)
 from app.models.files import File as FileModel
 from app.models.user import User, UserRole
 from app.core.security import hash_password
@@ -112,7 +118,9 @@ def serialize_onboarding(onboarding: ApplicantOnboarding | None):
         "id": onboarding.id,
         "applicant_id": onboarding.applicant_id,
         "first_name": onboarding.first_name,
+        "middle_name": onboarding.middle_name,
         "last_name": onboarding.last_name,
+        "suffix": onboarding.suffix,
         "email": onboarding.email,
         "department": onboarding.department,
         "position": onboarding.position,
@@ -138,6 +146,9 @@ def serialize_onboarding(onboarding: ApplicantOnboarding | None):
         "philhealth": onboarding.philhealth,
         "pagibig": onboarding.pagibig,
         "tin": onboarding.tin,
+        "bank_type": onboarding.bank_type,
+        "account_name": onboarding.account_name,
+        "account_number": onboarding.account_number,
         "is_submitted": bool(onboarding.is_submitted),
         "submitted_at": onboarding.submitted_at,
         "reviewed_at": onboarding.reviewed_at,
@@ -468,6 +479,20 @@ def get_applicant_onboarding(
             "onboarding_is_submitted": bool(onboarding.is_submitted),
         },
         "onboarding": serialize_onboarding(onboarding),
+        "files": [
+            {
+                "document_type": f.document_type,
+                "label": ONBOARDING_DOCUMENTS[f.document_type][0],
+                "file_url": f.file_url,
+            }
+            for f in db.query(FileModel)
+            .filter(
+                FileModel.entity_type == APPLICANT_FILE_ENTITY,
+                FileModel.entity_id == applicant.id,
+                FileModel.document_type.in_(list(ONBOARDING_DOCUMENTS)),
+            )
+            .all()
+        ],
         "education_records": serialize_education(education_records),
         "employment_history": serialize_employment(employment_history),
         "references": serialize_references(references),
@@ -786,7 +811,9 @@ def convert_to_employee(
         # 1. Create base employee
         new_employee = Employee(
             first_name=onboarding.first_name or applicant.first_name,
+            middle_name=onboarding.middle_name or applicant.middle_name,
             last_name=onboarding.last_name or applicant.last_name,
+            suffix=onboarding.suffix or applicant.suffix,
             email=onboarding.email or applicant.email,
             position=position,
             department=department,
@@ -889,6 +916,50 @@ def convert_to_employee(
                     position=record.position,
                 )
             )
+        # 8b. Bank details
+        if onboarding.bank_type or onboarding.account_name or onboarding.account_number:
+            db.add(
+                EmployeeBank(
+                    employee_id=new_employee.id,
+                    bank_type=onboarding.bank_type,
+                    account_name=onboarding.account_name,
+                    account_number=onboarding.account_number,
+                )
+            )
+
+        # 8c. Documents (onboarding uploads + the application CV) ->
+        # Employee 201 Employment Files. The application selfie becomes
+        # the profile photo when none was uploaded.
+        applicant_files = {
+            f.document_type: f
+            for f in db.query(FileModel)
+            .filter(
+                FileModel.entity_type == APPLICANT_FILE_ENTITY,
+                FileModel.entity_id == applicant.id,
+            )
+            .all()
+        }
+        carry = {
+            doc_type: f.file_url
+            for doc_type, f in applicant_files.items()
+            if doc_type in ONBOARDING_DOCUMENTS or doc_type in CARRY_OVER_EXTRA
+        }
+        if "PROFILE_IMAGE" not in carry and "SELFIE_PHOTO" in applicant_files:
+            carry["PROFILE_IMAGE"] = applicant_files["SELFIE_PHOTO"].file_url
+        for doc_type, file_url in carry.items():
+            # "employee" = the current file; "employee_file_history" = its
+            # upload history (see app/api/employees.py FILE_HISTORY_ENTITY).
+            for entity_type in ("employee", "employee_file_history"):
+                db.add(
+                    FileModel(
+                        entity_type=entity_type,
+                        entity_id=new_employee.id,
+                        document_type=doc_type,
+                        file_url=file_url,
+                        uploaded_by=current_user.id,
+                    )
+                )
+
         # 9. Auto-generate login credentials -- username is the employee's
         # last name (deduped with a numeric suffix if already taken), and
         # the temporary password is their birthday as MMDDYY, both pulled

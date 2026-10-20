@@ -14,7 +14,9 @@ class ApplicantOnboarding(Base):
 
     # basic
     first_name = Column(String(100), nullable=True)
+    middle_name = Column(String(100), nullable=True)
     last_name = Column(String(100), nullable=True)
+    suffix = Column(String(50), nullable=True)
     email = Column(String(150), nullable=True)
     department = Column(String(100), nullable=True)
     position = Column(String(150), nullable=True)
@@ -54,6 +56,11 @@ class ApplicantOnboarding(Base):
     philhealth = Column(String(50), nullable=True)
     pagibig = Column(String(50), nullable=True)
     tin = Column(String(50), nullable=True)
+
+    # bank (same as Employee 201 -> Bank Details)
+    bank_type = Column(String(100), nullable=True)
+    account_name = Column(String(150), nullable=True)
+    account_number = Column(String(100), nullable=True)
 
     # submission tracking
     is_submitted = Column(Integer, default=0)

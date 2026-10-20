@@ -36,7 +36,9 @@ class ApplicantQuestionResponsePayload(BaseModel):
 
 class ApplicantOnboardingPayload(BaseModel):
     first_name: Optional[str] = None
+    middle_name: Optional[str] = None
     last_name: Optional[str] = None
+    suffix: Optional[str] = None
     email: Optional[EmailStr] = None
     department: Optional[str] = None
     position: Optional[str] = None
@@ -70,6 +72,10 @@ class ApplicantOnboardingPayload(BaseModel):
     philhealth: Optional[str] = None
     pagibig: Optional[str] = None
     tin: Optional[str] = None
+
+    bank_type: Optional[str] = None
+    account_name: Optional[str] = None
+    account_number: Optional[str] = None
 
     education_records: List[ApplicantEducationPayload] = Field(default_factory=list)
     employment_history: List[ApplicantEmploymentPayload] = Field(default_factory=list)

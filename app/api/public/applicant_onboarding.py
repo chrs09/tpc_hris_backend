@@ -1,7 +1,7 @@
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -12,7 +12,16 @@ from app.models.applicant_onboarding import ApplicantOnboarding
 from app.models.applicant_education import ApplicantEducation
 from app.models.applicant_employment_history import ApplicantEmploymentHistory
 from app.models.applicant_references import ApplicantReference
+from app.models.bank import Bank
+from app.models.files import File as FileModel
 from app.schemas.applicant_onboarding import ApplicantOnboardingPayload
+from app.services.file_service import FileService
+from app.services.onboarding_documents import (
+    APPLICANT_FILE_ENTITY,
+    MAX_UPLOAD_BYTES,
+    ONBOARDING_DOCUMENTS,
+    document_type_options,
+)
 
 router = APIRouter(
     prefix="/api/public/applicant-onboarding",
@@ -82,7 +91,9 @@ def serialize_onboarding(onboarding: ApplicantOnboarding | None):
         "id": onboarding.id,
         "applicant_id": onboarding.applicant_id,
         "first_name": onboarding.first_name,
+        "middle_name": onboarding.middle_name,
         "last_name": onboarding.last_name,
+        "suffix": onboarding.suffix,
         "email": onboarding.email,
         "department": onboarding.department,
         "position": onboarding.position,
@@ -119,12 +130,28 @@ def serialize_onboarding(onboarding: ApplicantOnboarding | None):
         "philhealth": onboarding.philhealth,
         "pagibig": onboarding.pagibig,
         "tin": onboarding.tin,
+        "bank_type": onboarding.bank_type,
+        "account_name": onboarding.account_name,
+        "account_number": onboarding.account_number,
         "is_submitted": bool(onboarding.is_submitted),
         "submitted_at": onboarding.submitted_at,
         "reviewed_at": onboarding.reviewed_at,
         "created_at": onboarding.created_at,
         "updated_at": onboarding.updated_at,
     }
+
+
+def serialize_onboarding_files(db: Session, applicant_id: int):
+    rows = (
+        db.query(FileModel)
+        .filter(
+            FileModel.entity_type == APPLICANT_FILE_ENTITY,
+            FileModel.entity_id == applicant_id,
+            FileModel.document_type.in_(list(ONBOARDING_DOCUMENTS)),
+        )
+        .all()
+    )
+    return [{"document_type": r.document_type, "file_url": r.file_url} for r in rows]
 
 
 def serialize_education(records):
@@ -307,7 +334,9 @@ def get_onboarding_form(
         "applicant": {
             "id": applicant.id,
             "first_name": applicant.first_name,
+            "middle_name": applicant.middle_name,
             "last_name": applicant.last_name,
+            "suffix": applicant.suffix,
             "email": applicant.email,
             "contact_number": applicant.contact_number,
             "position_applied": applicant.position_applied,
@@ -315,6 +344,15 @@ def get_onboarding_form(
             "onboarding_submitted_at": applicant.onboarding_submitted_at,
         },
         "onboarding": serialize_onboarding(onboarding),
+        "files": serialize_onboarding_files(db, applicant.id),
+        "document_types": document_type_options(),
+        "banks": [
+            b.name
+            for b in db.query(Bank)
+            .filter(Bank.is_active.is_(True))
+            .order_by(Bank.name.asc())
+            .all()
+        ],
         "education_records": serialize_education(education_records),
         "employment_history": serialize_employment(employment_history),
         "references": serialize_references(references),
@@ -346,7 +384,9 @@ def save_onboarding_form(
         db.flush()
 
     onboarding.first_name = payload.first_name
+    onboarding.middle_name = payload.middle_name
     onboarding.last_name = payload.last_name
+    onboarding.suffix = payload.suffix
     onboarding.email = payload.email
     onboarding.department = payload.department
     onboarding.position = payload.position
@@ -380,6 +420,10 @@ def save_onboarding_form(
     onboarding.philhealth = payload.philhealth
     onboarding.pagibig = payload.pagibig
     onboarding.tin = payload.tin
+
+    onboarding.bank_type = payload.bank_type
+    onboarding.account_name = payload.account_name
+    onboarding.account_number = payload.account_number
 
     db.query(ApplicantEducation).filter(
         ApplicantEducation.applicant_id == applicant.id
@@ -556,3 +600,77 @@ def submit_onboarding_form(
         "message": "Onboarding form submitted successfully.",
         "submitted_at": onboarding.submitted_at,
     }
+
+
+# ==============================
+# Documents (optional) -- same types as Employee 201 -> Employment Files.
+# One file per type; uploading again replaces it.
+# ==============================
+@router.post("/{token}/files")
+def upload_onboarding_file(
+    token: str,
+    document_type: str = Form(...),
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+):
+    applicant = get_valid_applicant_by_token(db, token)
+
+    if document_type not in ONBOARDING_DOCUMENTS:
+        raise HTTPException(status_code=400, detail="Unsupported document type.")
+
+    content_type = (file.content_type or "").lower()
+    if not (content_type.startswith("image/") or content_type == "application/pdf"):
+        raise HTTPException(status_code=400, detail="Upload a photo or a PDF file.")
+
+    file.file.seek(0, 2)
+    size = file.file.tell()
+    file.file.seek(0)
+    if size > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=400, detail="File is too large (max 10 MB).")
+
+    file_url = FileService().upload(file, f"applicants/{applicant.id}/onboarding")
+
+    existing = (
+        db.query(FileModel)
+        .filter_by(
+            entity_type=APPLICANT_FILE_ENTITY,
+            entity_id=applicant.id,
+            document_type=document_type,
+        )
+        .first()
+    )
+    if existing:
+        existing.file_url = file_url
+    else:
+        db.add(
+            FileModel(
+                entity_type=APPLICANT_FILE_ENTITY,
+                entity_id=applicant.id,
+                document_type=document_type,
+                file_url=file_url,
+            )
+        )
+    db.commit()
+
+    return {"files": serialize_onboarding_files(db, applicant.id)}
+
+
+@router.delete("/{token}/files/{document_type}")
+def delete_onboarding_file(
+    token: str,
+    document_type: str,
+    db: Session = Depends(get_db),
+):
+    applicant = get_valid_applicant_by_token(db, token)
+
+    if document_type not in ONBOARDING_DOCUMENTS:
+        raise HTTPException(status_code=400, detail="Unsupported document type.")
+
+    db.query(FileModel).filter_by(
+        entity_type=APPLICANT_FILE_ENTITY,
+        entity_id=applicant.id,
+        document_type=document_type,
+    ).delete()
+    db.commit()
+
+    return {"files": serialize_onboarding_files(db, applicant.id)}
