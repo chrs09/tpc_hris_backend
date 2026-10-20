@@ -1,6 +1,7 @@
 # app/services/approval_chain.py
 #
-# Org-chart approval routing for Cash Advance, Overtime and Attendance.
+# Org-chart approval routing for Cash Advance, Overtime, Attendance,
+# Leave and Fuel Requests.
 #
 # Each org unit's head can be ticked as an approver per type (OrgUnit.
 # approves). A request climbs the org chart from the employee's own unit
@@ -26,7 +27,16 @@ from app.utils.user_display import display_name
 
 # "work_report": people under this head report their work accomplished
 # (text + photo/video) at time out; no proof -> this head reviews it.
-APPROVAL_KINDS = ("cash_advance", "overtime", "attendance", "leave", "work_report")
+# "fuel_request": heads approve a driver's fuel request before the
+# coordinator issues the fuel code (app/api/fuel_requests.py).
+APPROVAL_KINDS = (
+    "cash_advance",
+    "overtime",
+    "attendance",
+    "leave",
+    "work_report",
+    "fuel_request",
+)
 
 
 def load_json_list(value) -> list:

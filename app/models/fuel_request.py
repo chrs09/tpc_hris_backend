@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Column, DateTime, ForeignKey, Integer, Numeric, String, Text
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, Numeric, String, Text
 from sqlalchemy.orm import relationship
 
 from app.core.database import Base
@@ -14,6 +14,10 @@ class FuelRequest(Base):
       issued             coordinator admin gave a fuel code + liters
       receipt_submitted  driver uploaded the fuel receipt
       completed          coordinator admin confirmed the receipt
+    Org chart: when heads above the driver have "Fuel Request" ticked, a
+    pending request first goes up that chain (awaiting_approval=True); the
+    fuel code can only be issued once the last head approves. A head who
+    rejects it declines it.
     Side exits: `declined` (coordinator admin turned the request down),
     `returned` (receipt sent back -- driver uploads again, same as issued),
     `cancelled` (driver withdrew it while still pending).
@@ -51,6 +55,14 @@ class FuelRequest(Base):
 
     # Why it was declined, or why the receipt was sent back.
     note = Column(Text, nullable=True)
+
+    # Org chart approval (app/services/approval_chain.py): head user ids in
+    # order, whose turn it is, and the approve/reject log.
+    approval_chain = Column(Text, nullable=True)
+    approval_step = Column(Integer, nullable=False, default=0, server_default="0")
+    approval_log = Column(Text, nullable=True)
+    # True while the chain is still approving (no fuel code yet).
+    awaiting_approval = Column(Boolean, nullable=False, default=False, server_default="0")
 
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(
