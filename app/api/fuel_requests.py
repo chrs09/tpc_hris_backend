@@ -32,7 +32,7 @@ from app.services.approval_chain import (
 )
 from app.models.user import User, UserRole
 from app.services.file_service import FileService
-from app.utils.timezone import utc_to_ph
+from app.utils.timezone import ph_to_utc, utc_to_ph
 from app.utils.user_display import display_name
 
 router = APIRouter(prefix="/fuel-requests", tags=["Fuel Requests"])
@@ -50,6 +50,23 @@ _require_coordinator = require_role_or_module(
 
 def _fmt(dt):
     return utc_to_ph(dt).strftime("%b %d, %Y %I:%M %p") if dt else None
+
+
+def _expire_codes(db: Session) -> None:
+    """Issued codes past their expiry (never used) -> `expired`, so the
+    driver can request a new one. Run before reading/acting on requests --
+    no scheduler needed."""
+    changed = (
+        db.query(FuelRequest)
+        .filter(
+            FuelRequest.status == "issued",
+            FuelRequest.code_expires_at.isnot(None),
+            FuelRequest.code_expires_at <= datetime.utcnow(),
+        )
+        .update({FuelRequest.status: "expired"}, synchronize_session=False)
+    )
+    if changed:
+        db.commit()
 
 
 def _needs_action_filter():
@@ -85,6 +102,9 @@ def _serialize(req: FuelRequest, db: Session | None = None) -> dict:
         "liters": float(req.liters) if req.liters is not None else None,
         "issued_by": display_name(req.issued_by) if req.issued_by else None,
         "issued_at": _fmt(req.issued_at),
+        "code_expires_at": _fmt(req.code_expires_at),
+        "code_cancelled_at": _fmt(req.code_cancelled_at),
+        "cancel_reason": req.cancel_reason,
         "receipt_photo_url": req.receipt_photo_url,
         "receipt_submitted_at": _fmt(req.receipt_submitted_at),
         "completed_by": display_name(req.completed_by) if req.completed_by else None,
@@ -156,6 +176,7 @@ def create_fuel_request(
     if odometer_reading is not None and not 0 <= odometer_reading <= 9_999_999:
         raise HTTPException(status_code=400, detail="Enter a valid odometer reading.")
 
+    _expire_codes(db)
     open_request = (
         db.query(FuelRequest.id)
         .filter(
@@ -204,6 +225,7 @@ def list_my_fuel_requests(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    _expire_codes(db)
     rows = (
         _query(db)
         .filter(FuelRequest.user_id == current_user.id)
@@ -221,7 +243,13 @@ def submit_fuel_receipt(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    _expire_codes(db)
     req = _get_locked(db, request_id)
+    if req.user_id == current_user.id and req.status == "expired":
+        raise HTTPException(
+            status_code=400,
+            detail="This fuel code has expired. Request a new code.",
+        )
     if req.user_id != current_user.id:
         raise HTTPException(status_code=404, detail="Fuel request not found.")
     if req.status not in ("issued", "returned"):
@@ -260,6 +288,34 @@ def cancel_fuel_request(
     return {"message": "Fuel request cancelled."}
 
 
+@router.post("/{request_id}/cancel-code")
+def cancel_fuel_code(
+    request_id: int,
+    reason: str = Body(..., embed=True),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Driver drops an issued code they won't use (e.g. changed unit). The
+    code is ignored and they can request a new one."""
+    _expire_codes(db)
+    req = _get_locked(db, request_id)
+    if req.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Fuel request not found.")
+    if req.status != "issued":
+        raise HTTPException(
+            status_code=400,
+            detail="Only an issued code that hasn't been used can be cancelled.",
+        )
+    reason = (reason or "").strip()
+    if not reason:
+        raise HTTPException(status_code=400, detail="Please enter a reason.")
+    req.status = "code_cancelled"
+    req.cancel_reason = reason[:1000]
+    req.code_cancelled_at = datetime.utcnow()
+    db.commit()
+    return _serialize(_query(db).filter(FuelRequest.id == req.id).first(), db)
+
+
 # =====================================================================
 # COORDINATOR ADMIN (web)
 # =====================================================================
@@ -271,11 +327,15 @@ def list_fuel_requests(
 ):
     """`status`: a single status, "open" (everything still in progress),
     or omitted for all. Newest first."""
+    _expire_codes(db)
     q = _query(db)
     if status == "open":
         q = q.filter(FuelRequest.status.in_(OPEN_STATUSES))
     elif status == "needs_action":
         q = q.filter(_needs_action_filter())
+    elif status == "unused":
+        # Codes never used: expired or cancelled by the driver.
+        q = q.filter(FuelRequest.status.in_(("expired", "code_cancelled")))
     elif status == "awaiting_approval":
         q = q.filter(FuelRequest.status == "pending", FuelRequest.awaiting_approval.is_(True))
     elif status:
@@ -291,6 +351,7 @@ def fuel_request_alerts(
 ):
     """For the web bell: requests waiting for a fuel code or a receipt
     check, oldest first."""
+    _expire_codes(db)
     rows = (
         _query(db)
         .filter(_needs_action_filter())
@@ -405,6 +466,7 @@ def get_fuel_request(
     db: Session = Depends(get_db),
     current_user: User = Depends(_require_coordinator),
 ):
+    _expire_codes(db)
     req = _query(db).filter(FuelRequest.id == request_id).first()
     if not req:
         raise HTTPException(status_code=404, detail="Fuel request not found.")
@@ -416,6 +478,8 @@ def issue_fuel_code(
     request_id: int,
     fuel_code: str = Body(..., embed=True),
     liters: float = Body(..., embed=True),
+    # "YYYY-MM-DDTHH:MM", Philippine time. Unused past it -> expired.
+    code_expires_at: str | None = Body(None, embed=True),
     db: Session = Depends(get_db),
     current_user: User = Depends(_require_coordinator),
 ):
@@ -441,7 +505,17 @@ def issue_fuel_code(
             status_code=400, detail="Liters must be more than 0 and at most 1,000."
         )
 
+    expires_utc = None
+    if code_expires_at:
+        try:
+            expires_utc = ph_to_utc(datetime.fromisoformat(code_expires_at.strip()))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid expiry date.")
+        if expires_utc <= datetime.utcnow():
+            raise HTTPException(status_code=400, detail="The expiry must be in the future.")
+
     req.fuel_code = fuel_code
+    req.code_expires_at = expires_utc
     req.liters = liters_value
     req.issued_by_user_id = current_user.id
     req.issued_at = datetime.utcnow()

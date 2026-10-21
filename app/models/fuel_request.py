@@ -20,7 +20,10 @@ class FuelRequest(Base):
     rejects it declines it.
     Side exits: `declined` (coordinator admin turned the request down),
     `returned` (receipt sent back -- driver uploads again, same as issued),
-    `cancelled` (driver withdrew it while still pending).
+    `cancelled` (driver withdrew it while still pending),
+    `expired` (the code passed code_expires_at before the driver used it),
+    `code_cancelled` (driver dropped an issued code, e.g. changed unit).
+    After `expired` / `code_cancelled` the driver can request a new code.
     """
 
     __tablename__ = "tpc_fuel_requests"
@@ -45,6 +48,9 @@ class FuelRequest(Base):
     liters = Column(Numeric(10, 2), nullable=True)
     issued_by_user_id = Column(Integer, ForeignKey("tpc_users.id"), nullable=True)
     issued_at = Column(DateTime, nullable=True)
+    # Set by the coordinator when issuing; past it (still unused) the
+    # request becomes `expired` (UTC, like every timestamp column).
+    code_expires_at = Column(DateTime, nullable=True)
 
     # After fueling
     receipt_photo_url = Column(String(500), nullable=True)
@@ -55,6 +61,10 @@ class FuelRequest(Base):
 
     # Why it was declined, or why the receipt was sent back.
     note = Column(Text, nullable=True)
+
+    # Driver cancelled the issued code (Cancel Code in the app).
+    code_cancelled_at = Column(DateTime, nullable=True)
+    cancel_reason = Column(Text, nullable=True)
 
     # Org chart approval (app/services/approval_chain.py): head user ids in
     # order, whose turn it is, and the approve/reject log.
