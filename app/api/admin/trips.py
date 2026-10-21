@@ -48,6 +48,7 @@ from app.api.driver.trips import (
     shipments_for_store,
     _invalid_shipment_number,
     _helper_departments_for,
+    is_special_trip,
     MAX_PLANNED_STOPS,
     MAX_SHIPMENT_NUMBERS,
 )
@@ -895,11 +896,16 @@ def update_assigned_trip(
             ),
         )
 
-    # ---- shipment numbers
-    shipment_numbers = [n.strip() for n in payload.shipment_numbers if n.strip()]
+    # ---- shipment numbers (a special trip keeps its ST- code)
+    special = is_special_trip(trip)
+    shipment_numbers = (
+        _load_shipment_numbers(trip)
+        if special
+        else [n.strip() for n in payload.shipment_numbers if n.strip()]
+    )
     if not shipment_numbers:
         raise HTTPException(status_code=400, detail="At least one shipment number is required.")
-    bad_number = _invalid_shipment_number(shipment_numbers)
+    bad_number = None if special else _invalid_shipment_number(shipment_numbers)
     if bad_number:
         raise HTTPException(
             status_code=400,
@@ -947,8 +953,10 @@ def update_assigned_trip(
     for sid in dest_ids:
         if sid not in stores_by_id:
             raise HTTPException(status_code=400, detail=f"Store {sid} not found.")
-    shipment_store_map = _parse_shipment_stores(
-        payload.shipment_stores, shipment_numbers, dest_ids
+    shipment_store_map = (
+        {}
+        if special
+        else _parse_shipment_stores(payload.shipment_stores, shipment_numbers, dest_ids)
     )
     primary_store = stores_by_id[dest_ids[0]]
     if not primary_store.trip_rate_profile_id:

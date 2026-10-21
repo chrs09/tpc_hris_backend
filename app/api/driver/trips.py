@@ -2,6 +2,7 @@
 
 import json
 import re
+import secrets
 import logging
 import sys
 from logging.handlers import RotatingFileHandler
@@ -211,6 +212,30 @@ def _generate_trip_code(db: Session, start_time: datetime) -> str:
             next_number = 1
 
     return f"{prefix}{next_number:05d}"
+
+
+# Special trips (Dispatch -> "Special Trip"): no shipment numbers; the trip
+# gets an "ST-########" code instead, used as its trip code and in place of
+# the shipment number everywhere one is shown.
+SPECIAL_TRIP_PREFIX = "ST-"
+
+
+def is_special_trip(trip: Trip) -> bool:
+    return (trip.trip_code or "").startswith(SPECIAL_TRIP_PREFIX)
+
+
+def _generate_special_trip_code(db: Session) -> str:
+    """ "ST-" + 8 random digits, not used by any trip yet."""
+    for _ in range(20):
+        code = f"{SPECIAL_TRIP_PREFIX}{secrets.randbelow(10**8):08d}"
+        taken = (
+            db.query(Trip.id)
+            .filter((Trip.trip_code == code) | (Trip.ticket_no == code))
+            .first()
+        )
+        if not taken:
+            return code
+    raise HTTPException(status_code=500, detail="Could not generate a special trip code. Try again.")
 
 
 def _helper_departments_for(driver_department: str | None) -> list[str]:
@@ -723,7 +748,8 @@ def dispatch_trip(
     vehicle_unit_id: int = Form(...),
     origin_store_id: int = Form(...),
     destination_store_ids: str = Form(...),
-    shipment_no: str = Form(...),
+    # Not needed for a special trip (is_special) -- it gets an ST- code.
+    shipment_no: str = Form("[]"),
     # JSON {"<shipment no>": <store id>}; required with 2+ stores.
     shipment_stores: str = Form(""),
     helper_ids: str = Form("[]"),
@@ -732,6 +758,8 @@ def dispatch_trip(
     unit_reason_note: str = Form(""),
     # Label for reports only.
     is_urgent: bool = Form(False),
+    # Special trip: no shipment numbers, auto "ST-########" code.
+    is_special: bool = Form(False),
     db: Session = Depends(get_db),
     current_user=Depends(_require_dispatch),
 ):
@@ -746,18 +774,23 @@ def dispatch_trip(
     picked explicitly here. Creates the Trip in TripStatus.ASSIGNED /
     current_step "ASSIGNED"; the driver sees it on their dashboard and
     performs Checkout -> Start Trip from there."""
-    try:
-        shipment_numbers = [
-            str(x).strip() for x in json.loads(shipment_no) if str(x).strip()
-        ]
-    except Exception:
-        # Backward compatible with a plain single string, in case an
-        # older client still sends shipment_no as one value.
-        shipment_numbers = [shipment_no.strip()] if shipment_no.strip() else []
+    special_code = _generate_special_trip_code(db) if is_special else None
+    if special_code:
+        # Stands in for the shipment number(s).
+        shipment_numbers = [special_code]
+    else:
+        try:
+            shipment_numbers = [
+                str(x).strip() for x in json.loads(shipment_no) if str(x).strip()
+            ]
+        except Exception:
+            # Backward compatible with a plain single string, in case an
+            # older client still sends shipment_no as one value.
+            shipment_numbers = [shipment_no.strip()] if shipment_no.strip() else []
 
     if not shipment_numbers:
         raise HTTPException(status_code=400, detail="At least one shipment number is required.")
-    bad_number = _invalid_shipment_number(shipment_numbers)
+    bad_number = None if special_code else _invalid_shipment_number(shipment_numbers)
     if bad_number:
         raise HTTPException(
             status_code=400,
@@ -823,8 +856,11 @@ def dispatch_trip(
             status_code=400,
             detail=f"Maximum of {MAX_PLANNED_STOPS} destination stores allowed.",
         )
-    shipment_store_map = _parse_shipment_stores(
-        shipment_stores, shipment_numbers, destination_store_ids
+    # A special trip's code isn't paired to one store (shown at every stop).
+    shipment_store_map = (
+        {}
+        if special_code
+        else _parse_shipment_stores(shipment_stores, shipment_numbers, destination_store_ids)
     )
 
     destination_stores = (
@@ -949,7 +985,7 @@ def dispatch_trip(
         db.add(new_trip)
         db.flush()
 
-        new_trip.trip_code = _generate_trip_code(db, new_trip.start_time)
+        new_trip.trip_code = special_code or _generate_trip_code(db, new_trip.start_time)
 
         vehicle.is_available = False
 
@@ -966,6 +1002,8 @@ def dispatch_trip(
     return {
         "message": "Trip dispatched.",
         "trip_id": new_trip.id,
+        "trip_code": new_trip.trip_code,
+        "is_special": bool(special_code),
         "driver": target_user.username,
         "origin": origin_store.name,
         "destinations": [stores_by_id[sid].name for sid in destination_store_ids],
