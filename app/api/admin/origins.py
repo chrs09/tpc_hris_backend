@@ -17,7 +17,8 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.dependencies import require_role_or_module
+from app.core.dependencies import get_current_user, require_role_or_module
+from app.models.app_setting import AppSetting
 from app.models.stores import Store
 
 router = APIRouter(prefix="/admin/origins", tags=["Admin Origins"])
@@ -42,9 +43,23 @@ class OriginUpdateRequest(BaseModel):
     trip_rate_profile_id: Optional[int] = None
 
 
-def _build_origin_response(store: Store) -> dict:
+# The default hub (shown first / preselected: Trip Assignment's start
+# point, the Customers map's starting view). One app setting, no schema.
+DEFAULT_HUB_KEY = "default_hub_store_id"
+
+
+def _default_hub_id(db: Session) -> int | None:
+    row = db.query(AppSetting).filter(AppSetting.key == DEFAULT_HUB_KEY).first()
+    try:
+        return int(row.value) if row and row.value else None
+    except ValueError:
+        return None
+
+
+def _build_origin_response(store: Store, default_id: int | None = None) -> dict:
     return {
         "id": store.id,
+        "is_default": store.id == default_id,
         "name": store.name,
         "latitude": store.latitude,
         "longitude": store.longitude,
@@ -81,7 +96,8 @@ def get_origins(
         .order_by(Store.name.asc())
         .all()
     )
-    return [_build_origin_response(store) for store in origins]
+    default_id = _default_hub_id(db)
+    return [_build_origin_response(store, default_id) for store in origins]
 
 
 @router.post("/")
@@ -122,7 +138,7 @@ def create_origin(
     db.commit()
     db.refresh(origin)
 
-    return _build_origin_response(origin)
+    return _build_origin_response(origin, _default_hub_id(db))
 
 
 @router.patch("/{origin_id}")
@@ -177,4 +193,73 @@ def update_origin(
     db.commit()
     db.refresh(origin)
 
-    return _build_origin_response(origin)
+    return _build_origin_response(origin, _default_hub_id(db))
+
+
+# ==============================
+# Default hub
+# ==============================
+@router.get("/default")
+def get_default_hub(
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """{id, name, latitude, longitude} of the default hub, or null --
+    read by Trip Assignment and the Customers map."""
+    hub_id = _default_hub_id(db)
+    hub = (
+        db.query(Store).filter(Store.id == hub_id, Store.is_hub.is_(True)).first()
+        if hub_id
+        else None
+    )
+    if not hub:
+        return None
+    return {
+        "id": hub.id,
+        "name": hub.name,
+        "latitude": hub.latitude,
+        "longitude": hub.longitude,
+    }
+
+
+@router.put("/{origin_id}/default")
+def set_default_hub(
+    origin_id: int,
+    db: Session = Depends(get_db),
+    current_admin=Depends(
+        require_role_or_module(
+            roles=["admin", "superadmin", "coordinator_admin"],
+            module_key="trip_management.origins",
+        )
+    ),
+):
+    hub = db.query(Store).filter(Store.id == origin_id, Store.is_hub.is_(True)).first()
+    if not hub:
+        raise HTTPException(status_code=404, detail="Hub not found.")
+    row = db.query(AppSetting).filter(AppSetting.key == DEFAULT_HUB_KEY).first()
+    if not row:
+        row = AppSetting(
+            key=DEFAULT_HUB_KEY,
+            value=str(hub.id),
+            description="Default hub (Trip Assignment start point, Customers map view).",
+        )
+        db.add(row)
+    else:
+        row.value = str(hub.id)
+    db.commit()
+    return {"default_hub_id": hub.id, "name": hub.name}
+
+
+@router.delete("/default")
+def clear_default_hub(
+    db: Session = Depends(get_db),
+    current_admin=Depends(
+        require_role_or_module(
+            roles=["admin", "superadmin", "coordinator_admin"],
+            module_key="trip_management.origins",
+        )
+    ),
+):
+    db.query(AppSetting).filter(AppSetting.key == DEFAULT_HUB_KEY).delete()
+    db.commit()
+    return {"default_hub_id": None}
