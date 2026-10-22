@@ -45,3 +45,14 @@ class OpeningBalanceCreate(BaseModel):
     # full amount (a single lump-sum "period") if left blank.
     deduction_per_pay_amount: float | None = None
     note: str | None = None
+
+
+class CashAdvanceExceptionRequest(BaseModel):
+    """Last approver asks to allow more than the policy (amount above the
+    limit and/or a longer repayment)."""
+
+    amount: float
+    # Repayment term: number of pay periods. Deduction per pay is
+    # amount / pay_periods (rounded up to the centavo).
+    pay_periods: int
+    reason: str

@@ -96,6 +96,22 @@ class CashAdvanceRequest(Base):
     approval_step = Column(Integer, nullable=False, default=0, server_default="0")
     approval_log = Column(Text, nullable=True)
 
+    # Exception (above the policy limit / longer repayment): the last
+    # approver asks the exception approver (Cash Advance Settings) to
+    # allow exception_amount over exception_pay_periods. While pending,
+    # only the exception approver can act; approved -> the request is
+    # approved with these figures; rejected -> back to the last approver.
+    exception_status = Column(String(20), nullable=True)  # pending/approved/rejected
+    exception_amount = Column(Numeric(10, 2), nullable=True)
+    exception_pay_periods = Column(Integer, nullable=True)
+    exception_deduction_per_pay = Column(Numeric(10, 2), nullable=True)
+    exception_reason = Column(Text, nullable=True)
+    exception_requested_by_user_id = Column(Integer, ForeignKey("tpc_users.id"), nullable=True)
+    exception_requested_at = Column(DateTime, nullable=True)
+    exception_approver_user_id = Column(Integer, ForeignKey("tpc_users.id"), nullable=True)
+    exception_decided_at = Column(DateTime, nullable=True)
+    exception_remarks = Column(Text, nullable=True)
+
     # Archived = hidden from Finance's All Requests list only; balances
     # and payroll deductions keep working.
     is_archived = Column(Boolean, nullable=False, default=False, server_default="0")
@@ -109,6 +125,10 @@ class CashAdvanceRequest(Base):
     requested_by = relationship("User", foreign_keys=[requested_by_user_id])
     approved_by = relationship("User", foreign_keys=[approved_by_user_id])
     released_by = relationship("User", foreign_keys=[released_by_user_id])
+    exception_requested_by = relationship(
+        "User", foreign_keys=[exception_requested_by_user_id]
+    )
+    exception_approver = relationship("User", foreign_keys=[exception_approver_user_id])
     deduction_option = relationship(
         "CashAdvanceDeductionOption", back_populates="requests"
     )

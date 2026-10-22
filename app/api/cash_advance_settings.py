@@ -1,9 +1,11 @@
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.dependencies import get_current_user, require_role_or_module
 from app.models.user import User
+from app.utils.user_display import display_name
 from app.models.cash_advance_deduction_option import CashAdvanceDeductionOption
 from app.models.cash_advance_terms import CashAdvanceTerms
 from app.models.cash_advance_purpose import CashAdvancePurpose
@@ -343,4 +345,56 @@ def set_terms(
         ),
         "max_active_requests": terms.max_active_requests,
         "updated_at": terms.updated_at,
+    }
+
+
+# =========================
+# EXCEPTION APPROVER
+# =========================
+class ExceptionApproverUpdate(BaseModel):
+    # None = a superadmin approves exceptions.
+    user_id: int | None = None
+
+
+@router.get("/exception-approver")
+def get_exception_approver(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Who approves cash advance exceptions (above the limit), asked by a
+    request's last approver."""
+    terms = db.query(CashAdvanceTerms).order_by(CashAdvanceTerms.id.asc()).first()
+    user_id = terms.exception_approver_user_id if terms else None
+    user = db.query(User).filter(User.id == user_id).first() if user_id else None
+    return {
+        "user_id": user.id if user else None,
+        "name": display_name(user) if user else None,
+    }
+
+
+@router.put("/exception-approver")
+def set_exception_approver(
+    payload: ExceptionApproverUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(_require_cash_advance_settings_access),
+):
+    user = None
+    if payload.user_id:
+        user = (
+            db.query(User)
+            .filter(User.id == payload.user_id, User.is_active.is_(True))
+            .first()
+        )
+        if not user:
+            raise HTTPException(status_code=400, detail="User not found or inactive.")
+    terms = db.query(CashAdvanceTerms).order_by(CashAdvanceTerms.id.asc()).first()
+    if not terms:
+        terms = CashAdvanceTerms(content="", max_pay_periods=6)
+        db.add(terms)
+    terms.exception_approver_user_id = user.id if user else None
+    terms.updated_by_user_id = current_user.id
+    db.commit()
+    return {
+        "user_id": user.id if user else None,
+        "name": display_name(user) if user else None,
     }

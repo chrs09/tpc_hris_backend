@@ -38,6 +38,9 @@ class CashAdvanceTerms(Base):
     max_pay_periods = Column(Integer, nullable=False, default=6)
     max_loan_amount = Column(Numeric(10, 2), nullable=True)
     max_active_requests = Column(Integer, nullable=True)
+    # Approves cash advance EXCEPTIONS (above the limit / longer terms),
+    # sent by a request's last approver. NULL = a superadmin.
+    exception_approver_user_id = Column(Integer, ForeignKey("tpc_users.id"), nullable=True)
 
     updated_by_user_id = Column(Integer, ForeignKey("tpc_users.id"), nullable=True)
     updated_at = Column(

@@ -59,6 +59,7 @@ def _receipt_url(db: Session, request_id: int) -> str | None:
     )
     return row[0] if row else None
 from app.schemas.cash_advance_request import (
+    CashAdvanceExceptionRequest,
     CashAdvanceRequestCreate,
     CashAdvanceReviewAction,
     RecordDeductionCreate,
@@ -98,6 +99,7 @@ def _serialize(req: CashAdvanceRequest, db: Session) -> dict:
 
     return {
         "id": req.id,
+        **_exception_fields(req),
         "employee_id": req.employee_id,
         "employee_name": (
             f"{employee.first_name} {employee.last_name}"
@@ -139,6 +141,7 @@ def _serialize(req: CashAdvanceRequest, db: Session) -> dict:
         # False when the viewer's step was passed up because they're
         # absent / on leave today (see for-my-approval).
         "can_act": getattr(req, "_can_act", True),
+        "can_request_exception": getattr(req, "_can_exception", False),
         "viewer_away": getattr(req, "_away", None),
         # Org chart approval progress (empty when routed the old way).
         **describe_chain(
@@ -151,7 +154,59 @@ def _serialize(req: CashAdvanceRequest, db: Session) -> dict:
     }
 
 
+def _exception_fields(req: CashAdvanceRequest) -> dict:
+    return {
+        "exception_status": req.exception_status,
+        "awaiting_exception": req.exception_status == "pending" and req.status == "pending",
+        "exception_amount": (
+            float(req.exception_amount) if req.exception_amount is not None else None
+        ),
+        "exception_pay_periods": req.exception_pay_periods,
+        "exception_deduction_per_pay": (
+            float(req.exception_deduction_per_pay)
+            if req.exception_deduction_per_pay is not None
+            else None
+        ),
+        "exception_reason": req.exception_reason,
+        "exception_requested_by_name": (
+            display_name(req.exception_requested_by) if req.exception_requested_by else None
+        ),
+        "exception_requested_at": _utc(req.exception_requested_at),
+        "exception_approver_user_id": req.exception_approver_user_id,
+        "exception_approver_name": (
+            display_name(req.exception_approver) if req.exception_approver else None
+        ),
+        "exception_decided_at": _utc(req.exception_decided_at),
+        "exception_remarks": req.exception_remarks,
+    }
+
+
+def _exception_approver(db: Session) -> User | None:
+    """Cash Advance Settings -> Exception approver, else a superadmin."""
+    terms = db.query(CashAdvanceTerms).order_by(CashAdvanceTerms.id.asc()).first()
+    if terms and terms.exception_approver_user_id:
+        user = (
+            db.query(User)
+            .filter(User.id == terms.exception_approver_user_id, User.is_active.is_(True))
+            .first()
+        )
+        if user:
+            return user
+    return db.query(User).filter(User.role == "superadmin", User.is_active.is_(True)).first()
+
+
+def _is_superadmin(user: User) -> bool:
+    role = user.role.value if hasattr(user.role, "value") else str(user.role)
+    return role == "superadmin"
+
+
 def _can_review(req: CashAdvanceRequest, current_user: User, db: Session) -> bool:
+    # An exception waiting for its approver: only they (or a superadmin)
+    # can act until it's decided.
+    if req.exception_status == "pending":
+        return req.exception_approver_user_id == current_user.id or _is_superadmin(
+            current_user
+        )
     if not req.approval_chain and req.requested_by_user_id == current_user.id:
         return True
     if current_user.role == "superadmin":
@@ -427,6 +482,10 @@ def get_requests_for_my_approval(
     for r in pending:
         if _can_review(r, current_user, db):
             r._can_act = True
+            # The last approver (or a superadmin) may ask for an exception.
+            r._can_exception = r.exception_status != "pending" and (
+                _is_last_step(db, r, current_user) or _is_superadmin(current_user)
+            )
             mine.append(r)
         elif r.approval_chain:
             # Their step was passed up because they're out today: shown,
@@ -462,6 +521,28 @@ def approve_cash_advance_request(
         raise HTTPException(
             status_code=403, detail="You are not authorized to approve this request."
         )
+
+    if request.exception_status == "pending":
+        # The exception approver allows it: approved with the exception's
+        # amount and repayment term.
+        _apply_exception(request)
+        request.exception_status = "approved"
+        request.exception_decided_at = datetime.utcnow()
+        request.exception_remarks = payload.remarks
+        request.approval_log = append_log(
+            request.approval_log,
+            current_user,
+            "approved",
+            payload.remarks or "Exception approved",
+            approved_amount=float(request.approved_amount),
+        )
+        request.status = "approved"
+        request.remarks = payload.remarks
+        request.approved_by_user_id = current_user.id
+        request.approved_at = datetime.utcnow()
+        db.commit()
+        db.refresh(request)
+        return _serialize(request, db)
 
     if payload.approved_amount is not None:
         if payload.approved_amount <= 0:
@@ -542,6 +623,23 @@ def reject_cash_advance_request(
             status_code=403, detail="You are not authorized to reject this request."
         )
 
+    if request.exception_status == "pending":
+        # Exception turned down: back to the approver who asked, who can
+        # still approve within the policy or reject the request.
+        request.exception_status = "rejected"
+        request.exception_decided_at = datetime.utcnow()
+        request.exception_remarks = payload.remarks
+        request.requested_by_user_id = request.exception_requested_by_user_id
+        request.approval_log = append_log(
+            request.approval_log,
+            current_user,
+            "exception rejected",
+            payload.remarks,
+        )
+        db.commit()
+        db.refresh(request)
+        return _serialize(request, db)
+
     request.approval_log = append_log(
         request.approval_log, current_user, "rejected", payload.remarks
     )
@@ -549,6 +647,110 @@ def reject_cash_advance_request(
     request.remarks = payload.remarks
     request.approved_by_user_id = current_user.id
     request.approved_at = datetime.utcnow()
+
+    db.commit()
+    db.refresh(request)
+    return _serialize(request, db)
+
+
+# =========================
+# EXCEPTION (above the policy limit)
+# =========================
+def _apply_exception(request: CashAdvanceRequest) -> None:
+    """Use the exception's amount and repayment for the approval."""
+    request.approved_amount = request.exception_amount
+    request.deduction_per_pay_amount = request.exception_deduction_per_pay
+    # Custom repayment -- not one of the preset per-pay options.
+    request.deduction_option_id = None
+
+
+def _is_last_step(db: Session, request: CashAdvanceRequest, user: User) -> bool:
+    """The approver who would give the final approval right now."""
+    chain = [int(i) for i in load_json_list(request.approval_chain)]
+    if chain:
+        acting, _ = acting_index(db, chain, request.approval_step, user.id)
+        return acting is not None and acting == len(chain) - 1
+    return request.requested_by_user_id == user.id
+
+
+@router.post("/{request_id}/request-exception")
+def request_cash_advance_exception(
+    request_id: int,
+    payload: CashAdvanceExceptionRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """The LAST approver asks the exception approver (Cash Advance
+    Settings) to allow more than the policy -- e.g. ₱8,000 when the limit
+    is ₱5,000 -- with its own repayment term and a reason. The exception
+    approver then approves (request approved with these figures) or
+    rejects (back to this approver)."""
+    request = (
+        db.query(CashAdvanceRequest)
+        .options(joinedload(CashAdvanceRequest.employee))
+        .filter(CashAdvanceRequest.id == request_id)
+        .with_for_update()
+        .first()
+    )
+    if not request:
+        raise HTTPException(status_code=404, detail="Cash advance request not found")
+    if request.status != "pending":
+        raise HTTPException(status_code=400, detail="Only pending requests can get an exception.")
+    if request.exception_status == "pending":
+        raise HTTPException(status_code=400, detail="An exception is already waiting for approval.")
+    if not (_is_last_step(db, request, current_user) or _is_superadmin(current_user)):
+        raise HTTPException(
+            status_code=403,
+            detail="Only the last approver can ask for an exception.",
+        )
+
+    reason = (payload.reason or "").strip()
+    if not reason:
+        raise HTTPException(status_code=400, detail="Give the reason for the exception.")
+    if payload.amount <= 0 or payload.amount > 10_000_000:
+        raise HTTPException(status_code=400, detail="Enter a valid amount.")
+    if payload.pay_periods <= 0 or payload.pay_periods > 120:
+        raise HTTPException(
+            status_code=400, detail="Repayment term must be between 1 and 120 pay periods."
+        )
+    per_pay = ceil(payload.amount * 100 / payload.pay_periods) / 100
+
+    approver = _exception_approver(db)
+    if not approver:
+        raise HTTPException(
+            status_code=400,
+            detail="No exception approver is set. Set one in Cash Advance Settings.",
+        )
+
+    request.exception_amount = payload.amount
+    request.exception_pay_periods = payload.pay_periods
+    request.exception_deduction_per_pay = per_pay
+    request.exception_reason = reason[:2000]
+    request.exception_requested_by_user_id = current_user.id
+    request.exception_requested_at = datetime.utcnow()
+    request.exception_approver_user_id = approver.id
+    request.exception_decided_at = None
+    request.exception_remarks = None
+    request.approval_log = append_log(
+        request.approval_log,
+        current_user,
+        "exception requested",
+        reason,
+        approved_amount=float(payload.amount),
+    )
+
+    if approver.id == current_user.id:
+        # The exception approver is the last approver too: approve it now.
+        _apply_exception(request)
+        request.exception_status = "approved"
+        request.exception_decided_at = datetime.utcnow()
+        request.status = "approved"
+        request.approved_by_user_id = current_user.id
+        request.approved_at = datetime.utcnow()
+    else:
+        request.exception_status = "pending"
+        # "Waiting on" shows the exception approver.
+        request.requested_by_user_id = approver.id
 
     db.commit()
     db.refresh(request)
