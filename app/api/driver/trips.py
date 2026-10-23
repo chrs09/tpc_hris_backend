@@ -34,6 +34,7 @@ from app.models.trip_models import GPSActionType
 from app.models.app_setting import AppSetting
 from app.services.gps_service import calculate_distance_meters, find_nearest_store
 from app.services.notification_service import create_notification
+from app.services.route_ride import busy_on_trip, my_role, on_my_trip, riders_of
 from app.services.trip_rates import load_rules, resolve_trip_rates
 from app.services.vehicle_assignment import check_unit_for_trip
 from app.services.trip_payroll_service import (
@@ -181,6 +182,13 @@ def _geofence_label(store, distance: float | None, outside_range: bool = False) 
     if outside_range:
         label += " - outside range"
     return label
+
+
+def _person_name(user) -> str:
+    emp = getattr(user, "employee", None)
+    if emp and (emp.first_name or emp.last_name):
+        return " ".join(f"{emp.first_name or ''} {emp.last_name or ''}".split())
+    return user.username
 
 
 def _generate_trip_code(db: Session, start_time: datetime) -> str:
@@ -570,7 +578,7 @@ def get_active_trip(
     trip = (
         db.query(Trip)
         .filter(
-            Trip.driver_id == current_user.id,
+            on_my_trip(current_user.id),
             Trip.status.in_([TripStatus.ASSIGNED, TripStatus.ACTIVE]),
         )
         .order_by(Trip.id.desc())
@@ -720,6 +728,13 @@ def get_active_trip(
             else None
         ),
         "status": trip.status.value if hasattr(trip.status, "value") else trip.status,
+        # Route ride: "route_rider" = this user rides along (can do every
+        # step; GPS is tracked from the driver's phone).
+        "my_role": my_role(trip, current_user.id),
+        "driver_name": _person_name(trip.driver) if trip.driver else None,
+        "route_rider_names": [
+            _person_name(ride.rider) for ride in riders_of(db, [trip.id]).get(trip.id, []) if ride.rider
+        ],
         "origin_store_id": trip.origin_store_id,
         "origin_name": origin_store.name if origin_store else "N/A",
         "destination_store_id": trip.destination_store_id,
@@ -908,15 +923,8 @@ def dispatch_trip(
     if not target_user:
         raise HTTPException(status_code=400, detail="Selected driver not found.")
 
-    existing = (
-        db.query(Trip)
-        .filter(
-            Trip.driver_id == target_user.id,
-            Trip.status.in_([TripStatus.ASSIGNED, TripStatus.ACTIVE]),
-        )
-        .first()
-    )
-    if existing:
+    # Driving, or riding along (route ride) on, a trip in progress = busy.
+    if busy_on_trip(db, target_user.id):
         raise HTTPException(
             status_code=400, detail="This driver already has a trip in progress."
         )
@@ -1037,7 +1045,7 @@ def reorder_stops(
         db.query(Trip)
         .filter(
             Trip.id == trip_id,
-            Trip.driver_id == current_user.id,
+            on_my_trip(current_user.id),
             Trip.status == TripStatus.ASSIGNED,
         )
         .with_for_update()
@@ -1099,7 +1107,7 @@ def checkout_trip(
         db.query(Trip)
         .filter(
             Trip.id == trip_id,
-            Trip.driver_id == current_user.id,
+            on_my_trip(current_user.id),
             Trip.status == TripStatus.ASSIGNED,
         )
         .first()
@@ -1199,7 +1207,7 @@ def check_in(
         db.query(Trip)
         .filter(
             Trip.id == trip_id,
-            Trip.driver_id == current_user.id,
+            on_my_trip(current_user.id),
             Trip.status == TripStatus.ACTIVE,
         )
         .with_for_update()
@@ -1370,7 +1378,7 @@ def start_unloading(
         db.query(Trip)
         .filter(
             Trip.id == trip_id,
-            Trip.driver_id == current_user.id,
+            on_my_trip(current_user.id),
             Trip.status == TripStatus.ACTIVE,
         )
         .first()
@@ -1632,7 +1640,7 @@ def track_trip_location(
             db.query(Trip)
             .filter(
                 Trip.id == trip_id,
-                Trip.driver_id == current_user.id,
+                on_my_trip(current_user.id),
                 Trip.status == TripStatus.ACTIVE,
             )
             .first()
@@ -1743,7 +1751,7 @@ def checkin_trip(
         db.query(Trip)
         .filter(
             Trip.id == trip_id,
-            Trip.driver_id == current_user.id,
+            on_my_trip(current_user.id),
             Trip.status == TripStatus.ACTIVE,
         )
         .first()
@@ -2030,7 +2038,7 @@ def get_my_trips(
     query = db.query(Trip).options(
         joinedload(Trip.stops).joinedload(TripStop.store)
     ).filter(
-        Trip.driver_id == current_user.id,
+        on_my_trip(current_user.id),
         Trip.status != TripStatus.PENDING_MANUAL_APPROVAL,
     )
 
@@ -2082,6 +2090,7 @@ def get_my_trips(
                 "start_time": trip.start_time,
                 "end_time": trip.end_time,
                 "stores": stores,
+                "my_role": my_role(trip, current_user.id),
             }
         )
 
@@ -2103,7 +2112,7 @@ def get_trip_detail(
     trip = (
         db.query(Trip)
         .options(joinedload(Trip.stops).joinedload(TripStop.store))
-        .filter(Trip.id == trip_id, Trip.driver_id == current_user.id)
+        .filter(Trip.id == trip_id, on_my_trip(current_user.id))
         .first()
     )
 

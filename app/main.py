@@ -43,6 +43,7 @@ from app.api.driver import trips
 from app.api.admin import trips as admin_trips
 from app.api.admin import trip_bypass as admin_trip_bypass
 from app.api.admin import trip_manual_entries as admin_trip_manual_entries
+from app.api.admin import route_rides as admin_route_rides
 from app.api.admin import delivery_summary as admin_delivery_summary
 from app.api.admin import stores as stores
 from app.api.admin import origins as origins
@@ -292,6 +293,7 @@ app.include_router(trip_rate_rules.router, prefix="/api")
 app.include_router(admin_trips.router, prefix="/api")
 app.include_router(admin_trip_bypass.router, prefix="/api")
 app.include_router(admin_trip_manual_entries.router, prefix="/api")
+app.include_router(admin_route_rides.router, prefix="/api")
 app.include_router(admin_delivery_summary.router, prefix="/api")
 app.include_router(stores.router, prefix="/api")
 app.include_router(origins.router, prefix="/api")

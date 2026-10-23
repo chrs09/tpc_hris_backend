@@ -39,6 +39,8 @@ from app.services.trip_remarks import (
 from app.utils.timezone import utc_to_ph
 from app.utils.user_display import display_name as _display_name
 from app.services.approval_chain import immediate_head
+from app.models.route_ride import RouteRide
+from app.services.route_ride import riders_of
 from app.api.driver.trips import (
     _load_planned_store_ids,
     _delivered_store_ids,
@@ -189,6 +191,14 @@ def get_available_drivers(
     drivers_with_active_trip = {
         row[0]
         for row in db.query(Trip.driver_id)
+        .filter(Trip.status == TripStatus.ACTIVE)
+        .all()
+    }
+    # Riding along (route ride) on an active trip = busy too.
+    drivers_with_active_trip |= {
+        row[0]
+        for row in db.query(RouteRide.rider_user_id)
+        .join(Trip, Trip.id == RouteRide.trip_id)
         .filter(Trip.status == TripStatus.ACTIVE)
         .all()
     }
@@ -577,6 +587,7 @@ def get_assigned_trips(
     )
 
     result = []
+    route_riders = riders_of(db, [t.id for t in trips])
     for trip in trips:
         planned_ids = _load_planned_store_ids(trip)
         stores_by_id = (
@@ -624,6 +635,12 @@ def get_assigned_trips(
                 "editable": trip.current_step == "ASSIGNED",
                 **trip_unit_flags(trip),
                 "driver_id": trip.driver_id,
+                # Route riders on this trip (route ride).
+                "route_rider_names": [
+                    _display_name(ride.rider)
+                    for ride in route_riders.get(trip.id, [])
+                    if ride.rider
+                ],
                 "vehicle_unit_id": trip.vehicle_unit_id,
                 "origin_store_id": trip.origin_store_id,
                 "destination_store_ids": planned_ids,

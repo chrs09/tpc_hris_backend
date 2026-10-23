@@ -317,8 +317,7 @@ def get_trip_check(
         )
         .all()
     )
-    if not trips:
-        return []
+    # (No early return: manual route rides count even without trips.)
 
     trip_ids = [t.id for t in trips]
     driver_employee = dict(
@@ -372,7 +371,55 @@ def get_trip_check(
                 "counted": status in PAID_TRIP_STATUSES and has_attendance,
             }
         )
-    rows.sort(key=lambda r: (r["date"], r["trip_id"]))
+    # Route rides (assigned on these trips, or manual in the period).
+    from app.models.route_ride import RouteRide
+    from app.services.route_ride import ride_amount, ride_day
+
+    rider_employee = dict(
+        db.query(User.id, User.employee_id).filter(
+            User.id.in_({r.rider_user_id for r in db.query(RouteRide.rider_user_id)})
+        )
+    )
+    for ride in db.query(RouteRide).options(joinedload(RouteRide.trip)).all():
+        employee_id = rider_employee.get(ride.rider_user_id)
+        day = ride_day(ride)
+        if not employee_id or day is None or not (start <= day <= end):
+            continue
+        trip = ride.trip
+        status = getattr(trip.status, "value", trip.status) if trip else "MANUAL"
+        if trip is not None and (status == "CANCELLED" or trip.is_archived):
+            continue
+        has_attendance = (employee_id, day) in attended or bool(
+            db.query(AttendanceRecord.id)
+            .filter(
+                AttendanceRecord.employee_id == employee_id,
+                AttendanceRecord.attendance_date == day,
+            )
+            .first()
+        )
+        rows.append(
+            {
+                "trip_id": trip.id if trip else None,
+                "route_ride_id": ride.id,
+                "employee_id": employee_id,
+                "role": "route_rider",
+                "date": str(day),
+                "ticket_no": trip.ticket_no if trip else f"Route ride (manual) x{ride.quantity or 1}",
+                "status": status,
+                "vehicle_unit": trip.vehicle_unit.unit_code if trip and trip.vehicle_unit else None,
+                "plate_number": trip.vehicle_unit.plate_number if trip and trip.vehicle_unit else None,
+                "trip_rate_profile": (
+                    trip.trip_rate_profile.profile_name
+                    if trip and trip.trip_rate_profile
+                    else (ride.trip_rate_profile.profile_name if ride.trip_rate_profile else None)
+                ),
+                "first_trip_rate": round(ride_amount(ride, rules), 2),
+                "has_attendance": has_attendance,
+                "counted": (trip is None or status in PAID_TRIP_STATUSES) and has_attendance,
+            }
+        )
+
+    rows.sort(key=lambda r: (r["date"], r["trip_id"] or 0))
     return rows
 
 

@@ -19,6 +19,8 @@ from fastapi import (
 from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session, joinedload
 
+from app.models.route_ride import RouteRide
+from app.services.route_ride import ride_day, ride_rates
 from app.core.database import get_db
 from app.core.dependencies import (
     get_current_user,
@@ -1315,6 +1317,9 @@ def get_attendance_records(
     #     the trips table again. ---
     trips_by_employee_date = defaultdict(list)
     seen_trip_ids_by_key = defaultdict(set)
+    # Route rides (assigned on a completed trip, or manual) per
+    # (employee_id, date): paid the Route Ride rate.
+    route_ride_tickets = defaultdict(list)
     rate_rules = load_rules(db)
 
     if employee_ids:
@@ -1347,6 +1352,57 @@ def get_attendance_records(
             )
             .all()
         )
+
+        for ride, rider_employee_id in (
+            db.query(RouteRide, User.employee_id)
+            .join(User, User.id == RouteRide.rider_user_id)
+            .options(
+                joinedload(RouteRide.trip).joinedload(Trip.vehicle_unit),
+                joinedload(RouteRide.trip).joinedload(Trip.trip_rate_profile),
+                joinedload(RouteRide.trip_rate_profile),
+            )
+            .filter(User.employee_id.in_(employee_ids))
+            .all()
+        ):
+            if ride.trip is not None:
+                ride_status = getattr(ride.trip.status, "value", ride.trip.status)
+                if ride_status not in valid_statuses:
+                    continue
+            day = ride_day(ride)
+            if day is None:
+                continue
+            trip = ride.trip
+            rates = ride_rates(ride, rate_rules)
+            # One ticket per ride: payroll pays each like a driver trip
+            # (1st / Next of the day, together with their own trips).
+            for index in range(ride.quantity or 1):
+                route_ride_tickets[(rider_employee_id, day)].append(
+                    {
+                        "trip_id": f"rr-{ride.id}-{index + 1}",
+                        "role": "route_rider",
+                        "route_ride_id": ride.id,
+                        "source": ride.source,
+                        "ticket_no": (
+                            trip.ticket_no if trip else f"Route ride (manual) x{ride.quantity or 1}"
+                        ),
+                        "vehicle_unit_id": trip.vehicle_unit_id if trip else None,
+                        "vehicle_unit": trip.vehicle_unit.unit_code if trip and trip.vehicle_unit else None,
+                        "plate_number": trip.vehicle_unit.plate_number if trip and trip.vehicle_unit else None,
+                        "trip_rate_profile": (
+                            (trip.trip_rate_profile.profile_name if trip and trip.trip_rate_profile else None)
+                            or (ride.trip_rate_profile.profile_name if ride.trip_rate_profile else None)
+                        ),
+                        "driver_first_trip_rate": rates["first"],
+                        "driver_next_trip_rate": rates["next"],
+                        # Typed amount per ride (manual): paid as is.
+                        "route_ride_amount": rates["fixed"],
+                        "helper_first_trip_rate": 0,
+                        "helper_next_trip_rate": 0,
+                        "status": getattr(trip.status, "value", trip.status) if trip else "MANUAL",
+                        "start_time": trip.start_time.isoformat() if trip and trip.start_time else None,
+                        "end_time": trip.end_time.isoformat() if trip and trip.end_time else None,
+                    }
+                )
 
         for trip, trip_employee_id in driver_trips + helper_trips:
             trip_date = utc_to_ph_date(trip.start_time)
@@ -1455,6 +1511,10 @@ def get_attendance_records(
                     ),
                 }
             )
+
+        trip_tickets.extend(
+            route_ride_tickets.get((record.employee_id, record.attendance_date), [])
+        )
 
         total_count = len(trip_tickets)
 
