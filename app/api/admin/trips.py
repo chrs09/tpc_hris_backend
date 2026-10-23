@@ -349,21 +349,29 @@ def get_approval_pipeline(
             row[0]
             for row in db.query(Store.id).filter(Store.name.ilike(like)).all()
         ]
+        matching_users = (
+            db.query(User.id)
+            .outerjoin(Employee, Employee.id == User.employee_id)
+            .filter(
+                or_(
+                    User.username.ilike(like),
+                    Employee.first_name.ilike(like),
+                    Employee.last_name.ilike(like),
+                    func.concat(
+                        Employee.first_name, " ", Employee.last_name
+                    ).ilike(like),
+                )
+            )
+        )
         conditions = [
             Trip.trip_code.ilike(like),
             Trip.ticket_no.ilike(like),
-            Trip.driver_id.in_(
-                db.query(User.id)
-                .outerjoin(Employee, Employee.id == User.employee_id)
-                .filter(
-                    or_(
-                        User.username.ilike(like),
-                        Employee.first_name.ilike(like),
-                        Employee.last_name.ilike(like),
-                        func.concat(
-                            Employee.first_name, " ", Employee.last_name
-                        ).ilike(like),
-                    )
+            Trip.driver_id.in_(matching_users),
+            # Route rider's name finds the trips they rode along on.
+            Trip.id.in_(
+                db.query(RouteRide.trip_id).filter(
+                    RouteRide.trip_id.isnot(None),
+                    RouteRide.rider_user_id.in_(matching_users),
                 )
             ),
         ]
@@ -411,6 +419,8 @@ def get_approval_pipeline(
 
     trip_ids = [trip.id for trip in trips]
     manual_ids = _manual_entry_trip_ids(db, trip_ids)
+    # Route riders on these trips (route ride).
+    pipeline_riders = riders_of(db, trip_ids)
     # Who cancelled and why (latest cancel log per trip).
     cancels = {}
     for log in (
@@ -485,6 +495,11 @@ def get_approval_pipeline(
                 "status_label": PIPELINE_STATUSES[trip.status],
                 "status_since": fmt(stage_at),
                 "is_manual_entry": trip.id in manual_ids,
+                "route_rider_names": [
+                    _display_name(ride.rider)
+                    for ride in pipeline_riders.get(trip.id, [])
+                    if ride.rider
+                ],
                 **trip_unit_flags(trip),
                 "returned": bool(
                     review

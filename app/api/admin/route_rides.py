@@ -228,6 +228,83 @@ def add_manual_route_ride(
     return _serialize(db, ride, load_rules(db))
 
 
+# ---------------------------------------------------------------- edit
+class EditIn(BaseModel):
+    # Manual rides only (assigned ones come from the trip).
+    rider_user_id: int | None = None
+    ride_date: date | None = None
+    quantity: int | None = None
+    trip_rate_profile_id: int | None = None
+    # Any ride: fixed amount per ride (null = the category rate), notes.
+    amount: float | None = None
+    notes: str | None = None
+
+
+@router.patch("/{ride_id}")
+def edit_route_ride(
+    ride_id: int,
+    payload: EditIn,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(_require_trip_assignment),
+):
+    ride = db.query(RouteRide).filter(RouteRide.id == ride_id).with_for_update().first()
+    if not ride:
+        raise HTTPException(status_code=404, detail="Route ride not found.")
+    sent = payload.model_fields_set
+
+    # Payroll locked on the ride's current date -> no changes.
+    old_day = ride_day(ride)
+    if old_day and ride.rider:
+        ensure_unlocked(db, ride.rider.employee_id, old_day, "this route ride")
+
+    if ride.source == "manual":
+        if "rider_user_id" in sent and payload.rider_user_id:
+            ride.rider_user_id = _rider(db, payload.rider_user_id).id
+        if "ride_date" in sent and payload.ride_date:
+            if payload.ride_date > datetime.utcnow().date():
+                raise HTTPException(status_code=400, detail="The date can't be in the future.")
+            ride.ride_date = payload.ride_date
+        if "quantity" in sent and payload.quantity is not None:
+            if payload.quantity <= 0 or payload.quantity > 100:
+                raise HTTPException(status_code=400, detail="How many must be between 1 and 100.")
+            ride.quantity = payload.quantity
+        if "trip_rate_profile_id" in sent:
+            if payload.trip_rate_profile_id and not db.get(
+                TripRateProfile, payload.trip_rate_profile_id
+            ):
+                raise HTTPException(status_code=400, detail="Trip category not found.")
+            ride.trip_rate_profile_id = payload.trip_rate_profile_id or None
+    elif sent & {"rider_user_id", "ride_date", "quantity", "trip_rate_profile_id"}:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "An assigned route ride's driver, date and trip come from the trip. "
+                "Remove it and assign again to change them."
+            ),
+        )
+
+    if "amount" in sent:
+        if payload.amount is not None and payload.amount < 0:
+            raise HTTPException(status_code=400, detail="The amount can't be negative.")
+        ride.amount = payload.amount
+    if "notes" in sent:
+        ride.notes = (payload.notes or "").strip() or None
+
+    if ride.source == "manual" and ride.amount is None and not ride.trip_rate_profile_id:
+        raise HTTPException(status_code=400, detail="Pick the trip category or type the amount.")
+
+    # And locked on the new date / rider.
+    db.flush()
+    db.refresh(ride)
+    new_day = ride_day(ride)
+    if new_day and ride.rider:
+        ensure_unlocked(db, ride.rider.employee_id, new_day, "this route ride")
+
+    db.commit()
+    db.refresh(ride)
+    return _serialize(db, ride, load_rules(db))
+
+
 # ---------------------------------------------------------------- list / remove
 @router.get("")
 def list_route_rides(
