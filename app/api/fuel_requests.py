@@ -11,7 +11,7 @@
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 
-from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Request, UploadFile
 from sqlalchemy import or_
 from sqlalchemy.orm import Session, joinedload
 
@@ -191,14 +191,16 @@ def create_fuel_request(
             detail="You still have a fuel request in progress. Finish it first.",
         )
 
-    # Org chart: every head above the driver with Fuel Request ticked,
-    # in order. None -> straight to the coordinator, as before.
+    # Org chart approver (below). None -> straight to the coordinator.
     employee = (
         db.query(Employee).filter(Employee.id == current_user.employee_id).first()
         if current_user.employee_id
         else None
     )
-    chain = resolve_chain(db, employee, current_user, "fuel_request")
+    # Only the NEAREST head above the driver with Fuel Request ticked: they
+    # approve and issue the code (e.g. Wingvan's head for Wingvan drivers;
+    # the Coordinator for units without their own fuel approver).
+    chain = resolve_chain(db, employee, current_user, "fuel_request")[:1]
 
     req = FuelRequest(
         user_id=current_user.id,
@@ -364,6 +366,19 @@ def fuel_request_alerts(
 # =====================================================================
 # ORG CHART HEADS -- approve / reject before the fuel code
 # =====================================================================
+def _is_chain_approver(req: FuelRequest, user: User) -> bool:
+    """The Org Chart head on this request's approval chain (they approve
+    it and then issue the fuel code -- see create_fuel_request)."""
+    return user.id in [int(i) for i in load_json_list(req.approval_chain)]
+
+
+def _ensure_can_handle(request: Request, db: Session, req: FuelRequest, user: User):
+    """Coordinator access (Fuel Requests), or the head on its chain."""
+    if _is_chain_approver(req, user):
+        return
+    _require_coordinator(request=request, current_user=user, db=db)
+
+
 def _is_superadmin(user: User) -> bool:
     role = user.role.value if hasattr(user.role, "value") else str(user.role)
     return role == "superadmin"
@@ -463,13 +478,15 @@ def reject_fuel_request(
 @router.get("/{request_id}")
 def get_fuel_request(
     request_id: int,
+    request: Request,
     db: Session = Depends(get_db),
-    current_user: User = Depends(_require_coordinator),
+    current_user: User = Depends(get_current_user),
 ):
     _expire_codes(db)
     req = _query(db).filter(FuelRequest.id == request_id).first()
     if not req:
         raise HTTPException(status_code=404, detail="Fuel request not found.")
+    _ensure_can_handle(request, db, req, current_user)
     return _serialize(req, db)
 
 
@@ -480,10 +497,13 @@ def issue_fuel_code(
     liters: float = Body(..., embed=True),
     # "YYYY-MM-DDTHH:MM", Philippine time. Unused past it -> expired.
     code_expires_at: str | None = Body(None, embed=True),
+    request: Request = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(_require_coordinator),
+    current_user: User = Depends(get_current_user),
 ):
     req = _get_locked(db, request_id)
+    # Coordinator, or the Org Chart head who approved it.
+    _ensure_can_handle(request, db, req, current_user)
     if req.status != "pending":
         raise HTTPException(
             status_code=400, detail="This request already has a fuel code."
