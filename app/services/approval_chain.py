@@ -59,18 +59,41 @@ def _role(user: User | None) -> str | None:
     return user.role.value if hasattr(user.role, "value") else str(user.role)
 
 
-def _is_member(unit: OrgUnit, employee: Employee | None, user: User | None) -> bool:
-    """Same membership rules the Org Chart page uses (org_chart.py)."""
+def _match_strength(unit: OrgUnit, employee: Employee | None, user: User | None) -> int:
+    """How specifically this unit's rules pick the person: 4 named,
+    3 position, 2 department, 1 role, 0 not a member."""
     if employee is not None:
         if employee.id in {int(i) for i in load_json_list(unit.member_employee_ids)}:
-            return True
+            return 4
         positions = {str(p).strip().lower() for p in load_json_list(unit.member_positions)}
         if (employee.position or "").strip().lower() in positions:
-            return True
+            return 3
         if employee.department in set(load_json_list(unit.member_departments)):
-            return True
+            return 2
     roles = {str(r).strip().lower() for r in load_json_list(unit.member_roles)}
-    return bool(user is not None and (_role(user) or "").lower() in roles)
+    if user is not None and (_role(user) or "").lower() in roles:
+        return 1
+    return 0
+
+
+def _is_member(unit: OrgUnit, employee: Employee | None, user: User | None) -> bool:
+    """Same membership rules the Org Chart page uses (org_chart.py)."""
+    return _match_strength(unit, employee, user) > 0
+
+
+def _home_unit(units: list, by_id: dict, employee: Employee | None, user: User | None):
+    """The unit a person's requests start from. Deepest first; when they
+    match several units at the same level (e.g. "Wingvan" by department
+    and "Drivers" by role), the most specific rule wins -- named, then
+    position, department, role -- so it isn't left to display order."""
+    scored = [(u, _match_strength(u, employee, user)) for u in units]
+    scored = [(u, strength) for u, strength in scored if strength > 0]
+    if not scored:
+        return None
+    return sorted(
+        scored,
+        key=lambda pair: (-_depth(pair[0], by_id), -pair[1], pair[0].sort_order or 0, pair[0].id),
+    )[0][0]
 
 
 def _depth(unit: OrgUnit, by_id: dict) -> int:
@@ -104,7 +127,7 @@ def resolve_chain(
         start_unit = _deepest(headed, by_id)
         current = by_id.get(start_unit.parent_id) if start_unit.parent_id else None
     else:
-        current = _deepest([u for u in units if _is_member(u, employee, user)], by_id)
+        current = _home_unit(units, by_id, employee, user)
 
     chain: list[int] = []
     seen: set[int] = set()
@@ -130,7 +153,7 @@ def immediate_head(db: Session, employee: Employee | None, user: User | None) ->
         start = _deepest(headed, by_id)
         current = by_id.get(start.parent_id) if start.parent_id else None
     else:
-        current = _deepest([u for u in units if _is_member(u, employee, user)], by_id)
+        current = _home_unit(units, by_id, employee, user)
     seen: set[int] = set()
     while current and current.id not in seen:
         seen.add(current.id)
