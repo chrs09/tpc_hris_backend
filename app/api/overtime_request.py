@@ -739,7 +739,8 @@ def get_requests_for_my_approval(
             joinedload(OvertimeRequest.requested_by),
         )
         .filter(OvertimeRequest.status == "pending")
-        .order_by(OvertimeRequest.created_at.asc())
+        # Latest filed first.
+        .order_by(OvertimeRequest.created_at.desc(), OvertimeRequest.id.desc())
         .all()
     )
     mine = []
