@@ -846,6 +846,27 @@ async def patch_employee(
         else:
             employee.email = None
 
+        # The 201 email is the source of truth: the employee's login
+        # account(s) use the same email (password reset links go there).
+        linked_users = db.query(User).filter(User.employee_id == employee.id).all()
+        if employee.email:
+            taken = (
+                db.query(User.id)
+                .filter(
+                    User.email == employee.email,
+                    # Any account not linked to this employee.
+                    (User.employee_id.is_(None)) | (User.employee_id != employee.id),
+                )
+                .first()
+            )
+            if taken:
+                raise HTTPException(
+                    status_code=422,
+                    detail={"email": "Another user account already uses this email"},
+                )
+        for linked_user in linked_users:
+            linked_user.email = employee.email
+
     # Department, position, pay type and rates change only through Work
     # History -> Record a change (effective date + reason). The 201 form
     # still sends them; same value = fine, a different one is refused.
