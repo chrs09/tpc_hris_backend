@@ -79,6 +79,9 @@ MODULE_GROUPS = {
         # geofence checks a real driver's own phone would hit (see
         # app/api/admin/trip_bypass.py).
         "trip_bypass_actions",
+        # Enter trips by hand (app/api/admin/trip_manual_entries.py);
+        # approving them stays superadmin-only.
+        "trip_manual_entries",
     ],
     "customers": ["customers"],
     "suppliers": ["suppliers"],
