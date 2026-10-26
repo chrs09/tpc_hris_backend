@@ -8,7 +8,10 @@ from sqlalchemy.orm import Session
 from app.utils.response import api_response
 
 from app.services.file_service import FileService
-from app.services.email_service import send_employment_form_email
+from app.services.email_service import (
+    send_employment_form_email,
+    send_new_account_email,
+)
 from app.core.database import get_db
 from app.core.config import Settings
 from app.core.dependencies import get_current_user, require_role_or_module
@@ -990,8 +993,23 @@ def convert_to_employee(
         db.refresh(new_employee)
         db.refresh(new_user)
 
+        # Email them their login (best effort -- the conversion stands even
+        # if the email fails; the details are also shown to HR below).
+        login_email_sent = (
+            send_new_account_email(
+                to_email=new_user.email,
+                name=f"{new_employee.first_name or ''} {new_employee.last_name or ''}".strip(),
+                username=new_user.username,
+                password=temporary_password,
+            )
+            if new_user.email
+            else False
+        )
+
         return {
             "message": "Applicant converted to employee successfully",
+            "login_email_sent": login_email_sent,
+            "login_email": new_user.email,
             "employee_id": new_employee.id,
             "employee": {
                 "id": new_employee.id,

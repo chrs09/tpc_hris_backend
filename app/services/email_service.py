@@ -94,3 +94,76 @@ def send_employment_form_email(
     """
 
     return send_email(to_email, subject, html_body)
+
+
+def _email_button(url: str, label: str) -> str:
+    return f"""
+        <p style="text-align: center; margin: 24px 0;">
+            <a href="{url}"
+               style="background-color: #059669; color: #FFFFFF; padding: 12px 24px;
+                      border-radius: 8px; text-decoration: none; font-weight: bold;
+                      display: inline-block;">
+                {label}
+            </a>
+        </p>"""
+
+
+def send_new_account_email(to_email: str, name: str, username: str, password: str) -> bool:
+    """Login details for a new employee (applicant converted to employee)."""
+    from html import escape
+
+    login_url = f"{Settings.FRONTEND_URL.rstrip('/')}/login"
+    html_body = f"""
+    <div style="font-family: Arial, sans-serif; max-width: 560px; margin: 0 auto;">
+        <h2 style="color: #0F172A;">Hello {escape(name or username)},</h2>
+        <p style="color: #334155; font-size: 14px; line-height: 1.6;">
+            Welcome to Tytan Prime Corporation! Your employee account has been
+            created. Use the login details below to sign in to the HRIS portal
+            or the Tytan mobile app.
+        </p>
+        <table style="margin: 20px 0; border-collapse: collapse; font-size: 14px;">
+            <tr>
+                <td style="padding: 8px 16px 8px 0; color: #64748B;">Username</td>
+                <td style="padding: 8px 0; font-weight: bold; color: #0F172A;">{escape(username)}</td>
+            </tr>
+            <tr>
+                <td style="padding: 8px 16px 8px 0; color: #64748B;">Password</td>
+                <td style="padding: 8px 0; font-weight: bold; color: #0F172A;
+                           font-family: monospace; font-size: 15px;">{escape(password)}</td>
+            </tr>
+        </table>
+        {_email_button(login_url, "Sign in")}
+        <p style="color: #64748B; font-size: 12px; line-height: 1.6;">
+            Keep these details private. You can change your password anytime with
+            "Forgot password?" on the login page. If you didn't expect this email,
+            contact HR right away.
+        </p>
+    </div>
+    """
+    return send_email(to_email, "Your Tytan Prime Account - Login Details", html_body)
+
+
+def send_password_reset_email(to_email: str, name: str, username: str, reset_url: str) -> bool:
+    """The "Forgot password?" link (expires in 1 hour, works once)."""
+    from html import escape
+
+    html_body = f"""
+    <div style="font-family: Arial, sans-serif; max-width: 560px; margin: 0 auto;">
+        <h2 style="color: #0F172A;">Hello {escape(name or username)},</h2>
+        <p style="color: #334155; font-size: 14px; line-height: 1.6;">
+            We received a request to reset the password for your Tytan Prime
+            account (username <strong>{escape(username)}</strong>). Click the
+            button below to set a new password.
+        </p>
+        {_email_button(reset_url, "Reset Password")}
+        <p style="color: #64748B; font-size: 12px; line-height: 1.6;">
+            This link expires in 1 hour and works only once. If the button doesn't
+            work, copy and paste this URL into your browser:<br />{escape(reset_url)}
+        </p>
+        <p style="color: #64748B; font-size: 12px; margin-top: 16px;">
+            If you didn't ask for this, you can ignore this email -- your password
+            stays the same.
+        </p>
+    </div>
+    """
+    return send_email(to_email, "Reset Your Password - Tytan Prime Corporation", html_body)

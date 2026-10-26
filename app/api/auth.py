@@ -205,3 +205,156 @@ def change_password(
     logger.info("🔑 Password updated for user: %s", current_user.username)
 
     return {"message": "Password updated successfully"}
+
+
+# =========================================================
+# FORGOT PASSWORD -- "Forgot password?" on the login page emails a reset
+# link (1 hour). The link is a token signed with a SEPARATE key (so it can
+# never be used to log in) and tied to the current password hash, so it
+# works once: after the password changes, the link is dead.
+# =========================================================
+_RESET_PURPOSE = "password_reset"
+_RESET_MINUTES = 60
+# Same address can't trigger another email within this window.
+_RESET_COOLDOWN_S = 60
+_last_reset_sent: dict[int, float] = {}
+
+
+def _reset_key() -> str:
+    return f"{settings.SECRET_KEY}:{_RESET_PURPOSE}"
+
+
+def _password_fingerprint(user: User) -> str:
+    import hashlib
+
+    return hashlib.sha256((user.hashed_password or "").encode()).hexdigest()[:24]
+
+
+def _user_email(user: User) -> str | None:
+    employee = getattr(user, "employee", None)
+    return user.email or (employee.email if employee else None)
+
+
+@router.post("/forgot-password")
+def forgot_password(
+    identifier: str = Body(..., embed=True),
+    db: Session = Depends(get_db),
+):
+    """Username or email -> email a reset link. Always the same reply, so
+    it doesn't reveal which accounts exist."""
+    import time
+
+    from app.services.email_service import send_password_reset_email
+
+    reply = {
+        "message": (
+            "If that account exists and has an email on file, a password reset "
+            "link has been sent to it. The link expires in 1 hour."
+        )
+    }
+    value = (identifier or "").strip().lower()
+    if not value:
+        raise HTTPException(status_code=400, detail="Enter your username or email.")
+
+    user = (
+        db.query(User)
+        .filter(
+            (func.lower(User.username) == value) | (func.lower(User.email) == value),
+            User.is_active.is_(True),
+        )
+        .first()
+    )
+    if not user:
+        from app.models.employees import Employee
+
+        employee = (
+            db.query(Employee).filter(func.lower(Employee.email) == value).first()
+        )
+        if employee:
+            user = (
+                db.query(User)
+                .filter(User.employee_id == employee.id, User.is_active.is_(True))
+                .first()
+            )
+    to_email = _user_email(user) if user else None
+    if not user or not to_email:
+        logger.info("Forgot password: no account/email for %r", value)
+        return reply
+
+    now = time.monotonic()
+    if now - _last_reset_sent.get(user.id, -_RESET_COOLDOWN_S * 2) < _RESET_COOLDOWN_S:
+        return reply
+    _last_reset_sent[user.id] = now
+
+    token = jwt.encode(
+        {
+            "sub": str(user.id),
+            "purpose": _RESET_PURPOSE,
+            "pfp": _password_fingerprint(user),
+            "exp": datetime.utcnow() + timedelta(minutes=_RESET_MINUTES),
+        },
+        _reset_key(),
+        algorithm=settings.ALGORITHM,
+    )
+    reset_url = f"{settings.FRONTEND_URL.rstrip('/')}/reset-password?token={token}"
+    send_password_reset_email(
+        to_email=to_email,
+        name=display_name(user),
+        username=user.username,
+        reset_url=reset_url,
+    )
+    return reply
+
+
+def _user_from_reset_token(db: Session, token: str) -> User:
+    invalid = HTTPException(
+        status_code=400,
+        detail="This reset link is invalid or has expired. Request a new one.",
+    )
+    try:
+        payload = jwt.decode(token, _reset_key(), algorithms=[settings.ALGORITHM])
+    except JWTError:
+        raise invalid
+    if payload.get("purpose") != _RESET_PURPOSE:
+        raise invalid
+    user = db.query(User).filter(User.id == int(payload.get("sub") or 0)).first()
+    if not user or not user.is_active or payload.get("pfp") != _password_fingerprint(user):
+        # Unknown, deactivated, or the password already changed (used link).
+        raise invalid
+    return user
+
+
+@router.get("/reset-password/check")
+def check_reset_link(token: str, db: Session = Depends(get_db)):
+    """For the reset form: is the link still good, and whose account."""
+    user = _user_from_reset_token(db, token)
+    return {"valid": True, "username": user.username}
+
+
+@router.post("/reset-password")
+def reset_password_with_link(
+    token: str = Body(..., embed=True),
+    new_password: str = Body(..., embed=True),
+    db: Session = Depends(get_db),
+):
+    user = _user_from_reset_token(db, token)
+    if not new_password or len(new_password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
+
+    from app.models.user_revision import UserRevision
+
+    user.hashed_password = hash_password(new_password)
+    user.must_change_password = False
+    db.add(
+        UserRevision(
+            user_id=user.id,
+            field_changed="password",
+            # Never the password itself -- only that it was reset, and how.
+            old_value=None,
+            new_value="reset (forgot password link)",
+            reason=None,
+            changed_by_user_id=user.id,
+        )
+    )
+    db.commit()
+    return {"message": "Your password has been changed. You can now log in.", "username": user.username}
