@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.dependencies import require_role_or_module
+from app.core.dependencies import require_role_or_module, require_superadmin
 from app.models.truck_type import TruckType
 from app.models.vehicle_unit import VehicleUnit
 
@@ -61,20 +61,16 @@ def get_truck_types(
 def create_truck_type(
     payload: TruckTypeCreateRequest,
     db: Session = Depends(get_db),
-    current_admin=Depends(
-        require_role_or_module(
-            roles=["admin", "superadmin", "coordinator_admin"],
-            module_key="fleet_management.truck_types",
-        )
-    ),
+    # Vehicle types are adjusted by the superadmin only.
+    current_admin=Depends(require_superadmin),
 ):
     name = payload.name.strip()
     if not name:
-        raise HTTPException(status_code=400, detail="Truck type name is required.")
+        raise HTTPException(status_code=400, detail="Vehicle type name is required.")
 
     existing = db.query(TruckType).filter(TruckType.name == name).first()
     if existing:
-        raise HTTPException(status_code=400, detail="This truck type already exists.")
+        raise HTTPException(status_code=400, detail="This vehicle type already exists.")
 
     truck_type = TruckType(
         name=name,
@@ -92,21 +88,17 @@ def update_truck_type(
     truck_type_id: int,
     payload: TruckTypeUpdateRequest,
     db: Session = Depends(get_db),
-    current_admin=Depends(
-        require_role_or_module(
-            roles=["admin", "superadmin", "coordinator_admin"],
-            module_key="fleet_management.truck_types",
-        )
-    ),
+    # Vehicle types are adjusted by the superadmin only.
+    current_admin=Depends(require_superadmin),
 ):
     truck_type = db.query(TruckType).filter(TruckType.id == truck_type_id).first()
     if not truck_type:
-        raise HTTPException(status_code=404, detail="Truck type not found.")
+        raise HTTPException(status_code=404, detail="Vehicle type not found.")
 
     if payload.name is not None:
         name = payload.name.strip()
         if not name:
-            raise HTTPException(status_code=400, detail="Truck type name is required.")
+            raise HTTPException(status_code=400, detail="Vehicle type name is required.")
         existing = (
             db.query(TruckType)
             .filter(TruckType.name == name, TruckType.id != truck_type_id)
@@ -114,7 +106,7 @@ def update_truck_type(
         )
         if existing:
             raise HTTPException(
-                status_code=400, detail="This truck type already exists."
+                status_code=400, detail="This vehicle type already exists."
             )
         truck_type.name = name
 
@@ -131,16 +123,12 @@ def update_truck_type(
 def delete_truck_type(
     truck_type_id: int,
     db: Session = Depends(get_db),
-    current_admin=Depends(
-        require_role_or_module(
-            roles=["admin", "superadmin", "coordinator_admin"],
-            module_key="fleet_management.truck_types",
-        )
-    ),
+    # Vehicle types are adjusted by the superadmin only.
+    current_admin=Depends(require_superadmin),
 ):
     truck_type = db.query(TruckType).filter(TruckType.id == truck_type_id).first()
     if not truck_type:
-        raise HTTPException(status_code=404, detail="Truck type not found.")
+        raise HTTPException(status_code=404, detail="Vehicle type not found.")
 
     in_use = (
         db.query(VehicleUnit)
@@ -150,10 +138,10 @@ def delete_truck_type(
     if in_use:
         raise HTTPException(
             status_code=400,
-            detail=f"Can't delete -- {in_use} vehicle unit(s) are still using this truck type.",
+            detail=f"Can't delete -- {in_use} vehicle unit(s) are still using this vehicle type.",
         )
 
     db.delete(truck_type)
     db.commit()
 
-    return {"message": "Truck type deleted."}
+    return {"message": "Vehicle type deleted."}

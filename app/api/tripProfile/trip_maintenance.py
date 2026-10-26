@@ -234,7 +234,7 @@ def create_vehicle_unit(
             .first()
         )
         if not truck_type:
-            raise HTTPException(status_code=400, detail="Invalid truck type.")
+            raise HTTPException(status_code=400, detail="Invalid vehicle type.")
 
     existing_plate = (
         db.query(VehicleUnit).filter(VehicleUnit.plate_number == plate_number).first()
@@ -384,7 +384,7 @@ def update_vehicle_unit(
                 .first()
             )
             if not truck_type:
-                raise HTTPException(status_code=400, detail="Invalid truck type.")
+                raise HTTPException(status_code=400, detail="Invalid vehicle type.")
             vehicle_unit.truck_type_id = truck_type.id
 
     if cr_number is not None:

@@ -36,7 +36,7 @@ _require_access = require_role_or_module(
 )
 
 PH = timedelta(hours=8)
-NO_TRUCK_TYPE = "No truck type"
+NO_TRUCK_TYPE = "No vehicle type"
 
 
 def _month_bounds(month: str) -> tuple[date, date]:

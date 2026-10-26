@@ -16,7 +16,7 @@ class TruckType(Base):
     """A vehicle classification (e.g. "6-Wheeler", "10-Wheeler Wingvan")
     with an associated size/capacity description -- assignable to
     VehicleUnit rows under Fleet Management. Managed by
-    superadmin/admin under Fleet Management -> Truck Types."""
+    the superadmin under Fleet Management -> Vehicle Types."""
 
     __tablename__ = "tpc_truck_types"
 
