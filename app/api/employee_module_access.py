@@ -48,6 +48,8 @@ MODULE_GROUPS = {
             # these; only ticking them here does (superadmin always can).
             "children": ["payroll_prepare", "payroll_approve", "payroll_release"],
         },
+        # Incentive Policies page (sample UI for now).
+        "incentive_policies",
     ],
     "trip_management": [
         # Assigned/Active trip monitoring, with each active trip's live
