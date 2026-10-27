@@ -9,6 +9,8 @@ Revises: d3a4b5c6e7f9
 Create Date: 2026-10-26
 """
 
+import re
+
 import sqlalchemy as sa
 from alembic import op
 
@@ -29,6 +31,9 @@ def upgrade():
         )
     ).fetchall()
     for user_id, email in rows:
+        email = (email or "").strip()
+        if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email):
+            continue  # "N/A" and other placeholders
         taken = conn.execute(
             sa.text("SELECT id FROM tpc_users WHERE email = :email AND id <> :id"),
             {"email": email, "id": user_id},

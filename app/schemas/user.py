@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, field_validator
 from enum import Enum
 from app.models.user import UserRole
 
@@ -56,6 +56,13 @@ class UserResponse(BaseModel):
     id: int
     username: str
     email: EmailStr | None = None
+
+    @field_validator("email", mode="before")
+    @classmethod
+    def _blank_invalid_email(cls, value):
+        from app.utils.email_check import valid_email
+
+        return valid_email(value)
     role: UserRole
     is_active: bool
     # The linked employee's full name, when this account has one --

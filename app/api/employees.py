@@ -848,12 +848,17 @@ async def patch_employee(
 
         # The 201 email is the source of truth: the employee's login
         # account(s) use the same email (password reset links go there).
+        # Placeholders like "N/A" stay on the 201 only -- the account gets
+        # no email.
+        from app.utils.email_check import valid_email
+
+        account_email = valid_email(employee.email)
         linked_users = db.query(User).filter(User.employee_id == employee.id).all()
-        if employee.email:
+        if account_email:
             taken = (
                 db.query(User.id)
                 .filter(
-                    User.email == employee.email,
+                    User.email == account_email,
                     # Any account not linked to this employee.
                     (User.employee_id.is_(None)) | (User.employee_id != employee.id),
                 )
@@ -865,7 +870,7 @@ async def patch_employee(
                     detail={"email": "Another user account already uses this email"},
                 )
         for linked_user in linked_users:
-            linked_user.email = employee.email
+            linked_user.email = account_email
 
     # Department, position, pay type and rates change only through Work
     # History -> Record a change (effective date + reason). The 201 form

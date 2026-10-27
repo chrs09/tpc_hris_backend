@@ -233,8 +233,10 @@ def _password_fingerprint(user: User) -> str:
 def _user_email(user: User) -> str | None:
     """The 201 (employee) email first -- the source of truth -- else the
     account's own email (accounts with no employee record)."""
+    from app.utils.email_check import valid_email
+
     employee = getattr(user, "employee", None)
-    return (employee.email if employee and employee.email else None) or user.email
+    return valid_email(employee.email if employee else None) or valid_email(user.email)
 
 
 @router.post("/forgot-password")
