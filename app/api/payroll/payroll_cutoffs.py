@@ -19,9 +19,15 @@ from app.models.user import User
 
 router = APIRouter(prefix="/payroll-cutoffs", tags=["Payroll Cutoffs"])
 
-# Same access as the Payroll page; "Can edit: No" makes it view-only.
+# Reading: the Payroll page builds its cutoffs from these, so Payroll or
+# Payroll Cutoffs. Changing: Payroll Cutoffs only ("Can edit: No" makes it
+# view-only).
 _require_payroll = require_role_or_module(
-    roles=["admin", "payroll_admin"], module_key="payroll.payroll"
+    roles=["admin", "payroll_admin"],
+    module_key=["payroll.payroll", "payroll.payroll_cutoffs"],
+)
+_require_cutoffs = require_role_or_module(
+    roles=["admin", "payroll_admin"], module_key="payroll.payroll_cutoffs"
 )
 
 SCHEDULE_TYPES = ("semi_monthly", "weekly", "monthly")
@@ -84,7 +90,7 @@ def save_cutoff_rule(
     department: str,
     payload: CutoffRuleIn,
     db: Session = Depends(get_db),
-    current_user: User = Depends(_require_payroll),
+    current_user: User = Depends(_require_cutoffs),
 ):
     department = department.strip()
     if not department or len(department) > 50:
@@ -149,7 +155,7 @@ def save_cutoff_rule(
 def delete_cutoff_rule(
     department: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(_require_payroll),
+    current_user: User = Depends(_require_cutoffs),
 ):
     rule = (
         db.query(PayrollCutoffRule)

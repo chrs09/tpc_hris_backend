@@ -48,6 +48,8 @@ MODULE_GROUPS = {
             # these; only ticking them here does (superadmin always can).
             "children": ["payroll_prepare", "payroll_approve", "payroll_release"],
         },
+        "payroll_cutoffs",
+        "contribution_tables",
         # Incentive Policies page (sample UI for now).
         "incentive_policies",
     ],
@@ -68,6 +70,8 @@ MODULE_GROUPS = {
         # Assignment. The name "trip_bypass" now belongs to the
         # separate feature below (acting as a driver on a stuck trip).
         "trip_assignment",
+        # Route Rides page (rides are also assigned from Trip Assignment).
+        "route_rides",
         "trip_categories",
         # Origins (hubs/yards a driver dispatches from) -- see
         # app/api/admin/origins.py. Still Store rows (Store.is_hub =

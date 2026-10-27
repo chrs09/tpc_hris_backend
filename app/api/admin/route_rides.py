@@ -37,7 +37,11 @@ router = APIRouter(prefix="/admin/route-rides", tags=["Route Rides"])
 
 _require_trip_assignment = require_role_or_module(
     roles=["admin", "superadmin", "coordinator_admin", "coordinator"],
-    module_key=["trip_management.trip_assignment", "trip_management.trips"],
+    module_key=[
+        "trip_management.trip_assignment",
+        "trip_management.trips",
+        "trip_management.route_rides",
+    ],
 )
 
 
