@@ -52,13 +52,41 @@ def _hhmm(dt: datetime | None) -> str | None:
     return (dt + PH).strftime("%I:%M %p").lstrip("0") if dt else None
 
 
+# Longest range one summary covers (every day is listed).
+MAX_RANGE_DAYS = 93
+
+
+def _range_bounds(date_from: str, date_to: str) -> tuple[date, date]:
+    try:
+        first = datetime.strptime(date_from, "%Y-%m-%d").date()
+        last = datetime.strptime(date_to, "%Y-%m-%d").date()
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Dates must look like 2026-10-01.")
+    if last < first:
+        raise HTTPException(status_code=400, detail="Date to is before date from.")
+    if (last - first).days + 1 > MAX_RANGE_DAYS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Pick a range of up to {MAX_RANGE_DAYS} days.",
+        )
+    return first, last
+
+
 @router.get("")
 def get_delivery_summary(
-    month: str = Query(..., description="YYYY-MM"),
+    date_from: str | None = Query(None, description="YYYY-MM-DD"),
+    date_to: str | None = Query(None, description="YYYY-MM-DD"),
+    # Older callers: a whole month.
+    month: str | None = Query(None, description="YYYY-MM"),
     db: Session = Depends(get_db),
     current_user: User = Depends(_require_access),
 ):
-    first, last = _month_bounds(month)
+    if date_from and date_to:
+        first, last = _range_bounds(date_from, date_to)
+    elif month:
+        first, last = _month_bounds(month)
+    else:
+        raise HTTPException(status_code=400, detail="Pick a date range.")
     start_utc = datetime.combine(first, datetime.min.time()) - PH
     end_utc = datetime.combine(last + timedelta(days=1), datetime.min.time()) - PH
 
@@ -281,6 +309,8 @@ def get_delivery_summary(
 
     return {
         "month": month,
+        "date_from": str(first),
+        "date_to": str(last),
         "total_trips": len(trips),
         "truck_types": truck_types,
         "by_driver": driver_rows,
