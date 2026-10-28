@@ -16,7 +16,7 @@ from fastapi import (
 )
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session, joinedload
-from datetime import datetime, date, timedelta
+from datetime import datetime, timedelta
 
 from app.core.database import get_db
 from app.core.dependencies import get_current_trip_manager, get_current_user, require_role_or_module
@@ -161,6 +161,19 @@ def get_trip_summary(
     day_start = ph_to_utc(datetime.combine(ph_today, datetime.min.time()))
     day_end = day_start + timedelta(days=1)
 
+    # Trips dispatched today; a driver's 2nd, 3rd ... of the day are the
+    # ones past their first.
+    dispatched_today = db.query(Trip).filter(
+        Trip.created_at >= day_start,
+        Trip.created_at < day_end,
+        Trip.status != TripStatus.CANCELLED,
+        Trip.is_archived.is_(False),
+    )
+    trips_today = dispatched_today.count()
+    drivers_today = dispatched_today.with_entities(
+        func.count(func.distinct(Trip.driver_id))
+    ).scalar() or 0
+
     return {
         "assigned_trips": db.query(Trip)
         .filter(Trip.status == TripStatus.ASSIGNED)
@@ -189,6 +202,7 @@ def get_trip_summary(
             ),
         )
         .count(),
+        "succeeding_trips_today": trips_today - drivers_today,
     }
 
 
