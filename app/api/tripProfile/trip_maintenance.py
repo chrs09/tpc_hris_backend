@@ -13,6 +13,7 @@ from app.models.vehicle_unit import VehicleUnit
 from app.models.truck_type import TruckType
 from app.models.vehicle_or_history import VehicleUnitORHistory
 from app.models.vehicle_unit_checklist import VehicleUnitChecklist
+from app.models.company import Company
 from app.models.TripRate import TripRateProfile
 from app.models.stores import Store
 from app.models.customer import Customer
@@ -148,7 +149,7 @@ def get_vehicle_units(
 ):
     units = (
         db.query(VehicleUnit)
-        .options(joinedload(VehicleUnit.truck_type))
+        .options(joinedload(VehicleUnit.truck_type), joinedload(VehicleUnit.company))
         .order_by(VehicleUnit.plate_number.asc())
         .all()
     )
@@ -169,12 +170,43 @@ def get_vehicle_units(
             "truck_type_id": unit.truck_type_id,
             "truck_type_name": unit.truck_type.name if unit.truck_type else None,
             "truck_type_size": unit.truck_type.size if unit.truck_type else None,
+            **_company_fields(unit, current_user),
             **_unit_extras(db, unit),
         }
         for unit in units
     ]
 
     return api_response(response)
+
+
+def _is_superadmin(user: User) -> bool:
+    return getattr(user.role, "value", user.role) == "superadmin"
+
+
+def _company_fields(unit: VehicleUnit, user: User) -> dict:
+    """The unit's company -- superadmin only (left out for everyone else)."""
+    if not _is_superadmin(user):
+        return {}
+    return {
+        "company_id": unit.company_id,
+        "company_name": unit.company.name if unit.company else None,
+    }
+
+
+def _company_id(db: Session, value: str | None, user: User):
+    """Parses the form's company_id: (True, id or None) when the
+    superadmin sent one, (False, None) to leave it unchanged."""
+    if value is None or not _is_superadmin(user):
+        return False, None
+    if value.strip() == "":
+        return True, None
+    try:
+        company = db.query(Company).filter(Company.id == int(value)).first()
+    except ValueError:
+        company = None
+    if not company:
+        raise HTTPException(status_code=400, detail="Invalid company.")
+    return True, company.id
 
 
 @router.get("/vehicle-units/active")
@@ -219,6 +251,7 @@ def create_vehicle_unit(
     plate_number: str = Form(...),
     description: str = Form(None),
     truck_type_id: int = Form(None),
+    company_id: str = Form(None),
     cr_number: str = Form(None),
     cr_expiration_date: str = Form(None),
     cr_document: UploadFile = File(None),
@@ -228,6 +261,7 @@ def create_vehicle_unit(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    _, new_company_id = _company_id(db, company_id, current_user)
     if truck_type_id is not None:
         truck_type = (
             db.query(TruckType)
@@ -275,6 +309,7 @@ def create_vehicle_unit(
         plate_number=plate_number,
         description=description,
         truck_type_id=truck_type_id,
+        company_id=new_company_id,
         cr_number=cr_number,
         cr_expiration_date=_parse_expiration_date(cr_expiration_date),
         or_number=or_number,
@@ -313,6 +348,7 @@ def update_vehicle_unit(
     description: str = Form(None),
     is_active: bool = Form(None),
     truck_type_id: str = Form(None),
+    company_id: str = Form(None),
     cr_number: str = Form(None),
     cr_expiration_date: str = Form(None),
     cr_document: UploadFile = File(None),
@@ -387,6 +423,10 @@ def update_vehicle_unit(
             if not truck_type:
                 raise HTTPException(status_code=400, detail="Invalid vehicle type.")
             vehicle_unit.truck_type_id = truck_type.id
+
+    company_sent, new_company_id = _company_id(db, company_id, current_user)
+    if company_sent:
+        vehicle_unit.company_id = new_company_id
 
     if cr_number is not None:
         vehicle_unit.cr_number = cr_number

@@ -102,6 +102,11 @@ class VehicleUnit(Base):
     )
     assigned_driver = relationship("User", foreign_keys=[assigned_driver_id])
 
+    # The company the unit belongs to (Administrator -> Companies). Set
+    # and shown to the superadmin only; for future use.
+    company_id = Column(Integer, ForeignKey("tpc_companies.id"), nullable=True, index=True)
+    company = relationship("Company")
+
     truck_type = relationship("TruckType", back_populates="vehicle_units")
 
     trips = relationship(
