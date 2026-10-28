@@ -59,6 +59,7 @@ from .dispatch_helpers import DispatchHelper as DispatchHelper
 from .holiday import Holiday as Holiday
 from .payroll_deductions import PayrollDeduction as PayrollDeduction
 from .payroll_cutoff_rule import PayrollCutoffRule as PayrollCutoffRule
+from .incentive_program import IncentiveProgram as IncentiveProgram
 from .attendance_adjustment import AttendanceAdjustment as AttendanceAdjustment
 from .bank import Bank as Bank
 from .finance_expense import FinanceExpense as FinanceExpense
