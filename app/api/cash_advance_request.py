@@ -758,6 +758,132 @@ def request_cash_advance_exception(
 
 
 # =========================
+# DEDUCTION HISTORY -- every deduction across all cash advances, newest
+# first: payroll ones (with their cutoff and that payroll's status) and
+# ones recorded by hand, each with the advance's balance after it.
+# =========================
+
+
+@router.get("/deductions")
+def list_deduction_history(
+    date_from: str | None = None,
+    date_to: str | None = None,
+    source: str | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(
+        require_role_or_module(roles=[], module_key="finance.cash_advance")
+    ),
+):
+    """`date_from` / `date_to` ("YYYY-MM-DD", PH dates the deduction was
+    recorded); `source` "payroll" or "manual"."""
+    from datetime import date as _date, timedelta
+
+    from app.models.payroll_deductions import PayrollDeduction
+    from app.models.payroll_run import PayrollRun
+    from app.utils.timezone import ph_to_utc
+
+    try:
+        start = _date.fromisoformat(date_from) if date_from else None
+        end = _date.fromisoformat(date_to) if date_to else None
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Dates must be YYYY-MM-DD.")
+
+    # Every log of the advances involved, so each row's balance-after
+    # counts the deductions before it even outside the date range.
+    logs = (
+        db.query(CashAdvanceDeductionLog)
+        .options(
+            joinedload(CashAdvanceDeductionLog.recorded_by),
+            joinedload(CashAdvanceDeductionLog.cash_advance_request).joinedload(
+                CashAdvanceRequest.employee
+            ),
+            joinedload(CashAdvanceDeductionLog.cash_advance_request).joinedload(
+                CashAdvanceRequest.requester
+            ),
+        )
+        .order_by(CashAdvanceDeductionLog.recorded_at, CashAdvanceDeductionLog.id)
+        .all()
+    )
+
+    paid_so_far = {}
+    balance_after = {}
+    for log in logs:
+        req = log.cash_advance_request
+        payable = float(req.approved_amount if req.approved_amount is not None else req.amount)
+        paid_so_far[req.id] = paid_so_far.get(req.id, 0) + float(log.amount)
+        balance_after[log.id] = round(max(payable - paid_so_far[req.id], 0), 2)
+
+    lo = ph_to_utc(datetime.combine(start, datetime.min.time())) if start else None
+    hi = ph_to_utc(datetime.combine(end + timedelta(days=1), datetime.min.time())) if end else None
+    shown = [
+        log
+        for log in logs
+        if (lo is None or log.recorded_at >= lo)
+        and (hi is None or log.recorded_at < hi)
+        and (
+            not source
+            or (source == "payroll" and log.payroll_cutoff_period)
+            or (source == "manual" and not log.payroll_cutoff_period)
+        )
+    ]
+
+    # Payroll status of each (employee, cutoff): the department comes from
+    # the saved payroll row, the status from that department's run.
+    def employee_of(req):
+        if req.employee_id:
+            return req.employee_id
+        return req.requester.employee_id if req.requester else None
+
+    cutoffs = {log.payroll_cutoff_period for log in shown if log.payroll_cutoff_period}
+    dept_of = {}
+    if cutoffs:
+        for emp_id, cutoff, dept in db.query(
+            PayrollDeduction.employee_id,
+            PayrollDeduction.cutoff_period,
+            PayrollDeduction.department,
+        ).filter(PayrollDeduction.cutoff_period.in_(cutoffs)):
+            dept_of[(emp_id, cutoff)] = dept
+    run_status = {}
+    for run in db.query(PayrollRun).filter(
+        PayrollRun.department.in_(set(dept_of.values()) or {""})
+    ):
+        key = (run.department, f"{run.period_start.isoformat()}_{run.period_end.isoformat()}")
+        run_status[key] = run.status
+
+    rows = []
+    for log in reversed(shown):
+        req = log.cash_advance_request
+        employee = req.employee
+        emp_id = employee_of(req)
+        cutoff = log.payroll_cutoff_period
+        dept = dept_of.get((emp_id, cutoff)) if cutoff else None
+        rows.append({
+            "id": log.id,
+            "recorded_at": _utc(log.recorded_at),
+            "amount": float(log.amount),
+            "source": "payroll" if cutoff else "manual",
+            "cutoff_period": cutoff,
+            "department": dept,
+            "payroll_status": run_status.get((dept, cutoff)) if dept else None,
+            "note": log.note,
+            "recorded_by_name": display_name(log.recorded_by) if log.recorded_by else None,
+            "request_id": req.id,
+            "employee_id": emp_id,
+            "employee_name": (
+                f"{employee.first_name} {employee.last_name}"
+                if employee
+                else (req.requester.username if req.requester else None)
+            ),
+            "request_amount": float(
+                req.approved_amount if req.approved_amount is not None else req.amount
+            ),
+            "request_reason": req.reason,
+            "balance_after": balance_after[log.id],
+        })
+    return rows
+
+
+# =========================
 # BALANCE LEDGER (superadmin)
 # =========================
 
