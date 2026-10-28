@@ -36,7 +36,7 @@ from app.services.trip_remarks import (
     serialize_bypass_remarks,
     serialize_trip_remarks,
 )
-from app.utils.timezone import utc_to_ph
+from app.utils.timezone import ph_to_utc, utc_to_ph
 from app.utils.user_display import display_name as _display_name
 from app.services.approval_chain import immediate_head
 from app.models.route_ride import RouteRide
@@ -156,7 +156,10 @@ def _manual_entry_trip_ids(db: Session, trip_ids) -> set:
 def get_trip_summary(
     db: Session = Depends(get_db), current_admin=Depends(require_role_or_module(roles=["admin", "superadmin", "coordinator_admin", "coordinator"], module_key="trip_management.trips"))
 ):
-    today = date.today()
+    # Today in PH, as the UTC range the timestamp columns are stored in.
+    ph_today = utc_to_ph(datetime.utcnow()).date()
+    day_start = ph_to_utc(datetime.combine(ph_today, datetime.min.time()))
+    day_end = day_start + timedelta(days=1)
 
     return {
         "assigned_trips": db.query(Trip)
@@ -171,8 +174,20 @@ def get_trip_summary(
         )
         .count(),
         "active_trips": db.query(Trip).filter(Trip.status == TripStatus.ACTIVE).count(),
+        # Checked in (back at the hub) today: fully approved trips, plus
+        # trips dispatched today whose check-in is still going through
+        # approvals.
         "completed_today": db.query(Trip)
-        .filter(Trip.status == TripStatus.COMPLETED, Trip.end_time >= today)
+        .filter(
+            Trip.end_time >= day_start,
+            Trip.end_time < day_end,
+            Trip.status != TripStatus.CANCELLED,
+            Trip.is_archived.is_(False),
+            or_(
+                Trip.status == TripStatus.COMPLETED,
+                Trip.created_at >= day_start,
+            ),
+        )
         .count(),
     }
 
