@@ -9,18 +9,32 @@
 #                          trip_amounts[N-1] (the last one repeats); with
 #                          first_trip_before the 1st trip only earns when
 #                          it started before that time.
-#   long_distance       -- the trip's farthest destination (km from the
-#                          area list, else straight line from the trip's
-#                          origin / the default hub) picks a km range;
-#                          helpers get the base, the driver base + extra.
+#   long_distance       -- a level per 30 km past the first 30 (31-60 km
+#                          = 1, 61-90 = 2 ... capped at max_steps); the
+#                          driver gets 50 and the helper 20 per level. The
+#                          level comes from the route list (start hub +
+#                          destination city, e.g. Consolacion -> Sogod =
+#                          1, Cebu Plant -> Carcar = 1; the city is found
+#                          in the store's address), else from the
+#                          straight-line km from the trip's origin / the
+#                          default hub. The trip's farthest (highest
+#                          level) destination counts.
 #   complete_attendance -- every workday present (approved leave and
 #                          holidays don't break it); bonus % of the
 #                          base, weekday holidays worked x2, Saturdays
 #                          +30% when the base is the daily rate.
 # A trip's day is the PH date it started (same as payroll / route rides).
+#
+# pay_in_payroll (every type): the amount goes in the Payroll page's
+# Incentives column (and gross pay). Per-trip types (long distance, daily
+# cash) count the trips inside the cutoff; whole-period types (tiers,
+# attendance) are paid in the cutoff their release date (else period end)
+# falls in. Off by default for daily cash (the coordinator pays it in
+# cash) and tiers (released in cash on the 5th per the memos).
 
 import json
 import math
+import re
 from collections import defaultdict
 from datetime import date, datetime, time, timedelta
 
@@ -64,8 +78,12 @@ RULE_TYPES = {
     "long_distance": {
         "label": "Long Distance",
         "defaults": {
-            "ranges": [],
-            "area_km": {},
+            "free_km": 30,
+            "step_km": 30,
+            "driver_per_step": 50,
+            "helper_per_step": 20,
+            "max_steps": 4,
+            "routes": [],
             "use_gps_distance": True,
         },
     },
@@ -121,12 +139,29 @@ def _hhmm(value, label):
     return value
 
 
+PAY_IN_PAYROLL_DEFAULT = {
+    "trip_tiers": False,
+    "daily_cash": False,
+    "long_distance": True,
+    "complete_attendance": True,
+}
+PER_TRIP_TYPES = ("daily_cash", "long_distance")
+
+
 def clean_settings(rule_type: str, settings: dict | None) -> dict:
     """The type's defaults with `settings` laid over, checked. Raises
     IncentiveSettingsError with a message for the page."""
     if rule_type not in RULE_TYPES:
         raise IncentiveSettingsError("Unknown incentive type.")
-    s = {**RULE_TYPES[rule_type]["defaults"], **(settings or {})}
+    settings = settings or {}
+    pay = settings.get("pay_in_payroll")
+    cleaned = _clean_type(rule_type, settings)
+    cleaned["pay_in_payroll"] = PAY_IN_PAYROLL_DEFAULT[rule_type] if pay is None else bool(pay)
+    return cleaned
+
+
+def _clean_type(rule_type: str, settings: dict) -> dict:
+    s = {**RULE_TYPES[rule_type]["defaults"], **settings}
 
     if rule_type == "trip_tiers":
         tiers = []
@@ -156,26 +191,33 @@ def clean_settings(rule_type: str, settings: dict | None) -> dict:
         }
 
     if rule_type == "long_distance":
-        ranges = []
-        for i, r in enumerate(s.get("ranges") or [], start=1):
-            min_km = _num(r.get("min_km"), f"Range {i} from (km)")
-            max_km = r.get("max_km")
-            max_km = None if max_km in (None, "") else _num(max_km, f"Range {i} to (km)")
-            if max_km is not None and max_km <= min_km:
-                raise IncentiveSettingsError(f"Range {i}: 'to' km must be above 'from' km.")
-            ranges.append({
-                "label": str(r.get("label") or f"{min_km:g}+ km").strip()[:60],
-                "min_km": min_km,
-                "max_km": max_km,
-                "helper_amount": _num(r.get("helper_amount"), f"Range {i} base amount"),
-                "driver_extra": _num(r.get("driver_extra"), f"Range {i} driver extra"),
+        max_steps = s.get("max_steps")
+        max_steps = None if max_steps in (None, "") else int(_num(max_steps, "Max level", 1))
+        routes = []
+        for i, r in enumerate(s.get("routes") or [], start=1):
+            cities = r.get("cities") or []
+            if isinstance(cities, str):
+                cities = cities.split("/")
+            cities = [str(c).strip() for c in cities if str(c).strip()]
+            if not cities:
+                raise IncentiveSettingsError(f"Route {i}: add at least one destination city.")
+            origin_id = r.get("origin_store_id")
+            routes.append({
+                "origin_store_id": None if origin_id in (None, "") else int(origin_id),
+                "origin": str(r.get("origin") or "").strip()[:100] or None,
+                "cities": cities,
+                "level": int(_num(r.get("level"), f"Route {i} level")),
+                "direction": str(r.get("direction") or "").strip()[:30] or None,
             })
-        ranges.sort(key=lambda r: r["min_km"])
-        area_km = {}
-        for area, km in (s.get("area_km") or {}).items():
-            if str(area).strip():
-                area_km[str(area).strip()] = _num(km, f"Km for {area}")
-        return {"ranges": ranges, "area_km": area_km, "use_gps_distance": bool(s.get("use_gps_distance"))}
+        return {
+            "free_km": _num(s.get("free_km") or 0, "Km before the first level"),
+            "step_km": _num(s.get("step_km"), "Km per level", 1),
+            "driver_per_step": _num(s.get("driver_per_step"), "Driver amount per level"),
+            "helper_per_step": _num(s.get("helper_per_step"), "Helper amount per level"),
+            "max_steps": max_steps,
+            "routes": routes,
+            "use_gps_distance": bool(s.get("use_gps_distance")),
+        }
 
     # complete_attendance
     if s.get("base") not in ATTENDANCE_BASES:
@@ -207,7 +249,7 @@ def load_settings(program) -> dict:
     try:
         return clean_settings(program.rule_type, raw)
     except IncentiveSettingsError:
-        return RULE_TYPES.get(program.rule_type, {}).get("defaults", {})
+        return clean_settings(program.rule_type, {})
 
 
 # --- data --------------------------------------------------------------
@@ -407,6 +449,19 @@ def _km(lat1, lon1, lat2, lon2) -> float:
     return 2 * r * math.asin(math.sqrt(a))
 
 
+def _words(text: str) -> str:
+    """Lower-case words with single spaces around them ("Car-Car City,
+    Cebu" -> " car car city cebu "), for whole-word matching."""
+    return f" {' '.join(re.findall(r'[a-z0-9]+', (text or '').lower()))} "
+
+
+def _city_variants(city: str) -> list[str]:
+    """" car car " and " carcar " -- the sheet and addresses spell cities
+    both ways."""
+    spaced = _words(city)
+    return [spaced, f" {spaced.replace(' ', '')} "] if spaced.strip() else []
+
+
 def _default_hub(db) -> Store | None:
     row = db.query(AppSetting).filter(AppSetting.key == "default_hub_store_id").first()
     if row and str(row.value).isdigit():
@@ -425,20 +480,43 @@ def _long_distance(db, program, s):
             store_ids.add(t.origin_store_id)
     stores = {st.id: st for st in db.query(Store).filter(Store.id.in_(store_ids)).all()} if store_ids else {}
     hub = _default_hub(db)
-    area_km = {a.lower(): km for a, km in s["area_km"].items()}
+    step, free = s["step_km"], s["free_km"]
 
-    def store_km(store, origin):
-        if store.area and store.area.strip().lower() in area_km:
-            return area_km[store.area.strip().lower()], "area"
+    def cap(level):
+        level = max(level, 0)
+        return min(level, s["max_steps"]) if s["max_steps"] else level
+
+    # Route list rows: (origin store id or None = any hub, city, its
+    # spellings, level).
+    routes = [
+        (r["origin_store_id"], city, _city_variants(city), r["level"])
+        for r in s["routes"]
+        for city in r["cities"]
+    ]
+
+    def store_level(store, origin):
+        """(level, km or None, source, city) for one destination. The city
+        is looked up in the store's address (then its area); the trip's
+        own hub's rows win over any-hub rows."""
+        raw = f"{store.address or ''} {store.area or ''}"
+        # Also with hyphens joined, so "Car-Car" matches "Carcar".
+        text = _words(raw) + _words(raw.replace("-", ""))
+        origin_id = origin.id if origin else None
+        for wanted in ((origin_id,) if origin_id else ()) + (None,):
+            hits = [
+                (level, city)
+                for oid, city, variants, level in routes
+                if oid == wanted and any(v in text for v in variants)
+            ]
+            if hits:
+                level, city = max(hits)
+                return cap(level), None, "route", city
         if s["use_gps_distance"] and origin is not None and not store.is_hub:
-            return _km(origin.latitude, origin.longitude, store.latitude, store.longitude), "gps"
-        return None, None
-
-    def range_for(km):
-        for r in reversed(s["ranges"]):
-            if km >= r["min_km"] and (r["max_km"] is None or km < r["max_km"]):
-                return r
-        return None
+            km = _km(origin.latitude, origin.longitude, store.latitude, store.longitude)
+            # The first `free` km earn nothing; each started `step` after
+            # it is a level (31-60 km = 1 with 30 free and 30 km steps).
+            return cap(math.ceil((km - free) / step) if km > free else 0), km, "gps", None
+        return None, None, None, None
 
     people, by_person = _trip_counts(db, program, s, trips)
     trip_info = {}
@@ -452,20 +530,19 @@ def _long_distance(db, program, s):
             store = stores.get(sid)
             if store is None:
                 continue
-            km, source = store_km(store, origin)
-            if km is not None and (best is None or km > best[0]):
-                best = (km, source, store)
-        rng = range_for(best[0]) if best else None
+            level, km, source, city = store_level(store, origin)
+            if level is not None and (best is None or level > best[0]):
+                best = (level, km, source, store, city)
         trip_info[t.id] = {
             "trip_id": t.id,
             "ticket_no": t.ticket_no,
             "date": _ph_start(t).date().isoformat(),
-            "farthest_store": best[2].name if best else None,
-            "area": best[2].area if best else None,
-            "km": round(best[0], 1) if best else None,
-            "km_source": best[1] if best else None,
-            "range": rng["label"] if rng else None,
-            "_range": rng,
+            "origin": origin.name if origin else None,
+            "farthest_store": best[3].name if best else None,
+            "city": best[4] if best else None,
+            "level": best[0] if best else 0,
+            "km": round(best[1], 1) if best and best[1] is not None else None,
+            "level_source": best[2] if best else None,
         }
 
     rows = []
@@ -473,11 +550,10 @@ def _long_distance(db, program, s):
         lines = []
         for t in {t.id: t for t in person_trips}.values():
             info = trip_info[t.id]
-            rng = info["_range"]
-            if rng is None:
+            if not info["level"]:
                 continue
-            amt = rng["helper_amount"] + (rng["driver_extra"] if group == "driver" else 0)
-            lines.append({k: v for k, v in info.items() if k != "_range"} | {"amount": amt})
+            per = s["driver_per_step"] if group == "driver" else s["helper_per_step"]
+            lines.append(info | {"amount": info["level"] * per})
         if not lines:
             continue
         lines.sort(key=lambda line: line["date"])
@@ -599,10 +675,13 @@ _COMPUTE = {
 }
 
 
-def compute_program(db: Session, program) -> dict:
+def compute_program(db: Session, program, start: date | None = None, end: date | None = None) -> dict:
     """What everyone earns under `program` (so far, if it's still
-    running). Rows sorted by amount, then name."""
+    running). Rows sorted by amount, then name. `start` / `end` narrow
+    the period (a payroll cutoff)."""
     s = load_settings(program)
+    if start or end:
+        program = _Window(program, start, end)
     rows = _COMPUTE[program.rule_type](db, program, s)
     rows.sort(key=lambda r: (-r["amount"], r["name"]))
     return {
@@ -615,3 +694,57 @@ def compute_program(db: Session, program) -> dict:
         "earners": sum(1 for r in rows if r["amount"] > 0),
         "total": round(sum(r["amount"] for r in rows), 2),
     }
+
+
+class _Window:
+    """A program seen through part of its period (a payroll cutoff)."""
+
+    def __init__(self, program, start, end):
+        self._program = program
+        self.period_start = max(program.period_start, start or program.period_start)
+        self.period_end = min(program.period_end, end or program.period_end)
+
+    def __getattr__(self, name):
+        return getattr(self._program, name)
+
+
+def payroll_incentives(db: Session, start: date, end: date) -> dict:
+    """{employee_id: {"total", "lines": [{program_id, name, rule_type,
+    amount}]}} -- incentives paid through payroll for the cutoff
+    start..end (see pay_in_payroll above)."""
+    from app.models.incentive_program import IncentiveProgram
+
+    programs = (
+        db.query(IncentiveProgram)
+        .filter(IncentiveProgram.is_active.is_(True))
+        .order_by(IncentiveProgram.period_start, IncentiveProgram.id)
+        .all()
+    )
+    result = {}
+    for program in programs:
+        if program.rule_type not in _COMPUTE:
+            continue
+        s = load_settings(program)
+        if not s.get("pay_in_payroll"):
+            continue
+        if program.rule_type in PER_TRIP_TYPES:
+            if program.period_start > end or program.period_end < start:
+                continue
+            computed = compute_program(db, program, start, end)
+        else:
+            pay_day = program.release_date or program.period_end
+            if not (start <= pay_day <= end):
+                continue
+            computed = compute_program(db, program)
+        for row in computed["rows"]:
+            if not row.get("employee_id") or not row["amount"]:
+                continue
+            entry = result.setdefault(row["employee_id"], {"total": 0, "lines": []})
+            entry["lines"].append({
+                "program_id": program.id,
+                "name": program.name,
+                "rule_type": program.rule_type,
+                "amount": row["amount"],
+            })
+            entry["total"] = round(entry["total"] + row["amount"], 2)
+    return result
