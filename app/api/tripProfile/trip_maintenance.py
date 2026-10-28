@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Body, Depends, File, HTTPException, Form, UploadFile
 from datetime import date, datetime
 import json
+import re
 from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
@@ -490,6 +491,34 @@ def get_vehicle_or_history(
     ]
 
 
+@router.post("/vehicle-documents/read-number")
+async def read_vehicle_document_number(
+    doc_type: str = Form(...),
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+):
+    """The OR / CR number read off an uploaded document (PDF text or OCR)
+    -- the Add/Edit Vehicle Unit form fills it in for the user to check.
+    Nothing is saved here."""
+    from app.services.vehicle_document_ocr import extract_number
+
+    if doc_type not in ("or", "cr"):
+        raise HTTPException(status_code=400, detail="doc_type must be 'or' or 'cr'.")
+    if file.content_type not in _CHECKLIST_FILE_TYPES:
+        raise HTTPException(status_code=400, detail="Upload a PNG, JPEG, WEBP or PDF file.")
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="The file is empty.")
+    if len(data) > 15 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="The file is too large to read (max 15 MB).")
+    try:
+        return extract_number(data, file.content_type, doc_type)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except Exception:
+        raise HTTPException(status_code=422, detail="Couldn't read that document.")
+
+
 @router.get("/vehicle-units/{unit_id}/checklist")
 def get_vehicle_checklist(
     unit_id: int,
@@ -548,6 +577,19 @@ def save_vehicle_checklist(
         checklist = VehicleUnitChecklist(vehicle_unit_id=unit_id)
         db.add(checklist)
 
+    # Uploaded files are only changed by the checklist-files endpoints
+    # below -- keep what's stored, whatever the form sent.
+    stored = _checklist_data(checklist)
+    for key, section in payload.items():
+        if isinstance(section, dict):
+            section.pop("files", None)
+    for key, section in stored.items():
+        files = section.get("files") if isinstance(section, dict) else None
+        if files:
+            target = payload.setdefault(key, {"checked": False, "items": {}})
+            if isinstance(target, dict):
+                target["files"] = files
+
     checklist.data = json.dumps(payload)
     checklist.updated_by = current_user.id
     checklist.updated_at = datetime.utcnow()
@@ -555,6 +597,93 @@ def save_vehicle_checklist(
     db.commit()
 
     return api_response({"message": "Checklist saved."})
+
+
+# Checklist documents: a file per ticked checklist item (e.g. the Deed of
+# Sale under Documentation), uploaded from the Edit Vehicle Unit form.
+# Kept in the checklist JSON as
+#   data[section]["files"][item] = {url, name, uploaded_at, uploaded_by}
+# -- no table of its own. Unticking an item keeps its file (hidden).
+_CHECKLIST_KEY = re.compile(r"^[a-z0-9_]{1,60}$")
+_CHECKLIST_FILE_TYPES = {"image/png", "image/jpeg", "image/webp", "application/pdf"}
+
+
+def _checklist_data(checklist) -> dict:
+    if not checklist or not checklist.data:
+        return {}
+    try:
+        data = json.loads(checklist.data)
+    except ValueError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _checklist_for_files(db: Session, unit_id: int, section: str, item: str):
+    if not db.query(VehicleUnit.id).filter(VehicleUnit.id == unit_id).first():
+        raise HTTPException(status_code=404, detail="Vehicle unit not found")
+    if not _CHECKLIST_KEY.match(section or "") or not _CHECKLIST_KEY.match(item or ""):
+        raise HTTPException(status_code=400, detail="Unknown checklist item.")
+    checklist = (
+        db.query(VehicleUnitChecklist)
+        .filter(VehicleUnitChecklist.vehicle_unit_id == unit_id)
+        .first()
+    )
+    if not checklist:
+        checklist = VehicleUnitChecklist(vehicle_unit_id=unit_id)
+        db.add(checklist)
+    return checklist
+
+
+@router.post("/vehicle-units/{unit_id}/checklist-files")
+def upload_checklist_file(
+    unit_id: int,
+    section: str = Form(...),
+    item: str = Form(...),
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Uploads (or replaces) the file for one checklist item."""
+    checklist = _checklist_for_files(db, unit_id, section, item)
+    if file.content_type not in _CHECKLIST_FILE_TYPES:
+        raise HTTPException(status_code=400, detail="Upload a PNG, JPEG, WEBP or PDF file.")
+
+    url = FileService().upload(file, f"vehicles/{unit_id}/checklist/{section}/{item}")
+    data = _checklist_data(checklist)
+    sec = data.setdefault(section, {"checked": False, "items": {}})
+    entry = {
+        "url": url,
+        "name": file.filename,
+        "uploaded_at": datetime.utcnow().isoformat() + "+00:00",
+        "uploaded_by": display_name(current_user) or current_user.username,
+    }
+    sec.setdefault("files", {})[item] = entry
+    checklist.data = json.dumps(data)
+    checklist.updated_by = current_user.id
+    checklist.updated_at = datetime.utcnow()
+    db.commit()
+    return entry
+
+
+@router.delete("/vehicle-units/{unit_id}/checklist-files")
+def delete_checklist_file(
+    unit_id: int,
+    section: str,
+    item: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Removes one checklist item's file."""
+    checklist = _checklist_for_files(db, unit_id, section, item)
+    data = _checklist_data(checklist)
+    files = (data.get(section) or {}).get("files") or {}
+    if item in files:
+        del files[item]
+        checklist.data = json.dumps(data)
+        checklist.updated_by = current_user.id
+        checklist.updated_at = datetime.utcnow()
+        db.commit()
+    return {"ok": True}
 
 
 @router.delete("/vehicle-units/{unit_id}")
