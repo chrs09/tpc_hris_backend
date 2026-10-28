@@ -152,6 +152,37 @@ def _manual_entry_trip_ids(db: Session, trip_ids) -> set:
     }
 
 
+# Which trip of the driver's day each trip is (1 = first, 2 = second ...),
+# by PH dispatch date and dispatch order; cancelled / archived trips
+# don't count. Same rule as "2nd+ Trips Today" on the summary.
+def _trip_of_day(db: Session, trips) -> dict:
+    trips = [t for t in trips if t.created_at]
+    if not trips:
+        return {}
+    days = {utc_to_ph(t.created_at).date() for t in trips}
+    start = ph_to_utc(datetime.combine(min(days), datetime.min.time()))
+    end = ph_to_utc(datetime.combine(max(days), datetime.min.time())) + timedelta(days=1)
+    rows = (
+        db.query(Trip.id, Trip.driver_id, Trip.created_at)
+        .filter(
+            Trip.driver_id.in_({t.driver_id for t in trips}),
+            Trip.created_at >= start,
+            Trip.created_at < end,
+            Trip.status != TripStatus.CANCELLED,
+            Trip.is_archived.is_(False),
+        )
+        .order_by(Trip.created_at, Trip.id)
+        .all()
+    )
+    seen = {}
+    nth = {}
+    for trip_id, driver_id, created_at in rows:
+        key = (driver_id, utc_to_ph(created_at).date())
+        seen[key] = seen.get(key, 0) + 1
+        nth[trip_id] = seen[key]
+    return nth
+
+
 @router.get("/summary")
 def get_trip_summary(
     db: Session = Depends(get_db), current_admin=Depends(require_role_or_module(roles=["admin", "superadmin", "coordinator_admin", "coordinator"], module_key="trip_management.trips"))
@@ -477,6 +508,7 @@ def get_approval_pipeline(
         if trip_ids
         else {}
     )
+    trip_of_day = _trip_of_day(db, trips)
     planned_by_trip = {trip.id: _load_planned_store_ids(trip) for trip in trips}
     all_store_ids = {sid for ids in planned_by_trip.values() for sid in ids}
     store_names = (
@@ -524,6 +556,7 @@ def get_approval_pipeline(
                 "status_label": PIPELINE_STATUSES[trip.status],
                 "status_since": fmt(stage_at),
                 "is_manual_entry": trip.id in manual_ids,
+                "trip_of_day": trip_of_day.get(trip.id),
                 "route_rider_names": [
                     _display_name(ride.rider)
                     for ride in pipeline_riders.get(trip.id, [])
@@ -578,6 +611,7 @@ def get_active_trips(
     )
 
     result = []
+    trip_of_day = _trip_of_day(db, trips)
     for trip in trips:
         planned_ids = _load_planned_store_ids(trip)
         delivered_ids = _delivered_store_ids(db, trip.id) if planned_ids else set()
@@ -604,6 +638,7 @@ def get_active_trips(
                     _display_name(trip.dispatched_by) if trip.dispatched_by else None
                 ),
                 "started_outside_hub_range": trip.started_outside_hub_range,
+                "trip_of_day": trip_of_day.get(trip.id),
                 **trip_unit_flags(trip),
             }
         )
@@ -632,6 +667,7 @@ def get_assigned_trips(
 
     result = []
     route_riders = riders_of(db, [t.id for t in trips])
+    trip_of_day = _trip_of_day(db, trips)
     for trip in trips:
         planned_ids = _load_planned_store_ids(trip)
         stores_by_id = (
@@ -677,6 +713,7 @@ def get_assigned_trips(
                 # Once the driver has begun Checkout, photos are attached,
                 # so the dispatch details are frozen.
                 "editable": trip.current_step == "ASSIGNED",
+                "trip_of_day": trip_of_day.get(trip.id),
                 **trip_unit_flags(trip),
                 "driver_id": trip.driver_id,
                 # Route riders on this trip (route ride).
