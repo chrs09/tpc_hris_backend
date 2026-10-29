@@ -18,13 +18,13 @@ from app.core.dependencies import require_role_or_module
 from app.models.incentive_program import IncentiveProgram
 from app.models.user import User
 from app.services.incentives import (
+    DEFAULT_RELEASE_METHOD,
     RULE_TYPES,
     IncentiveSettingsError,
     clean_settings,
     compute_program,
     load_settings,
     parse_applies_to,
-    payroll_incentives,
 )
 
 router = APIRouter(prefix="/incentive-programs", tags=["Incentive Programs"])
@@ -112,28 +112,10 @@ def _apply(p: IncentiveProgram, data: ProgramIn) -> None:
 @router.get("/rule-types")
 def list_rule_types(current_user: User = Depends(_require_view)):
     """Each type's label and default settings, for the create form."""
-    return [{"value": k, **v} for k, v in RULE_TYPES.items()]
-
-
-# The Payroll page reads this too, so Payroll is enough.
-_require_payroll = require_role_or_module(
-    roles=["admin", "payroll_admin"],
-    module_key=["payroll.payroll", "payroll.incentive_policies"],
-)
-
-
-@router.get("/payroll")
-def incentives_for_payroll(
-    start: date = Query(...),
-    end: date = Query(...),
-    db: Session = Depends(get_db),
-    current_user: User = Depends(_require_payroll),
-):
-    """Incentives paid through payroll for the cutoff, by employee id --
-    the Payroll page's Incentives column."""
-    if end < start:
-        raise HTTPException(status_code=400, detail="End can't be before start.")
-    return {str(k): v for k, v in payroll_incentives(db, start, end).items()}
+    return [
+        {"value": k, "default_release_method": DEFAULT_RELEASE_METHOD[k], **v}
+        for k, v in RULE_TYPES.items()
+    ]
 
 
 @router.get("")

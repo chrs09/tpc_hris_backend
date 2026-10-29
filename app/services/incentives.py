@@ -25,12 +25,11 @@
 #                          +30% when the base is the daily rate.
 # A trip's day is the PH date it started (same as payroll / route rides).
 #
-# pay_in_payroll (every type): the amount goes in the Payroll page's
-# Incentives column (and gross pay). Per-trip types (long distance, daily
-# cash) count the trips inside the cutoff; whole-period types (tiers,
-# attendance) are paid in the cutoff their release date (else period end)
-# falls in. Off by default for daily cash (the coordinator pays it in
-# cash) and tiers (released in cash on the 5th per the memos).
+#
+# Paying out is separate from payroll: an Incentive Run
+# (app/services/incentive_runs.py) computes programs for a period with
+# their settings frozen, then goes Draft -> Approved -> Released (cash,
+# with payroll as a separate line after net pay, or bank).
 
 import json
 import math
@@ -139,13 +138,15 @@ def _hhmm(value, label):
     return value
 
 
-PAY_IN_PAYROLL_DEFAULT = {
-    "trip_tiers": False,
-    "daily_cash": False,
-    "long_distance": True,
-    "complete_attendance": True,
+# How a run of each type is usually paid out (the New Run form's
+# default): the memos' tiers / daily cash are cash; the rest with payroll.
+RELEASE_METHODS = ("cash", "payroll", "bank")
+DEFAULT_RELEASE_METHOD = {
+    "trip_tiers": "cash",
+    "daily_cash": "cash",
+    "long_distance": "payroll",
+    "complete_attendance": "payroll",
 }
-PER_TRIP_TYPES = ("daily_cash", "long_distance")
 
 
 def clean_settings(rule_type: str, settings: dict | None) -> dict:
@@ -153,11 +154,8 @@ def clean_settings(rule_type: str, settings: dict | None) -> dict:
     IncentiveSettingsError with a message for the page."""
     if rule_type not in RULE_TYPES:
         raise IncentiveSettingsError("Unknown incentive type.")
-    settings = settings or {}
-    pay = settings.get("pay_in_payroll")
-    cleaned = _clean_type(rule_type, settings)
-    cleaned["pay_in_payroll"] = PAY_IN_PAYROLL_DEFAULT[rule_type] if pay is None else bool(pay)
-    return cleaned
+    settings = {k: v for k, v in (settings or {}).items() if k != "pay_in_payroll"}
+    return _clean_type(rule_type, settings)
 
 
 def _clean_type(rule_type: str, settings: dict) -> dict:
@@ -675,11 +673,18 @@ _COMPUTE = {
 }
 
 
-def compute_program(db: Session, program, start: date | None = None, end: date | None = None) -> dict:
+def compute_program(
+    db: Session,
+    program,
+    start: date | None = None,
+    end: date | None = None,
+    settings: dict | None = None,
+) -> dict:
     """What everyone earns under `program` (so far, if it's still
     running). Rows sorted by amount, then name. `start` / `end` narrow
-    the period (a payroll cutoff)."""
-    s = load_settings(program)
+    the period (a run's period); `settings` overrides the program's (an
+    incentive run's frozen copy)."""
+    s = settings if settings is not None else load_settings(program)
     if start or end:
         program = _Window(program, start, end)
     rows = _COMPUTE[program.rule_type](db, program, s)
@@ -697,7 +702,7 @@ def compute_program(db: Session, program, start: date | None = None, end: date |
 
 
 class _Window:
-    """A program seen through part of its period (a payroll cutoff)."""
+    """A program seen through part of its period (a run's period)."""
 
     def __init__(self, program, start, end):
         self._program = program
@@ -706,45 +711,3 @@ class _Window:
 
     def __getattr__(self, name):
         return getattr(self._program, name)
-
-
-def payroll_incentives(db: Session, start: date, end: date) -> dict:
-    """{employee_id: {"total", "lines": [{program_id, name, rule_type,
-    amount}]}} -- incentives paid through payroll for the cutoff
-    start..end (see pay_in_payroll above)."""
-    from app.models.incentive_program import IncentiveProgram
-
-    programs = (
-        db.query(IncentiveProgram)
-        .filter(IncentiveProgram.is_active.is_(True))
-        .order_by(IncentiveProgram.period_start, IncentiveProgram.id)
-        .all()
-    )
-    result = {}
-    for program in programs:
-        if program.rule_type not in _COMPUTE:
-            continue
-        s = load_settings(program)
-        if not s.get("pay_in_payroll"):
-            continue
-        if program.rule_type in PER_TRIP_TYPES:
-            if program.period_start > end or program.period_end < start:
-                continue
-            computed = compute_program(db, program, start, end)
-        else:
-            pay_day = program.release_date or program.period_end
-            if not (start <= pay_day <= end):
-                continue
-            computed = compute_program(db, program)
-        for row in computed["rows"]:
-            if not row.get("employee_id") or not row["amount"]:
-                continue
-            entry = result.setdefault(row["employee_id"], {"total": 0, "lines": []})
-            entry["lines"].append({
-                "program_id": program.id,
-                "name": program.name,
-                "rule_type": program.rule_type,
-                "amount": row["amount"],
-            })
-            entry["total"] = round(entry["total"] + row["amount"], 2)
-    return result

@@ -61,6 +61,8 @@ from .payroll_deductions import PayrollDeduction as PayrollDeduction
 from .payroll_cutoff_rule import PayrollCutoffRule as PayrollCutoffRule
 from .incentive_program import IncentiveProgram as IncentiveProgram
 from .company import Company as Company
+from .incentive_run import IncentiveRun as IncentiveRun
+from .incentive_run import IncentiveRunLine as IncentiveRunLine
 from .attendance_adjustment import AttendanceAdjustment as AttendanceAdjustment
 from .bank import Bank as Bank
 from .finance_expense import FinanceExpense as FinanceExpense
