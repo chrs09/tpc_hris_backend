@@ -373,7 +373,7 @@ def get_trip_check(
         )
     # Route rides (assigned on these trips, or manual in the period).
     from app.models.route_ride import RouteRide
-    from app.services.route_ride import ride_amount, ride_day
+    from app.services.route_ride import ride_amount, ride_day, ride_rates
 
     rider_employee = dict(
         db.query(User.id, User.employee_id).filter(
@@ -415,7 +415,22 @@ def get_trip_check(
                 ),
                 "first_trip_rate": round(ride_amount(ride, rules), 2),
                 "has_attendance": has_attendance,
-                "counted": (trip is None or status in PAID_TRIP_STATUSES) and has_attendance,
+                # Manual route rides are entered by an admin and trip-based:
+                # paid without attendance. A ride on a real trip still needs
+                # the trip completed and attendance that day.
+                "counted": trip is None or (status in PAID_TRIP_STATUSES and has_attendance),
+                # What payroll needs to pay a manual ride (no attendance
+                # record to carry its tickets on).
+                **(
+                    {
+                        "quantity": ride.quantity or 1,
+                        "driver_first_trip_rate": ride_rates(ride, rules)["first"],
+                        "driver_next_trip_rate": ride_rates(ride, rules)["next"],
+                        "route_ride_amount": ride_rates(ride, rules)["fixed"],
+                    }
+                    if trip is None
+                    else {}
+                ),
             }
         )
 
