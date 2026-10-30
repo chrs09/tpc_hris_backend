@@ -93,6 +93,11 @@ def _log(db: Session, run: IncentiveRun, action: str, user: User, note: str | No
     run.log = json.dumps(entries)
 
 
+def _utc(value):
+    """Stored times are naive UTC -- mark them so the browser shows PH time."""
+    return value.isoformat() + "+00:00" if value else None
+
+
 def _get(db: Session, run_id: int) -> IncentiveRun:
     run = (
         db.query(IncentiveRun)
@@ -141,13 +146,13 @@ def _serialize(db: Session, run: IncentiveRun, user: User, with_lines: bool = Fa
         "employee_count": run.employee_count,
         "release_reference": run.release_reference,
         "released_on": run.released_on,
-        "generated": {"at": run.generated_at, "by": people.get(run.generated_by)} if run.generated_at else None,
-        "approved": {"at": run.approved_at, "by": people.get(run.approved_by)} if run.approved_at else None,
-        "released": {"at": run.released_at, "by": people.get(run.released_by)} if run.released_at else None,
+        "generated": {"at": _utc(run.generated_at), "by": people.get(run.generated_by)} if run.generated_at else None,
+        "approved": {"at": _utc(run.approved_at), "by": people.get(run.approved_by)} if run.approved_at else None,
+        "released": {"at": _utc(run.released_at), "by": people.get(run.released_by)} if run.released_at else None,
         "log": json.loads(run.log or "[]"),
         "can_edit": prepare and run.status in EDITABLE,
         "can_generate": prepare and run.status in EDITABLE,
-        "can_submit": prepare and run.status == "GENERATED",
+        "can_submit": prepare and run.status == "GENERATED" and bool(run.lines),
         "can_approve": approve and run.status == "FOR_REVIEW",
         "can_return": approve and run.status in ("FOR_REVIEW", "APPROVED"),
         "can_release": release and run.status == "APPROVED",
