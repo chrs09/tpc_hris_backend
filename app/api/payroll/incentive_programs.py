@@ -109,6 +109,20 @@ def _apply(p: IncentiveProgram, data: ProgramIn) -> None:
     p.notes = (data.notes or "").strip() or None
 
 
+@router.get("/hubs")
+def list_hubs(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(_require_view),
+):
+    """Hubs (start points) for the long-distance route list."""
+    from app.models.stores import Store
+
+    return [
+        {"id": store.id, "name": store.name}
+        for store in db.query(Store).filter(Store.is_hub.is_(True)).order_by(Store.name)
+    ]
+
+
 @router.get("/rule-types")
 def list_rule_types(current_user: User = Depends(_require_view)):
     """Each type's label and default settings, for the create form."""
@@ -213,7 +227,25 @@ def delete_program(
     db: Session = Depends(get_db),
     current_user: User = Depends(_require_edit),
 ):
-    db.delete(_get(db, program_id))
+    """Deletes a program no open incentive run uses (released / cancelled
+    runs keep their own frozen copy). Otherwise deactivate it."""
+    from app.models.incentive_run import IncentiveRun
+    from app.services.incentive_runs import program_ids
+
+    program = _get(db, program_id)
+    open_runs = [
+        run.name
+        for run in db.query(IncentiveRun).filter(
+            IncentiveRun.status.in_(("DRAFT", "GENERATED", "FOR_REVIEW", "APPROVED"))
+        )
+        if program.id in program_ids(run)
+    ]
+    if open_runs:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Used by the run \"{open_runs[0]}\" -- finish or cancel it first, or deactivate the program.",
+        )
+    db.delete(program)
     db.commit()
     return {"ok": True}
 
