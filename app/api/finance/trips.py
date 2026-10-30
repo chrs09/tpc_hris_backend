@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.core.database import get_db
 from app.core.dependencies import get_current_admin, require_role_or_module
+from app.services.approval_chain import trips_for_me
 from app.models.trips import Trip, TripStatus
 from app.models.trip_finance_review import TripFinanceReview, FinanceReviewStatus
 from app.models.trip_stops import TripStop
@@ -101,11 +102,18 @@ def get_finance_trips(
         )
         .all()
     )
+    # Only trips still waiting on Finance can be anyone's turn.
+    for_me_ids = (
+        trips_for_me(db, [review.trip for review in reviews], current_admin, "trip_finance")
+        if review_status == FinanceReviewStatus.FINANCE_REVIEW
+        else None
+    )
 
     return [
         {
             "id": review.trip.id,
             "trip_id": review.trip.id,
+            **({"for_me": review.trip.id in for_me_ids} if for_me_ids is not None else {}),
             "shipment_number": review.trip.ticket_no,
             "ticket_no": review.trip.ticket_no,
             **trip_unit_flags(review.trip),

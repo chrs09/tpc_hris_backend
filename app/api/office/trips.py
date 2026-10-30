@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session, joinedload
 from app.services.payroll_lock import ensure_trip_unlocked
 from app.core.database import get_db
 from app.core.dependencies import get_current_user, require_role_or_module
+from app.services.approval_chain import trips_for_me
 
 from app.models.employees import Employee
 from app.models.files import File
@@ -96,6 +97,9 @@ def get_pending_office_review_trips(
     )
 
     result = []
+    for_me_ids = trips_for_me(
+        db, [review.trip for review in reviews if review.trip], current_user, "trip_office"
+    )
 
     for review in reviews:
         trip = review.trip
@@ -115,6 +119,7 @@ def get_pending_office_review_trips(
             {
                 "id": trip.id,
                 "trip_id": trip.id,
+                "for_me": trip.id in for_me_ids,
                 "ticket_no": trip.ticket_no,
                 **trip_unit_flags(trip),
 

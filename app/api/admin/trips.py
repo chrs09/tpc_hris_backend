@@ -38,7 +38,7 @@ from app.services.trip_remarks import (
 )
 from app.utils.timezone import ph_to_utc, utc_to_ph
 from app.utils.user_display import display_name as _display_name
-from app.services.approval_chain import immediate_head
+from app.services.approval_chain import immediate_head, trips_for_me
 from app.models.route_ride import RouteRide
 from app.services.route_ride import riders_of
 from app.api.driver.trips import (
@@ -310,6 +310,15 @@ def get_pending_trips(
         .all()
     )
     manual_ids = _manual_entry_trip_ids(db, [trip.id for trip in trips])
+    # "For me": the head on the driver's Org Chart chain -- a manual entry
+    # awaiting a superadmin is the superadmin's.
+    for_me_ids = trips_for_me(
+        db,
+        [trip for trip in trips if trip.status == TripStatus.PENDING_APPROVAL],
+        current_admin,
+        "trip_coordinator",
+    )
+    is_superadmin = getattr(current_admin.role, "value", current_admin.role) == "superadmin"
 
     # Batched lookup (not per-row) of return reasons, so trips office
     # sent back for correction show a badge in the list without
@@ -357,6 +366,11 @@ def get_pending_trips(
             **trip_unit_flags(trip),
             "awaiting_manual_approval": (
                 trip.status == TripStatus.PENDING_MANUAL_APPROVAL
+            ),
+            "for_me": (
+                is_superadmin
+                if trip.status == TripStatus.PENDING_MANUAL_APPROVAL
+                else trip.id in for_me_ids
             ),
             "stores": [
                 store_names.get(sid, f"Store #{sid}")

@@ -1,7 +1,8 @@
 # app/services/approval_chain.py
 #
 # Org-chart approval routing for Cash Advance, Overtime, Attendance,
-# Leave and Fuel Requests.
+# Leave and Fuel Requests -- and whose "For me" a trip is at each approval
+# step (trips_for_me).
 #
 # Each org unit's head can be ticked as an approver per type (OrgUnit.
 # approves). A request climbs the org chart from the employee's own unit
@@ -36,6 +37,11 @@ APPROVAL_KINDS = (
     "leave",
     "work_report",
     "fuel_request",
+    # Trip approval steps: who a trip is "For me" at each step, by its
+    # driver's place on the chart. Others with access can still approve.
+    "trip_coordinator",
+    "trip_office",
+    "trip_finance",
 )
 
 
@@ -112,10 +118,10 @@ def _deepest(units: list, by_id: dict):
 
 
 def resolve_chain(
-    db: Session, employee: Employee | None, user: User | None, kind: str
+    db: Session, employee: Employee | None, user: User | None, kind: str, units: list | None = None
 ) -> list[int]:
     """User ids who approve, in order, for this employee's request."""
-    units = db.query(OrgUnit).all()
+    units = units if units is not None else db.query(OrgUnit).all()
     if not units:
         return []
     by_id = {u.id: u for u in units}
@@ -161,6 +167,30 @@ def immediate_head(db: Session, employee: Employee | None, user: User | None) ->
             return current.head_user_id
         current = by_id.get(current.parent_id) if current.parent_id else None
     return None
+
+
+def trips_for_me(db: Session, trips: list, user: User, kind: str) -> set[int]:
+    """Ids of the trips waiting on this user at an approval step (kind =
+    trip_coordinator / trip_office / trip_finance): the nearest head above
+    the driver with that step ticked, or the next one up while they're out
+    today. A driver with no such head isn't routed to anyone, so the trip
+    counts for whoever can approve it."""
+    units = db.query(OrgUnit).all()
+    turn_by_driver: dict = {}
+    mine = set()
+    for trip in trips:
+        if trip.driver_id not in turn_by_driver:
+            driver = trip.driver
+            chain = (
+                resolve_chain(db, driver.employee, driver, kind, units) if driver else []
+            )
+            turn_by_driver[trip.driver_id] = (
+                chain[effective_step(db, chain, 0)[0]] if chain else None
+            )
+        approver = turn_by_driver[trip.driver_id]
+        if approver is None or approver == user.id:
+            mine.add(trip.id)
+    return mine
 
 
 def my_approver_kinds(db: Session, user: User) -> dict:
