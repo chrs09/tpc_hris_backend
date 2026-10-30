@@ -13,6 +13,8 @@ from app.models.vehicle_unit import VehicleUnit
 from app.models.truck_type import TruckType
 from app.models.vehicle_or_history import VehicleUnitORHistory
 from app.models.vehicle_unit_checklist import VehicleUnitChecklist
+from app.models.trip_rate_rule import TripRateRule
+from app.services.payroll_lock import latest_locked_end
 from app.models.company import Company
 from app.models.TripRate import TripRateProfile
 from app.models.stores import Store
@@ -827,6 +829,9 @@ def create_rate_profile(
     driver_next_trip_rate: float = Form(...),
     driver_allowance: float = Form(0),
     driver_other: float = Form(0),
+    # Rates start on this date (trips before it pay 0): the category's base
+    # rates stay 0 and a dated change holds them. Blank = base rates.
+    effective_from: date = Form(None),
     helper_first_trip_rate: float = Form(...),
     helper_next_trip_rate: float = Form(...),
     db: Session = Depends(get_db),
@@ -844,19 +849,46 @@ def create_rate_profile(
             detail="Profile already exists",
         )
 
+    rates = {
+        "driver_first_trip_rate": driver_first_trip_rate,
+        "driver_allowance": driver_allowance,
+        "driver_other": driver_other,
+        "driver_next_trip_rate": driver_next_trip_rate,
+        "helper_first_trip_rate": helper_first_trip_rate,
+        "helper_next_trip_rate": helper_next_trip_rate,
+    }
+    dated = effective_from is not None and any(rates.values())
+
+    if dated:
+        locked_until = latest_locked_end(db)
+        if locked_until and effective_from <= locked_until:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Payroll is locked up to {locked_until:%b %d, %Y}, so a rate in effect "
+                    "on or before then can't be added. Pick a later effective date."
+                ),
+            )
+
     profile = TripRateProfile(
         profile_name=profile_name,
         helper_count=helper_count,
-        driver_first_trip_rate=driver_first_trip_rate,
-        driver_allowance=driver_allowance,
-        driver_other=driver_other,
-        driver_next_trip_rate=driver_next_trip_rate,
-        helper_first_trip_rate=helper_first_trip_rate,
-        helper_next_trip_rate=helper_next_trip_rate,
+        **({field: 0 for field in rates} if dated else rates),
         created_by=current_user.id,
     )
 
     db.add(profile)
+    if dated:
+        db.flush()
+        db.add(
+            TripRateRule(
+                trip_rate_profile_id=profile.id,
+                **rates,
+                effective_from=effective_from,
+                notes="Set when the category was added",
+                created_by=current_user.id,
+            )
+        )
     db.commit()
     db.refresh(profile)
 
