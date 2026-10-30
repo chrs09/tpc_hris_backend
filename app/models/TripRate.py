@@ -49,6 +49,22 @@ class TripRateProfile(Base):
         default=0,
     )
 
+    # driver_first_trip_rate above is the BASIC; a first trip pays basic +
+    # allowance + other (app/services/trip_rates.py adds them up).
+    driver_allowance = Column(
+        Numeric(10, 2),
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
+
+    driver_other = Column(
+        Numeric(10, 2),
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
+
     driver_next_trip_rate = Column(
         Numeric(10, 2),
         nullable=False,

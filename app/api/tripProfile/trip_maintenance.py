@@ -776,7 +776,11 @@ def get_rate_profiles(
             "id": profile.id,
             "profile_name": profile.profile_name,
             "helper_count": profile.helper_count,
+            # Base rates as stored: first = basic. What it pays today, with
+            # the first-trip total, is in current_rates.
             "driver_first_trip_rate": float(profile.driver_first_trip_rate),
+            "driver_allowance": float(profile.driver_allowance or 0),
+            "driver_other": float(profile.driver_other or 0),
             "driver_next_trip_rate": float(profile.driver_next_trip_rate),
             "helper_first_trip_rate": float(profile.helper_first_trip_rate),
             "helper_next_trip_rate": float(profile.helper_next_trip_rate),
@@ -821,6 +825,8 @@ def create_rate_profile(
     helper_count: int = Form(...),
     driver_first_trip_rate: float = Form(...),
     driver_next_trip_rate: float = Form(...),
+    driver_allowance: float = Form(0),
+    driver_other: float = Form(0),
     helper_first_trip_rate: float = Form(...),
     helper_next_trip_rate: float = Form(...),
     db: Session = Depends(get_db),
@@ -842,6 +848,8 @@ def create_rate_profile(
         profile_name=profile_name,
         helper_count=helper_count,
         driver_first_trip_rate=driver_first_trip_rate,
+        driver_allowance=driver_allowance,
+        driver_other=driver_other,
         driver_next_trip_rate=driver_next_trip_rate,
         helper_first_trip_rate=helper_first_trip_rate,
         helper_next_trip_rate=helper_next_trip_rate,
@@ -866,6 +874,8 @@ def update_rate_profile(
     profile_name: str = Form(None),
     helper_count: int = Form(None),
     driver_first_trip_rate: float = Form(None),
+    driver_allowance: float = Form(None),
+    driver_other: float = Form(None),
     driver_next_trip_rate: float = Form(None),
     helper_first_trip_rate: float = Form(None),
     helper_next_trip_rate: float = Form(None),
@@ -904,6 +914,12 @@ def update_rate_profile(
 
     if driver_first_trip_rate is not None:
         profile.driver_first_trip_rate = driver_first_trip_rate
+
+    if driver_allowance is not None:
+        profile.driver_allowance = driver_allowance
+
+    if driver_other is not None:
+        profile.driver_other = driver_other
 
     if driver_next_trip_rate is not None:
         profile.driver_next_trip_rate = driver_next_trip_rate

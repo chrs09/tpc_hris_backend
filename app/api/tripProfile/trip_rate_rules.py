@@ -113,6 +113,8 @@ class RuleIn(BaseModel):
     destination_area: str | None = None
     destination_store_id: int | None = None
     driver_first_trip_rate: float | None = None
+    driver_allowance: float | None = None
+    driver_other: float | None = None
     driver_next_trip_rate: float | None = None
     helper_first_trip_rate: float | None = None
     helper_next_trip_rate: float | None = None

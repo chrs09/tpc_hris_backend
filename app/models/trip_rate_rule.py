@@ -39,7 +39,10 @@ class TripRateRule(Base):
         Integer, ForeignKey("tpc_stores.id"), nullable=True, index=True
     )
 
+    # Driver 1st = basic + allowance + other. Blank = keep the category's.
     driver_first_trip_rate = Column(Numeric(10, 2), nullable=True)
+    driver_allowance = Column(Numeric(10, 2), nullable=True)
+    driver_other = Column(Numeric(10, 2), nullable=True)
     driver_next_trip_rate = Column(Numeric(10, 2), nullable=True)
     helper_first_trip_rate = Column(Numeric(10, 2), nullable=True)
     helper_next_trip_rate = Column(Numeric(10, 2), nullable=True)

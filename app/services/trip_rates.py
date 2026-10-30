@@ -10,6 +10,12 @@ category's own rate.
 Example: category "Core no helpers" pays 565. A rule "Core no helpers +
 Wingvan = 1,000" makes a wingvan trip pay 1,000, and a rule "Core no
 helpers from Oct 14 = 602" raises every other truck from Oct 14 on.
+
+Driver 1st is three parts: driver_first_trip_rate (basic), driver_allowance
+and driver_other, each stored and overridden on its own -- a rule changing
+only the basic keeps the allowance. Once resolved, driver_first_trip_rate is
+the TOTAL a first trip pays (what payroll and the driver app read), with the
+parts in driver_basic_rate / driver_allowance / driver_other.
 """
 
 from datetime import date
@@ -20,6 +26,8 @@ from app.models.trip_rate_rule import TripRateRule
 
 RATE_FIELDS = (
     "driver_first_trip_rate",
+    "driver_allowance",
+    "driver_other",
     "driver_next_trip_rate",
     "helper_first_trip_rate",
     "helper_next_trip_rate",
@@ -93,6 +101,17 @@ def describe_rule(rule: TripRateRule) -> str:
     return f"{label} (from {rule.effective_from:%b %d, %Y})"
 
 
+def _with_first_total(rates: dict) -> dict:
+    """The stored basic becomes driver_basic_rate; driver_first_trip_rate
+    becomes what a first trip pays."""
+    basic = rates["driver_first_trip_rate"]
+    return {
+        **rates,
+        "driver_basic_rate": basic,
+        "driver_first_trip_rate": round(basic + rates["driver_allowance"] + rates["driver_other"], 2),
+    }
+
+
 def resolve_trip_rates(trip, on: date | None, rules: list[TripRateRule]) -> dict:
     """The four rates for this trip on `on` (its PH trip date), plus a
     short label of where the driver rate came from."""
@@ -122,7 +141,7 @@ def resolve_trip_rates(trip, on: date | None, rules: list[TripRateRule]) -> dict
                     source = describe_rule(rule)
                 break
 
-    return {**rates, "rate_source": source}
+    return {**_with_first_total(rates), "rate_source": source}
 
 
 def _is_category_only(rule: TripRateRule) -> bool:
@@ -162,7 +181,7 @@ def category_rates(profile, rules: list[TripRateRule], on: date) -> dict:
                 rates[field] = float(value)
                 since = max(since, rule.effective_from) if since else rule.effective_from
                 break
-    return {**rates, "since": since.isoformat() if since else None}
+    return {**_with_first_total(rates), "since": since.isoformat() if since else None}
 
 
 def category_rate_changes(profile, rules: list[TripRateRule]) -> list[dict]:
