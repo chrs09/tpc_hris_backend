@@ -1424,7 +1424,9 @@ def reject_trip(
 def review_trip(
     trip_id: int,
     db: Session = Depends(get_db),
-    current_admin=Depends(require_role_or_module(roles=["admin", "superadmin", "coordinator_admin"], module_key="trip_management.trips")),
+    # Read-only. Also the Trip Dashboard's View (Trip Approval Status), so
+    # whoever can see that list can open a trip's details.
+    current_admin=Depends(require_role_or_module(roles=["admin", "superadmin", "coordinator_admin", "coordinator"], module_key=["trip_management.trips", "trip_management.trip_dashboard"])),
 ):
     # =========================================================
     # 1. GET TRIP + RELATED DATA
