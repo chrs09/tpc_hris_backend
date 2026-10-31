@@ -34,6 +34,12 @@ class ReleaseInfoUpdate(BaseModel):
     release_reference: str
 
 
+class CashAdvanceAdjustment(BaseModel):
+    # Change to what's owed: negative when less was actually released.
+    change: float
+    reason: str
+
+
 class RecordDeductionCreate(BaseModel):
     # Defaults to the request's deduction_per_pay_amount when omitted.
     amount: float | None = None

@@ -59,6 +59,7 @@ def _receipt_url(db: Session, request_id: int) -> str | None:
     )
     return row[0] if row else None
 from app.schemas.cash_advance_request import (
+    CashAdvanceAdjustment,
     CashAdvanceExceptionRequest,
     CashAdvanceRequestCreate,
     CashAdvanceReviewAction,
@@ -75,6 +76,19 @@ def _total_deducted(request_id: int, db: Session) -> float:
     total = (
         db.query(func.coalesce(func.sum(CashAdvanceDeductionLog.amount), 0))
         .filter(CashAdvanceDeductionLog.cash_advance_request_id == request_id)
+        .scalar()
+    )
+    return float(total or 0)
+
+
+def _total_adjusted(request_id: int, db: Session) -> float:
+    """The adjustment entries' part of _total_deducted."""
+    total = (
+        db.query(func.coalesce(func.sum(CashAdvanceDeductionLog.amount), 0))
+        .filter(
+            CashAdvanceDeductionLog.cash_advance_request_id == request_id,
+            CashAdvanceDeductionLog.entry_type == "adjustment",
+        )
         .scalar()
     )
     return float(total or 0)
@@ -117,6 +131,9 @@ def _serialize(req: CashAdvanceRequest, db: Session) -> dict:
     deducted = _total_deducted(req.id, db)
     remaining = round(payable_amount - deducted, 2)
     per_pay = float(req.deduction_per_pay_amount)
+    adjusted = _total_adjusted(req.id, db)
+    # What's actually owed in all, after adjustments.
+    effective_amount = round(payable_amount - adjusted, 2)
 
     return {
         "id": req.id,
@@ -132,9 +149,12 @@ def _serialize(req: CashAdvanceRequest, db: Session) -> dict:
         "deduction_option_id": req.deduction_option_id,
         "deduction_per_pay_amount": per_pay,
         "estimated_pay_periods": (
-            ceil(payable_amount / per_pay) if per_pay > 0 else None
+            ceil(effective_amount / per_pay) if per_pay > 0 else None
         ),
-        "total_deducted": deducted,
+        "effective_amount": effective_amount,
+        "total_adjustment": round(-adjusted, 2) or 0.0,
+        # From pay only -- adjustments aren't deductions.
+        "total_deducted": round(deducted - adjusted, 2),
         "remaining_balance": max(remaining, 0),
         "is_fully_paid": remaining <= 0,
         "reason": req.reason,
@@ -929,7 +949,12 @@ def list_deduction_history(
         and (
             not source
             or (source == "payroll" and log.payroll_cutoff_period)
-            or (source == "manual" and not log.payroll_cutoff_period)
+            or (
+                source == "manual"
+                and not log.payroll_cutoff_period
+                and log.entry_type != "adjustment"
+            )
+            or (source == "adjustment" and log.entry_type == "adjustment")
         )
     ]
 
@@ -967,7 +992,11 @@ def list_deduction_history(
             "id": log.id,
             "recorded_at": _utc(log.recorded_at),
             "amount": float(log.amount),
-            "source": "payroll" if cutoff else "manual",
+            "source": (
+                "adjustment"
+                if log.entry_type == "adjustment"
+                else "payroll" if cutoff else "manual"
+            ),
             "cutoff_period": cutoff,
             "department": dept,
             "payroll_status": run_status.get((dept, cutoff)) if dept else None,
@@ -1082,6 +1111,69 @@ def record_deduction(
     return _serialize(request, db)
 
 
+@router.post("/{request_id}/adjust")
+def adjust_cash_advance(
+    request_id: int,
+    payload: CashAdvanceAdjustment,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(
+        require_role_or_module(roles=[], module_key="finance.cash_advance")
+    ),
+):
+    """Corrects what's owed with a recorded reason -- e.g. ₱1,000 approved
+    but only ₱700 actually released: change -300. Kept as an entry beside
+    the deductions, so the approved amount and history stay as they were."""
+    request = (
+        db.query(CashAdvanceRequest)
+        .filter(CashAdvanceRequest.id == request_id)
+        .with_for_update()
+        .first()
+    )
+    if not request:
+        raise HTTPException(status_code=404, detail="Cash advance request not found")
+    if request.status != "approved":
+        raise HTTPException(
+            status_code=400, detail="Only approved cash advances can be adjusted."
+        )
+    _ensure_terms_settled(request)
+
+    change = round(payload.change, 2)
+    reason = (payload.reason or "").strip()
+    if not change:
+        raise HTTPException(status_code=400, detail="Enter a different amount.")
+    if not reason:
+        raise HTTPException(status_code=400, detail="Give the reason for the adjustment.")
+
+    payable = float(
+        request.approved_amount if request.approved_amount is not None else request.amount
+    )
+    remaining = payable - _total_deducted(request.id, db)
+    if remaining + change < 0:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Only ₱{max(remaining, 0):,.2f} is left to pay, so it can't go down by "
+                f"₱{abs(change):,.2f}. The rest has already been deducted."
+            ),
+        )
+
+    db.add(
+        CashAdvanceDeductionLog(
+            cash_advance_request_id=request.id,
+            amount=-change,
+            note=reason[:2000],
+            recorded_by_user_id=current_user.id,
+            entry_type="adjustment",
+        )
+    )
+    request.approval_log = append_log(
+        request.approval_log, current_user, "adjusted", f"{change:+,.2f}: {reason}"
+    )
+    db.commit()
+    db.refresh(request)
+    return _serialize(request, db)
+
+
 @router.get("/{request_id}/transactions")
 def get_deduction_transactions(
     request_id: int,
@@ -1113,6 +1205,7 @@ def get_deduction_transactions(
         {
             "id": log.id,
             "amount": float(log.amount),
+            "entry_type": log.entry_type,
             "note": log.note,
             "recorded_by_name": (
                 log.recorded_by.username if log.recorded_by else None

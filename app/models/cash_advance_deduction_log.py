@@ -25,6 +25,12 @@ class CashAdvanceDeductionLog(Base):
     amount = Column(Numeric(10, 2), nullable=False)
     note = Column(Text, nullable=True)
 
+    # "deduction", or "adjustment": corrects what's owed (e.g. less was
+    # actually released than approved), not money taken from pay. Same
+    # balance math -- a positive amount lowers the balance, so an adjustment
+    # that adds to what's owed is negative.
+    entry_type = Column(String(20), nullable=False, default="deduction", server_default="deduction")
+
     # Set when the entry came from payroll (e.g. "2026-09-01_2026-09-15",
     # same format as PayrollDeduction.cutoff_period). Regenerating that
     # cutoff's payslip replaces these entries instead of adding more.
