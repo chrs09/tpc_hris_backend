@@ -112,6 +112,18 @@ class CashAdvanceRequest(Base):
     exception_decided_at = Column(DateTime, nullable=True)
     exception_remarks = Column(Text, nullable=True)
 
+    # Revised terms: an approved exception changed what the employee agreed
+    # to when filing, so they accept or decline the new terms. While pending
+    # (status stays "approved") the money can't be released or deducted.
+    # accepted -> carries on; declined -> status becomes "cancelled".
+    # NULL = nothing to acknowledge.
+    revised_terms_status = Column(String(20), nullable=True)  # pending/accepted/declined
+    revised_terms_previous_amount = Column(Numeric(10, 2), nullable=True)
+    revised_terms_previous_per_pay = Column(Numeric(10, 2), nullable=True)
+    revised_terms_required_at = Column(DateTime, nullable=True)
+    revised_terms_responded_at = Column(DateTime, nullable=True)
+    revised_terms_remarks = Column(Text, nullable=True)
+
     # Archived = hidden from Finance's All Requests list only; balances
     # and payroll deductions keep working.
     is_archived = Column(Boolean, nullable=False, default=False, server_default="0")

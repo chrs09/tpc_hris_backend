@@ -22,6 +22,12 @@ class CashAdvanceReviewAction(BaseModel):
     approved_amount: float | None = None
 
 
+class RevisedTermsResponse(BaseModel):
+    # The employee's answer to revised terms after an exception.
+    accept: bool
+    remarks: str | None = None
+
+
 class ReleaseInfoUpdate(BaseModel):
     # Proof the approved funds were actually handed over -- a GCash
     # reference number, check number, payroll-release note, etc.

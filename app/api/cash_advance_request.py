@@ -65,6 +65,7 @@ from app.schemas.cash_advance_request import (
     RecordDeductionCreate,
     OpeningBalanceCreate,
     ReleaseInfoUpdate,
+    RevisedTermsResponse,
 )
 
 router = APIRouter(prefix="/cash-advance-requests", tags=["Cash Advance Requests"])
@@ -77,6 +78,26 @@ def _total_deducted(request_id: int, db: Session) -> float:
         .scalar()
     )
     return float(total or 0)
+
+
+def _display_status(req: CashAdvanceRequest) -> str:
+    """What to show: status, with an approved request's next stage --
+    "awaiting_acceptance" (revised terms) or "released" (money handed over).
+    `status` itself stays "approved" for balances and payroll."""
+    if req.status == "approved":
+        if req.revised_terms_status == "pending":
+            return "awaiting_acceptance"
+        if req.released_at:
+            return "released"
+    return req.status
+
+
+def _ensure_terms_settled(request: CashAdvanceRequest) -> None:
+    if request.revised_terms_status == "pending":
+        raise HTTPException(
+            status_code=400,
+            detail="The employee hasn't accepted the revised terms yet.",
+        )
 
 
 def _serialize(req: CashAdvanceRequest, db: Session) -> dict:
@@ -121,6 +142,22 @@ def _serialize(req: CashAdvanceRequest, db: Session) -> dict:
         "terms_accepted": req.terms_accepted,
         "terms_accepted_at": _utc(req.terms_accepted_at),
         "status": req.status,
+        "display_status": _display_status(req),
+        "revised_terms_status": req.revised_terms_status,
+        "revised_terms_pending": req.revised_terms_status == "pending" and req.status == "approved",
+        "revised_terms_previous_amount": (
+            float(req.revised_terms_previous_amount)
+            if req.revised_terms_previous_amount is not None
+            else None
+        ),
+        "revised_terms_previous_per_pay": (
+            float(req.revised_terms_previous_per_pay)
+            if req.revised_terms_previous_per_pay is not None
+            else None
+        ),
+        "revised_terms_required_at": _utc(req.revised_terms_required_at),
+        "revised_terms_responded_at": _utc(req.revised_terms_responded_at),
+        "revised_terms_remarks": req.revised_terms_remarks,
         "remarks": req.remarks,
         "requested_by_user_id": req.requested_by_user_id,
         "requested_by_name": approver.username if approver else None,
@@ -429,7 +466,9 @@ def get_my_cash_advance_balance(
     )
 
     serialized = [_serialize(r, db) for r in approved]
-    outstanding = [r for r in serialized if not r["is_fully_paid"]]
+    outstanding = [
+        r for r in serialized if not r["is_fully_paid"] and not r["revised_terms_pending"]
+    ]
 
     return {
         "total_outstanding": round(
@@ -437,6 +476,59 @@ def get_my_cash_advance_balance(
         ),
         "requests": outstanding,
     }
+
+
+@router.post("/{request_id}/revised-terms")
+def respond_to_revised_terms(
+    request_id: int,
+    payload: RevisedTermsResponse,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """The employee accepts revised terms (the request can now be released)
+    or declines them (it's cancelled -- no money has gone out). Only the
+    employee can answer; nobody can accept on their behalf."""
+    request = (
+        db.query(CashAdvanceRequest)
+        .filter(CashAdvanceRequest.id == request_id)
+        .with_for_update()
+        .first()
+    )
+    if not request:
+        raise HTTPException(status_code=404, detail="Cash advance request not found")
+    if request.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Only the employee can answer revised terms.")
+    if request.status != "approved" or request.revised_terms_status != "pending":
+        raise HTTPException(status_code=400, detail="There are no revised terms waiting for you.")
+
+    remarks = (payload.remarks or "").strip() or None
+    request.revised_terms_status = "accepted" if payload.accept else "declined"
+    request.revised_terms_responded_at = datetime.utcnow()
+    request.revised_terms_remarks = remarks
+    request.approval_log = append_log(
+        request.approval_log,
+        current_user,
+        "accepted revised terms" if payload.accept else "declined revised terms",
+        remarks,
+    )
+    if not payload.accept:
+        request.status = "cancelled"
+    db.commit()
+
+    create_notification(
+        db=db,
+        type_="CASH_ADVANCE_REQUESTED",
+        driver_id=current_user.id,
+        message=(
+            f"{current_user.username} accepted the revised terms of cash advance "
+            f"#{request.id} -- ready for release."
+            if payload.accept
+            else f"{current_user.username} declined the revised terms of cash advance "
+            f"#{request.id} -- it was cancelled."
+        ),
+    )
+    db.refresh(request)
+    return _serialize(request, db)
 
 
 @router.post("/{request_id}/cancel")
@@ -657,7 +749,21 @@ def reject_cash_advance_request(
 # EXCEPTION (above the policy limit)
 # =========================
 def _apply_exception(request: CashAdvanceRequest) -> None:
-    """Use the exception's amount and repayment for the approval."""
+    """Use the exception's amount and repayment for the approval. If that
+    differs from what the employee agreed to when filing, they have to
+    accept the revised terms first (see respond_to_revised_terms)."""
+    previous_amount = float(request.amount)
+    previous_per_pay = float(request.deduction_per_pay_amount)
+    if (
+        round(float(request.exception_amount), 2) != round(previous_amount, 2)
+        or round(float(request.exception_deduction_per_pay), 2) != round(previous_per_pay, 2)
+    ):
+        request.revised_terms_status = "pending"
+        request.revised_terms_previous_amount = previous_amount
+        request.revised_terms_previous_per_pay = previous_per_pay
+        request.revised_terms_required_at = datetime.utcnow()
+        request.revised_terms_responded_at = None
+        request.revised_terms_remarks = None
     request.approved_amount = request.exception_amount
     request.deduction_per_pay_amount = request.exception_deduction_per_pay
     # Custom repayment -- not one of the preset per-pay options.
@@ -908,7 +1014,9 @@ def list_outstanding_balances(
         .all()
     )
     serialized = [_serialize(r, db) for r in approved]
-    return [r for r in serialized if not r["is_fully_paid"]]
+    return [
+        r for r in serialized if not r["is_fully_paid"] and not r["revised_terms_pending"]
+    ]
 
 
 @router.post("/{request_id}/record-deduction")
@@ -935,6 +1043,7 @@ def record_deduction(
             status_code=400,
             detail="Deductions can only be recorded for approved requests.",
         )
+    _ensure_terms_settled(request)
 
     payable_amount = (
         float(request.approved_amount)
@@ -1110,6 +1219,7 @@ def set_release_info(
             status_code=400,
             detail="Release info can only be recorded for approved requests.",
         )
+    _ensure_terms_settled(request)
 
     request.release_reference = payload.release_reference.strip()
     request.released_at = datetime.utcnow()
@@ -1279,6 +1389,7 @@ def upload_release_receipt(
         raise HTTPException(
             status_code=400, detail="A receipt can only be added to an approved cash advance."
         )
+    _ensure_terms_settled(request)
     if request.approved_by_user_id != current_user.id and not has_editable_grant(
         db, current_user, ["finance.cash_advance"]
     ):

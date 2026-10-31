@@ -42,6 +42,11 @@ def _approved_requests(db: Session, employee_ids: list[int]) -> dict[int, list]:
         db.query(CashAdvanceRequest)
         .filter(
             CashAdvanceRequest.status == "approved",
+            # Revised terms not accepted yet: no money out, nothing to deduct.
+            or_(
+                CashAdvanceRequest.revised_terms_status.is_(None),
+                CashAdvanceRequest.revised_terms_status != "pending",
+            ),
             or_(
                 CashAdvanceRequest.employee_id.in_(employee_ids),
                 CashAdvanceRequest.user_id.in_(list(user_employee) or [0]),
