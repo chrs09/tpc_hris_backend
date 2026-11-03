@@ -44,6 +44,11 @@ class PayrollDeduction(Base):
     # Cash advance paid down this cutoff -- the matching
     # CashAdvanceDeductionLog entries carry the same cutoff_period.
     cash_advance_deduction = Column(Numeric(12, 2), nullable=False, default=0)
+    # Shortage/accident charges paid down this cutoff -- the matching
+    # TripChargeDeductionLog entries carry the same cutoff_period.
+    trip_charge_deduction = Column(
+        Numeric(12, 2), nullable=False, default=0, server_default="0"
+    )
     net_pay = Column(Numeric(12, 2), nullable=False, default=0)
 
     created_at = Column(DateTime, server_default=func.now())

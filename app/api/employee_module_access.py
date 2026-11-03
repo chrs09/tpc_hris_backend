@@ -88,6 +88,11 @@ MODULE_GROUPS = {
         # Enter trips by hand (app/api/admin/trip_manual_entries.py);
         # approving them stays superadmin-only.
         "trip_manual_entries",
+        # Shortages and accidents (app/api/admin/trip_charges.py).
+        {
+            "key": "trip_charges",
+            "children": ["trip_charges_approve"],
+        },
     ],
     "customers": ["customers"],
     "suppliers": ["suppliers"],

@@ -191,6 +191,14 @@ def _serialize(req: CashAdvanceRequest, db: Session) -> dict:
         "release_receipt_url": _receipt_url(db, req.id),
         "is_archived": bool(req.is_archived),
         "released_at": _utc(req.released_at),
+        # Carried over from before this system: the money went out long ago,
+        # so there's nothing to release.
+        "is_opening_balance": (
+            req.status == "approved"
+            and req.deduction_option_id is None
+            and not req.terms_accepted
+            and req.approved_by_user_id == req.requested_by_user_id
+        ),
         "released_by_name": (
             req.released_by.username if req.released_by else None
         ),
@@ -1031,7 +1039,8 @@ def list_outstanding_balances(
     ),
 ):
     """Every approved request with a remaining balance > 0 -- the
-    superadmin page's outstanding-balances list."""
+    Outstanding Balances tab (superadmin, or Finance -> Cash Advances on
+    the Org Chart)."""
     approved = (
         db.query(CashAdvanceRequest)
         .options(

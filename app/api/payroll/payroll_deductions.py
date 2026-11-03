@@ -23,6 +23,7 @@ from app.services.cash_advance_payroll import (
     apply_payroll_deduction,
     payroll_suggestions,
 )
+from app.services import trip_charge_payroll
 
 router = APIRouter(
     prefix="/payroll-deductions",
@@ -75,6 +76,17 @@ def _save_deduction(db: Session, payload: dict, user: User) -> PayrollDeduction:
         )
         payload["cash_advance_deduction"] = ca["applied"]
 
+    # Same for trip charges (shortages, accidents).
+    if "trip_charge_deduction" in payload:
+        charge = trip_charge_payroll.apply_payroll_deduction(
+            db,
+            payload["employee_id"],
+            payload["cutoff_period"],
+            payload.get("trip_charge_deduction") or 0,
+            user_id,
+        )
+        payload["trip_charge_deduction"] = charge["applied"]
+
     if existing:
         existing.department = payload["department"]
 
@@ -94,6 +106,9 @@ def _save_deduction(db: Session, payload: dict, user: User) -> PayrollDeduction:
 
         if "cash_advance_deduction" in payload:
             existing.cash_advance_deduction = payload["cash_advance_deduction"]
+
+        if "trip_charge_deduction" in payload:
+            existing.trip_charge_deduction = payload["trip_charge_deduction"]
 
         existing.net_pay = payload["net_pay"]
 
@@ -117,6 +132,7 @@ def _save_deduction(db: Session, payload: dict, user: User) -> PayrollDeduction:
         undertime_deduction=payload.get("undertime_deduction", 0),
         absent_deduction=payload.get("absent_deduction", 0),
         cash_advance_deduction=payload.get("cash_advance_deduction", 0),
+        trip_charge_deduction=payload.get("trip_charge_deduction", 0),
         net_pay=payload["net_pay"],
     )
 
@@ -174,6 +190,23 @@ def get_cash_advance_for_cutoff(
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid employee ids.")
     suggestions = payroll_suggestions(db, ids, cutoff_period)
+    return {str(emp): data for emp, data in suggestions.items()}
+
+
+@router.get("/trip-charges")
+def get_trip_charges_for_cutoff(
+    cutoff_period: str,
+    employee_ids: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(_require_payroll),
+):
+    """Trip charges to deduct this cutoff, per employee -- same shape as
+    /cash-advance above."""
+    try:
+        ids = [int(x) for x in employee_ids.split(",") if x.strip()]
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid employee ids.")
+    suggestions = trip_charge_payroll.payroll_suggestions(db, ids, cutoff_period)
     return {str(emp): data for emp, data in suggestions.items()}
 
 
