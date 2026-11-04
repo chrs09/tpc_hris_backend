@@ -125,6 +125,11 @@ class RuleIn(BaseModel):
     one_helper_first_other: float | None = None
     one_helper_next_trip_rate: float | None = None
     one_helper_next_other: float | None = None
+    one_helper_driver_first_trip_rate: float | None = None
+    one_helper_driver_allowance: float | None = None
+    one_helper_driver_other: float | None = None
+    one_helper_driver_next_trip_rate: float | None = None
+    one_helper_driver_next_other: float | None = None
     effective_from: date
     notes: str | None = None
 

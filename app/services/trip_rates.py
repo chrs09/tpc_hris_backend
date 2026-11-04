@@ -22,10 +22,12 @@ part each (driver_next_other, helper_first_other, helper_next_other): once
 resolved, the rate is the total and its basic is in driver_next_basic_rate /
 helper_first_basic_rate / helper_next_basic_rate.
 
-A 2-helper category can also have 1-helper rates (one_helper_*: Helper 1st /
-Next, each with an other), paid when the trip has only 1 helper. Blank =
-the normal helper rates. On such a trip the helper_* keys hold the 1-helper
-rates and helper_rate_note says so.
+A 2-helper category can also have 1-helper rates, paid when the trip has
+only 1 helper: one_helper_* for the helper (1st / Next, each with an other)
+and one_helper_driver_* for the driver (1st with allowance + other, Next
+with an other). A rate row is used when its basic is set (its parts blank
+= 0); blank basic = the normal rate. On such a trip the driver_* / helper_*
+keys hold the 1-helper rates and driver_rate_note / helper_rate_note say so.
 """
 
 from datetime import date
@@ -48,15 +50,25 @@ RATE_FIELDS = (
     "one_helper_first_other",
     "one_helper_next_trip_rate",
     "one_helper_next_other",
+    "one_helper_driver_first_trip_rate",
+    "one_helper_driver_allowance",
+    "one_helper_driver_other",
+    "one_helper_driver_next_trip_rate",
+    "one_helper_driver_next_other",
 )
 
-# Blank on the category means "not set" (use the normal helper rates), so
-# these stay None instead of 0.
+# Blank on the category means "not set" (use the normal rates), so these
+# stay None instead of 0.
 ONE_HELPER_FIELDS = (
     "one_helper_first_trip_rate",
     "one_helper_first_other",
     "one_helper_next_trip_rate",
     "one_helper_next_other",
+    "one_helper_driver_first_trip_rate",
+    "one_helper_driver_allowance",
+    "one_helper_driver_other",
+    "one_helper_driver_next_trip_rate",
+    "one_helper_driver_next_other",
 )
 _OPTIONAL_FIELDS = set(ONE_HELPER_FIELDS)
 
@@ -67,12 +79,35 @@ _OTHER_PARTS = {
     "helper_next_trip_rate": ("helper_next_other", "helper_next_basic_rate"),
     "one_helper_first_trip_rate": ("one_helper_first_other", "one_helper_first_basic_rate"),
     "one_helper_next_trip_rate": ("one_helper_next_other", "one_helper_next_basic_rate"),
+    "one_helper_driver_next_trip_rate": (
+        "one_helper_driver_next_other",
+        "one_helper_driver_next_basic_rate",
+    ),
 }
 
-# Helper rate -> its 1-helper version (rate, other, basic).
+# Rate -> its 1-helper version: (rate, basic, its parts as normal -> 1-helper).
 _ONE_HELPER = {
-    "helper_first": "one_helper_first",
-    "helper_next": "one_helper_next",
+    "helper_first_trip_rate": (
+        "one_helper_first_trip_rate",
+        {"helper_first_basic_rate": "one_helper_first_basic_rate",
+         "helper_first_other": "one_helper_first_other"},
+    ),
+    "helper_next_trip_rate": (
+        "one_helper_next_trip_rate",
+        {"helper_next_basic_rate": "one_helper_next_basic_rate",
+         "helper_next_other": "one_helper_next_other"},
+    ),
+    "driver_first_trip_rate": (
+        "one_helper_driver_first_trip_rate",
+        {"driver_basic_rate": "one_helper_driver_basic_rate",
+         "driver_allowance": "one_helper_driver_allowance",
+         "driver_other": "one_helper_driver_other"},
+    ),
+    "driver_next_trip_rate": (
+        "one_helper_driver_next_trip_rate",
+        {"driver_next_basic_rate": "one_helper_driver_next_basic_rate",
+         "driver_next_other": "one_helper_driver_next_other"},
+    ),
 }
 
 
@@ -165,9 +200,21 @@ def _with_first_total(rates: dict) -> dict:
     trip pays (driver_first_trip_rate: basic + allowance + other; the rest:
     basic + other)."""
     basic = rates["driver_first_trip_rate"]
+    one_basic = rates["one_helper_driver_first_trip_rate"]
     totals = {
         "driver_basic_rate": basic,
         "driver_first_trip_rate": round(basic + rates["driver_allowance"] + rates["driver_other"], 2),
+        "one_helper_driver_basic_rate": one_basic,
+        "one_helper_driver_first_trip_rate": (
+            None
+            if one_basic is None
+            else round(
+                one_basic
+                + (rates["one_helper_driver_allowance"] or 0)
+                + (rates["one_helper_driver_other"] or 0),
+                2,
+            )
+        ),
     }
     for field, (other, basic_key) in _OTHER_PARTS.items():
         totals[basic_key] = rates[field]
@@ -179,18 +226,16 @@ def _with_first_total(rates: dict) -> dict:
 
 
 def _apply_one_helper(rates: dict) -> dict:
-    """The trip has 1 helper on a 2-helper category: each helper rate with
-    a 1-helper version set pays that instead."""
-    used = False
-    for normal, one in _ONE_HELPER.items():
-        if rates[f"{one}_trip_rate"] is None:
+    """The trip has 1 helper on a 2-helper category: each driver / helper
+    rate with a 1-helper version set pays that instead."""
+    for normal, (one, parts) in _ONE_HELPER.items():
+        if rates[one] is None:
             continue
-        rates[f"{normal}_trip_rate"] = rates[f"{one}_trip_rate"]
-        rates[f"{normal}_basic_rate"] = rates[f"{one}_basic_rate"]
-        rates[f"{normal}_other"] = rates[f"{one}_other"] or 0.0
-        used = True
-    if used:
-        rates["helper_rate_note"] = "1-helper rate"
+        rates[normal] = rates[one]
+        for part, one_part in parts.items():
+            rates[part] = rates[one_part] or 0.0
+        note = "driver_rate_note" if normal.startswith("driver_") else "helper_rate_note"
+        rates[note] = "1-helper rate"
     return rates
 
 

@@ -850,11 +850,17 @@ def create_rate_profile(
     driver_next_other: float = Form(0),
     helper_first_other: float = Form(0),
     helper_next_other: float = Form(0),
-    # 2 helpers but only 1 goes: that helper's rates. Blank = normal rates.
+    # 2 helpers but only 1 goes: that helper's and the driver's rates.
+    # Blank = normal rates.
     one_helper_first_trip_rate: float = Form(None),
     one_helper_first_other: float = Form(None),
     one_helper_next_trip_rate: float = Form(None),
     one_helper_next_other: float = Form(None),
+    one_helper_driver_first_trip_rate: float = Form(None),
+    one_helper_driver_allowance: float = Form(None),
+    one_helper_driver_other: float = Form(None),
+    one_helper_driver_next_trip_rate: float = Form(None),
+    one_helper_driver_next_other: float = Form(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -884,6 +890,11 @@ def create_rate_profile(
         "one_helper_first_other": one_helper_first_other,
         "one_helper_next_trip_rate": one_helper_next_trip_rate,
         "one_helper_next_other": one_helper_next_other,
+        "one_helper_driver_first_trip_rate": one_helper_driver_first_trip_rate,
+        "one_helper_driver_allowance": one_helper_driver_allowance,
+        "one_helper_driver_other": one_helper_driver_other,
+        "one_helper_driver_next_trip_rate": one_helper_driver_next_trip_rate,
+        "one_helper_driver_next_other": one_helper_driver_next_other,
     }
     if any(value is not None and value < 0 for value in rates.values()):
         raise HTTPException(status_code=400, detail="Rates can't be negative.")
@@ -953,7 +964,12 @@ def update_rate_profile(
     one_helper_first_other: float = Form(None),
     one_helper_next_trip_rate: float = Form(None),
     one_helper_next_other: float = Form(None),
-    # Clear the 1-helper rates first (back to the normal helper rates);
+    one_helper_driver_first_trip_rate: float = Form(None),
+    one_helper_driver_allowance: float = Form(None),
+    one_helper_driver_other: float = Form(None),
+    one_helper_driver_next_trip_rate: float = Form(None),
+    one_helper_driver_next_other: float = Form(None),
+    # Clear the 1-helper rates first (back to the normal rates);
     # any sent with it are then set.
     clear_one_helper: bool = Form(False),
     is_active: bool = Form(None),
@@ -1021,6 +1037,11 @@ def update_rate_profile(
         "one_helper_first_other": one_helper_first_other,
         "one_helper_next_trip_rate": one_helper_next_trip_rate,
         "one_helper_next_other": one_helper_next_other,
+        "one_helper_driver_first_trip_rate": one_helper_driver_first_trip_rate,
+        "one_helper_driver_allowance": one_helper_driver_allowance,
+        "one_helper_driver_other": one_helper_driver_other,
+        "one_helper_driver_next_trip_rate": one_helper_driver_next_trip_rate,
+        "one_helper_driver_next_other": one_helper_driver_next_other,
     }
     if any(value is not None and value < 0 for value in one_helper.values()):
         raise HTTPException(status_code=400, detail="Rates can't be negative.")

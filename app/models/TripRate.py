@@ -112,6 +112,12 @@ class TripRateProfile(Base):
     one_helper_first_other = Column(Numeric(10, 2), nullable=True)
     one_helper_next_trip_rate = Column(Numeric(10, 2), nullable=True)
     one_helper_next_other = Column(Numeric(10, 2), nullable=True)
+    # ...and the driver's on that trip. NULL = the normal driver rates.
+    one_helper_driver_first_trip_rate = Column(Numeric(10, 2), nullable=True)
+    one_helper_driver_allowance = Column(Numeric(10, 2), nullable=True)
+    one_helper_driver_other = Column(Numeric(10, 2), nullable=True)
+    one_helper_driver_next_trip_rate = Column(Numeric(10, 2), nullable=True)
+    one_helper_driver_next_other = Column(Numeric(10, 2), nullable=True)
 
     is_active = Column(
         Boolean,

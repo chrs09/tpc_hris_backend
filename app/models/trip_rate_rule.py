@@ -50,11 +50,16 @@ class TripRateRule(Base):
     driver_next_other = Column(Numeric(10, 2), nullable=True)
     helper_first_other = Column(Numeric(10, 2), nullable=True)
     helper_next_other = Column(Numeric(10, 2), nullable=True)
-    # Helper rates when only 1 helper goes on a 2-helper category.
+    # Driver and helper rates when only 1 helper goes on a 2-helper category.
     one_helper_first_trip_rate = Column(Numeric(10, 2), nullable=True)
     one_helper_first_other = Column(Numeric(10, 2), nullable=True)
     one_helper_next_trip_rate = Column(Numeric(10, 2), nullable=True)
     one_helper_next_other = Column(Numeric(10, 2), nullable=True)
+    one_helper_driver_first_trip_rate = Column(Numeric(10, 2), nullable=True)
+    one_helper_driver_allowance = Column(Numeric(10, 2), nullable=True)
+    one_helper_driver_other = Column(Numeric(10, 2), nullable=True)
+    one_helper_driver_next_trip_rate = Column(Numeric(10, 2), nullable=True)
+    one_helper_driver_next_other = Column(Numeric(10, 2), nullable=True)
 
     effective_from = Column(Date, nullable=False, index=True)
     notes = Column(String(255), nullable=True)
