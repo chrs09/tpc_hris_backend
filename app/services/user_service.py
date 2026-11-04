@@ -1,3 +1,5 @@
+import re
+
 from sqlalchemy import func
 from datetime import datetime
 
@@ -228,6 +230,42 @@ def update_user_service(
                 )
             )
             user.username = new_username
+
+    # Email: only on superadmin accounts (no employee 201 file to take it
+    # from) -- used for alerts such as missed time in. Everyone else's
+    # comes from their employee record. Only a superadmin gets this far
+    # for a superadmin account (see above).
+    if getattr(data, "email", None) is not None:
+        if user.role != UserRole.SUPERADMIN:
+            raise HTTPException(
+                status_code=400,
+                detail="Only a superadmin account's email can be edited here. "
+                "Other accounts use the email on their employee record.",
+            )
+        new_email = data.email.strip().lower() or None
+        if new_email and not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", new_email):
+            raise HTTPException(status_code=400, detail="Enter a valid email address.")
+        if new_email != user.email:
+            if new_email and (
+                db.query(User.id)
+                .filter(func.lower(User.email) == new_email, User.id != user.id)
+                .first()
+            ):
+                raise HTTPException(
+                    status_code=400, detail="Another account already uses that email."
+                )
+            revisions.append(
+                UserRevision(
+                    user_id=user.id,
+                    field_changed="email",
+                    # The history columns hold 50 characters.
+                    old_value=(user.email or "")[:50] or None,
+                    new_value=(new_email or "")[:50] or None,
+                    reason=data.reason,
+                    changed_by_user_id=changed_by_user_id,
+                )
+            )
+            user.email = new_email
 
     if data.role is not None:
         new_role = UserRole(data.role)

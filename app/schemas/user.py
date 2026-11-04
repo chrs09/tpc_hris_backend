@@ -42,6 +42,9 @@ class UserUpdate(BaseModel):
     username: str | None = None
     role: UpdateUserRole | None = None
     is_active: bool | None = None
+    # Superadmin accounts only (they usually have no employee record to
+    # take it from); "" clears it. See update_user_service().
+    email: str | None = None
     # Required by update_user_service() when is_active is being changed
     # from True to False -- becomes the UserRevision.reason for that change.
     reason: str | None = None
