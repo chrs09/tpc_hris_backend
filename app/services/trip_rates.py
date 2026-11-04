@@ -16,6 +16,16 @@ and driver_other, each stored and overridden on its own -- a rule changing
 only the basic keeps the allowance. Once resolved, driver_first_trip_rate is
 the TOTAL a first trip pays (what payroll and the driver app read), with the
 parts in driver_basic_rate / driver_allowance / driver_other.
+
+Driver Next, Helper 1st and Helper Next work the same way with one "other"
+part each (driver_next_other, helper_first_other, helper_next_other): once
+resolved, the rate is the total and its basic is in driver_next_basic_rate /
+helper_first_basic_rate / helper_next_basic_rate.
+
+A 2-helper category can also have 1-helper rates (one_helper_*: Helper 1st /
+Next, each with an other), paid when the trip has only 1 helper. Blank =
+the normal helper rates. On such a trip the helper_* keys hold the 1-helper
+rates and helper_rate_note says so.
 """
 
 from datetime import date
@@ -31,7 +41,56 @@ RATE_FIELDS = (
     "driver_next_trip_rate",
     "helper_first_trip_rate",
     "helper_next_trip_rate",
+    "driver_next_other",
+    "helper_first_other",
+    "helper_next_other",
+    "one_helper_first_trip_rate",
+    "one_helper_first_other",
+    "one_helper_next_trip_rate",
+    "one_helper_next_other",
 )
+
+# Blank on the category means "not set" (use the normal helper rates), so
+# these stay None instead of 0.
+ONE_HELPER_FIELDS = (
+    "one_helper_first_trip_rate",
+    "one_helper_first_other",
+    "one_helper_next_trip_rate",
+    "one_helper_next_other",
+)
+_OPTIONAL_FIELDS = set(ONE_HELPER_FIELDS)
+
+# rate -> (its other part, where its basic goes once resolved).
+_OTHER_PARTS = {
+    "driver_next_trip_rate": ("driver_next_other", "driver_next_basic_rate"),
+    "helper_first_trip_rate": ("helper_first_other", "helper_first_basic_rate"),
+    "helper_next_trip_rate": ("helper_next_other", "helper_next_basic_rate"),
+    "one_helper_first_trip_rate": ("one_helper_first_other", "one_helper_first_basic_rate"),
+    "one_helper_next_trip_rate": ("one_helper_next_other", "one_helper_next_basic_rate"),
+}
+
+# Helper rate -> its 1-helper version (rate, other, basic).
+_ONE_HELPER = {
+    "helper_first": "one_helper_first",
+    "helper_next": "one_helper_next",
+}
+
+
+def _base_rates(profile) -> dict:
+    """A category's stored rates (0 when there's no category)."""
+    rates = {}
+    for field in RATE_FIELDS:
+        value = getattr(profile, field, None) if profile else None
+        if field in _OPTIONAL_FIELDS:
+            rates[field] = float(value) if value is not None else None
+        else:
+            rates[field] = float(value or 0)
+    return rates
+
+
+def _helper_count(trip) -> int:
+    helpers = getattr(trip, "trip_helpers", None)
+    return len(helpers) if helpers is not None else 0
 
 # How much each matched field counts towards "more specific".
 _WEIGHTS = {
@@ -102,24 +161,44 @@ def describe_rule(rule: TripRateRule) -> str:
 
 
 def _with_first_total(rates: dict) -> dict:
-    """The stored basic becomes driver_basic_rate; driver_first_trip_rate
-    becomes what a first trip pays."""
+    """The stored basics move to *_basic_rate; each rate becomes what that
+    trip pays (driver_first_trip_rate: basic + allowance + other; the rest:
+    basic + other)."""
     basic = rates["driver_first_trip_rate"]
-    return {
-        **rates,
+    totals = {
         "driver_basic_rate": basic,
         "driver_first_trip_rate": round(basic + rates["driver_allowance"] + rates["driver_other"], 2),
     }
+    for field, (other, basic_key) in _OTHER_PARTS.items():
+        totals[basic_key] = rates[field]
+        # A 1-helper rate not set stays None (the normal rate is paid).
+        totals[field] = (
+            None if rates[field] is None else round(rates[field] + (rates[other] or 0), 2)
+        )
+    return {**rates, **totals}
+
+
+def _apply_one_helper(rates: dict) -> dict:
+    """The trip has 1 helper on a 2-helper category: each helper rate with
+    a 1-helper version set pays that instead."""
+    used = False
+    for normal, one in _ONE_HELPER.items():
+        if rates[f"{one}_trip_rate"] is None:
+            continue
+        rates[f"{normal}_trip_rate"] = rates[f"{one}_trip_rate"]
+        rates[f"{normal}_basic_rate"] = rates[f"{one}_basic_rate"]
+        rates[f"{normal}_other"] = rates[f"{one}_other"] or 0.0
+        used = True
+    if used:
+        rates["helper_rate_note"] = "1-helper rate"
+    return rates
 
 
 def resolve_trip_rates(trip, on: date | None, rules: list[TripRateRule]) -> dict:
     """The four rates for this trip on `on` (its PH trip date), plus a
     short label of where the driver rate came from."""
     profile = trip.trip_rate_profile
-    rates = {
-        field: float(getattr(profile, field) or 0) if profile else 0.0
-        for field in RATE_FIELDS
-    }
+    rates = _base_rates(profile)
     source = profile.profile_name if profile else None
 
     facts = trip_facts(trip)
@@ -141,7 +220,10 @@ def resolve_trip_rates(trip, on: date | None, rules: list[TripRateRule]) -> dict
                     source = describe_rule(rule)
                 break
 
-    return {**_with_first_total(rates), "rate_source": source}
+    resolved = {**_with_first_total(rates), "rate_source": source}
+    if profile and (getattr(profile, "helper_count", 0) or 0) >= 2 and _helper_count(trip) == 1:
+        resolved = _apply_one_helper(resolved)
+    return resolved
 
 
 def _is_category_only(rule: TripRateRule) -> bool:
@@ -163,7 +245,7 @@ def category_rates(profile, rules: list[TripRateRule], on: date) -> dict:
         "destination_area": None,
         "destination_store_id": None,
     }
-    rates = {field: float(getattr(profile, field) or 0) for field in RATE_FIELDS}
+    rates = _base_rates(profile)
     since = None
     ranked = sorted(
         (

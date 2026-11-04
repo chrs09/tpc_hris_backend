@@ -83,6 +83,36 @@ class TripRateProfile(Base):
         default=0,
     )
 
+    # The "other" part of Driver Next, Helper 1st and Helper Next: added to
+    # that rate when a trip is paid, like driver_other on Driver 1st.
+    driver_next_other = Column(
+        Numeric(10, 2),
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
+
+    helper_first_other = Column(
+        Numeric(10, 2),
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
+
+    helper_next_other = Column(
+        Numeric(10, 2),
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
+
+    # A 2-helper category when only 1 helper goes: that helper's rates
+    # (basic + other, 1st / next). NULL = pay the normal helper rates.
+    one_helper_first_trip_rate = Column(Numeric(10, 2), nullable=True)
+    one_helper_first_other = Column(Numeric(10, 2), nullable=True)
+    one_helper_next_trip_rate = Column(Numeric(10, 2), nullable=True)
+    one_helper_next_other = Column(Numeric(10, 2), nullable=True)
+
     is_active = Column(
         Boolean,
         nullable=False,

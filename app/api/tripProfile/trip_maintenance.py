@@ -25,7 +25,12 @@ from app.services.file_service import FileService
 from app.utils.response import api_response
 from app.models.user import UserRole
 from app.services.vehicle_assignment import open_repair, repair_info
-from app.services.trip_rates import category_rate_changes, category_rates, load_rules
+from app.services.trip_rates import (
+    ONE_HELPER_FIELDS,
+    category_rate_changes,
+    category_rates,
+    load_rules,
+)
 from zoneinfo import ZoneInfo
 from app.utils.user_display import display_name
 
@@ -786,6 +791,14 @@ def get_rate_profiles(
             "driver_next_trip_rate": float(profile.driver_next_trip_rate),
             "helper_first_trip_rate": float(profile.helper_first_trip_rate),
             "helper_next_trip_rate": float(profile.helper_next_trip_rate),
+            "driver_next_other": float(profile.driver_next_other or 0),
+            "helper_first_other": float(profile.helper_first_other or 0),
+            "helper_next_other": float(profile.helper_next_other or 0),
+            # 1-helper rates on a 2-helper category; None = normal rates.
+            **{
+                field: float(getattr(profile, field)) if getattr(profile, field) is not None else None
+                for field in ONE_HELPER_FIELDS
+            },
             "is_active": profile.is_active,
             "store_count": store_counts.get(profile.id, 0),
             "current_rates": category_rates(profile, rules, today),
@@ -834,6 +847,14 @@ def create_rate_profile(
     effective_from: date = Form(None),
     helper_first_trip_rate: float = Form(...),
     helper_next_trip_rate: float = Form(...),
+    driver_next_other: float = Form(0),
+    helper_first_other: float = Form(0),
+    helper_next_other: float = Form(0),
+    # 2 helpers but only 1 goes: that helper's rates. Blank = normal rates.
+    one_helper_first_trip_rate: float = Form(None),
+    one_helper_first_other: float = Form(None),
+    one_helper_next_trip_rate: float = Form(None),
+    one_helper_next_other: float = Form(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -856,7 +877,16 @@ def create_rate_profile(
         "driver_next_trip_rate": driver_next_trip_rate,
         "helper_first_trip_rate": helper_first_trip_rate,
         "helper_next_trip_rate": helper_next_trip_rate,
+        "driver_next_other": driver_next_other,
+        "helper_first_other": helper_first_other,
+        "helper_next_other": helper_next_other,
+        "one_helper_first_trip_rate": one_helper_first_trip_rate,
+        "one_helper_first_other": one_helper_first_other,
+        "one_helper_next_trip_rate": one_helper_next_trip_rate,
+        "one_helper_next_other": one_helper_next_other,
     }
+    if any(value is not None and value < 0 for value in rates.values()):
+        raise HTTPException(status_code=400, detail="Rates can't be negative.")
     dated = effective_from is not None and any(rates.values())
 
     if dated:
@@ -873,7 +903,12 @@ def create_rate_profile(
     profile = TripRateProfile(
         profile_name=profile_name,
         helper_count=helper_count,
-        **({field: 0 for field in rates} if dated else rates),
+        # Dated: the base pays nothing (1-helper rates: not set).
+        **(
+            {field: None if field in ONE_HELPER_FIELDS else 0 for field in rates}
+            if dated
+            else rates
+        ),
         created_by=current_user.id,
     )
 
@@ -911,6 +946,16 @@ def update_rate_profile(
     driver_next_trip_rate: float = Form(None),
     helper_first_trip_rate: float = Form(None),
     helper_next_trip_rate: float = Form(None),
+    driver_next_other: float = Form(None),
+    helper_first_other: float = Form(None),
+    helper_next_other: float = Form(None),
+    one_helper_first_trip_rate: float = Form(None),
+    one_helper_first_other: float = Form(None),
+    one_helper_next_trip_rate: float = Form(None),
+    one_helper_next_other: float = Form(None),
+    # Clear the 1-helper rates first (back to the normal helper rates);
+    # any sent with it are then set.
+    clear_one_helper: bool = Form(False),
     is_active: bool = Form(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -961,6 +1006,30 @@ def update_rate_profile(
 
     if helper_next_trip_rate is not None:
         profile.helper_next_trip_rate = helper_next_trip_rate
+
+    if driver_next_other is not None:
+        profile.driver_next_other = driver_next_other
+
+    if helper_first_other is not None:
+        profile.helper_first_other = helper_first_other
+
+    if helper_next_other is not None:
+        profile.helper_next_other = helper_next_other
+
+    one_helper = {
+        "one_helper_first_trip_rate": one_helper_first_trip_rate,
+        "one_helper_first_other": one_helper_first_other,
+        "one_helper_next_trip_rate": one_helper_next_trip_rate,
+        "one_helper_next_other": one_helper_next_other,
+    }
+    if any(value is not None and value < 0 for value in one_helper.values()):
+        raise HTTPException(status_code=400, detail="Rates can't be negative.")
+    if clear_one_helper:
+        for field in ONE_HELPER_FIELDS:
+            setattr(profile, field, None)
+    for field, value in one_helper.items():
+        if value is not None:
+            setattr(profile, field, value)
 
     if is_active is not None:
         profile.is_active = is_active
