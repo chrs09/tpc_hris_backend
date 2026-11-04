@@ -97,12 +97,17 @@ def _load_shipment_numbers(trip: Trip) -> list[str]:
     return [trip.ticket_no] if trip.ticket_no else []
 
 
+# Pairing value for a shipment delivered to every store of the trip (rare).
+ALL_STORES = 0
+
+
 def _parse_shipment_stores(
     raw, shipment_numbers: list[str], destination_ids: list[int]
 ) -> dict[str, int]:
     """Which destination each shipment number goes to, from the
     dispatch form's JSON {"<shipment no>": <store id>}. One destination:
-    every shipment goes there. Several: each shipment needs one."""
+    every shipment goes there. Several: each shipment needs one, or
+    ALL_STORES."""
     if len(destination_ids) == 1:
         return {n: destination_ids[0] for n in shipment_numbers}
     try:
@@ -117,7 +122,7 @@ def _parse_shipment_stores(
                 status_code=400,
                 detail=f'Pick the store for shipment number "{number}".',
             )
-        if store_id not in destination_ids:
+        if store_id != ALL_STORES and store_id not in destination_ids:
             raise HTTPException(
                 status_code=400,
                 detail=f'Shipment number "{number}" must go to one of the trip\'s stores.',
@@ -141,7 +146,7 @@ def shipments_for_store(trip: Trip, store_id: int | None) -> list[str]:
     numbers = _load_shipment_numbers(trip)
     if not pairs:
         return numbers
-    return [n for n in numbers if pairs.get(n) == store_id]
+    return [n for n in numbers if pairs.get(n) in (store_id, ALL_STORES)]
 
 
 def _load_planned_store_ids(trip: Trip) -> list[int]:
