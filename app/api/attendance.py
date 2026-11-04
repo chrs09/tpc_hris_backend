@@ -31,6 +31,8 @@ from app.core.dependencies import (
 )
 from app.models.attendance import AttendanceRecord
 from app.models.attendance_adjustment import AttendanceAdjustment
+from app.models.time_correction import TimeCorrectionRequest
+from app.services.attendance_alerts import on_time_in
 from app.utils.user_display import display_name
 from app.models.employees import Employee
 from app.models.user import User
@@ -280,8 +282,19 @@ def _ph_today() -> date:
 
 
 def missed_time_out_query(db: Session):
-    """Open self-clocked days in the look-back window, not yet filed."""
+    """Open self-clocked days in the look-back window, not yet filed (a
+    pending time correction with a time out counts as filed)."""
     today = _ph_today()
+    corrected = (
+        db.query(TimeCorrectionRequest.id)
+        .filter(
+            TimeCorrectionRequest.employee_id == AttendanceRecord.employee_id,
+            TimeCorrectionRequest.attendance_date == AttendanceRecord.attendance_date,
+            TimeCorrectionRequest.status == "pending",
+            TimeCorrectionRequest.time_out.isnot(None),
+        )
+        .exists()
+    )
     return db.query(AttendanceRecord).filter(
         AttendanceRecord.attendance_date < today,
         AttendanceRecord.attendance_date >= today - timedelta(days=MISSED_LOOKBACK_DAYS),
@@ -289,6 +302,7 @@ def missed_time_out_query(db: Session):
         AttendanceRecord.check_out_time.is_(None),
         AttendanceRecord.missed_out_filed_at.is_(None),
         AttendanceRecord.attendance_method.in_(SELF_CLOCKED_METHODS),
+        ~corrected,
     )
 
 
@@ -641,6 +655,8 @@ def time_in_selfie(
     if not existing:
         db.add(record)
         db.flush()
+    # Closes a missed time in alert (Late -> Delay, 2nd half -> Halfday).
+    on_time_in(db, record)
 
     file_service = FileService()
     photo_url = file_service.upload(
@@ -1919,6 +1935,7 @@ def kiosk_selfie_attendance(
         record.time_in_longitude = longitude
         record.time_in_address = address
         record.attendance_method = "KIOSK_SELFIE"
+        on_time_in(db, record)
 
         document_type = "ATTENDANCE_TIME_IN"
         upload_folder = f"attendance/{record.id}/time-in"

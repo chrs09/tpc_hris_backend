@@ -38,6 +38,7 @@ from app.api import (
 from app.api.payroll import incentive_programs, incentive_runs, overtime_approval, payroll_cutoffs, payroll_deductions, payroll_runs
 from app.api import schedule_template as schedule_template_router
 from app.api import attendance_locations as attendance_locations_router
+from app.api import attendance_requests as attendance_requests_router
 from app.api import photo_verify as photo_verify_router
 from app.api.driver import trips
 from app.api.admin import trips as admin_trips
@@ -220,6 +221,18 @@ def apply_scheduled_job_changes():
         db.close()
 
 
+@app.on_event("startup")
+def start_missed_time_in_checks():
+    # Scheduled employees not timed in -> their head is asked (and
+    # emailed); see app/services/attendance_alerts.py. Every 5 minutes.
+    from app.services.attendance_alerts import start_background_checks
+
+    try:
+        start_background_checks()
+    except Exception as exc:  # never block startup
+        logger.warning("Missed time in checks not started: %s", exc)
+
+
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     logger.info("REQUEST: %s %s", request.method, request.url)
@@ -290,6 +303,7 @@ app.include_router(incentive_runs.router, prefix="/api")
 app.include_router(payroll_runs.router, prefix="/api")
 app.include_router(schedule_template_router.router, prefix="/api")
 app.include_router(attendance_locations_router.router, prefix="/api")
+app.include_router(attendance_requests_router.router, prefix="/api")
 app.include_router(photo_verify_router.router, prefix="/api")
 app.include_router(trips.router, prefix="/api")
 app.include_router(trip_maintenance_router.router, prefix="/api")

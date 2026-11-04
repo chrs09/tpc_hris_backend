@@ -103,3 +103,5 @@ from .org_unit import OrgUnit as OrgUnit
 from .trip_rate_rule import TripRateRule as TripRateRule
 from .payroll_run import PayrollRun as PayrollRun
 from .ticket_category import TicketCategory as TicketCategory
+from .attendance_alert import AttendanceAlert as AttendanceAlert
+from .time_correction import TimeCorrectionRequest as TimeCorrectionRequest

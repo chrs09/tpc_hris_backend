@@ -52,6 +52,9 @@ class LocationPatch(BaseModel):
 
 class MinDutyIn(BaseModel):
     min_duty_minutes: int
+    # Missed time in: how long after the scheduled time in the head is
+    # asked (None = leave as is). See app/services/attendance_alerts.py.
+    missed_time_in_alert_minutes: int | None = None
 
 
 class EmployeeRulesIn(BaseModel):
@@ -160,7 +163,12 @@ def update_location(
 # ---------------- minimum hours of duty (company default)
 @router.get("/settings")
 def get_settings(db: Session = Depends(get_db), _: User = Depends(_require_access)):
-    return {"min_duty_minutes": _company_minutes(db)}
+    from app.services.attendance_alerts import wait_minutes
+
+    return {
+        "min_duty_minutes": _company_minutes(db),
+        "missed_time_in_alert_minutes": wait_minutes(db),
+    }
 
 
 @router.put("/settings")
@@ -173,8 +181,26 @@ def save_settings(
         setting = AppSetting(key=MIN_DUTY_SETTING, value="0")
         db.add(setting)
     setting.value = str(payload.min_duty_minutes)
+    if payload.missed_time_in_alert_minutes is not None:
+        from app.services.attendance_alerts import WAIT_SETTING, wait_minutes
+
+        if not 15 <= payload.missed_time_in_alert_minutes <= 12 * 60:
+            raise HTTPException(
+                status_code=400,
+                detail="The missed time in wait must be 15 minutes to 12 hours.",
+            )
+        wait = db.query(AppSetting).filter(AppSetting.key == WAIT_SETTING).first()
+        if not wait:
+            wait = AppSetting(key=WAIT_SETTING, value="120")
+            db.add(wait)
+        wait.value = str(payload.missed_time_in_alert_minutes)
     db.commit()
-    return {"min_duty_minutes": payload.min_duty_minutes}
+    from app.services.attendance_alerts import wait_minutes
+
+    return {
+        "min_duty_minutes": payload.min_duty_minutes,
+        "missed_time_in_alert_minutes": wait_minutes(db),
+    }
 
 
 # ---------------- per employee
