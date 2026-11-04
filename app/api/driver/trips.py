@@ -97,44 +97,53 @@ def _load_shipment_numbers(trip: Trip) -> list[str]:
     return [trip.ticket_no] if trip.ticket_no else []
 
 
-# Pairing value for a shipment delivered to every store of the trip (rare).
-ALL_STORES = 0
+def _store_ids(value) -> list[int]:
+    """A shipment's stores: a list of ids, or one id (trips paired before
+    a shipment could go to several stores, and the mobile dispatch form)."""
+    if value in (None, ""):
+        return []
+    if isinstance(value, (list, tuple)):
+        return [int(v) for v in value if v not in (None, "")]
+    return [int(value)]
 
 
 def _parse_shipment_stores(
     raw, shipment_numbers: list[str], destination_ids: list[int]
-) -> dict[str, int]:
-    """Which destination each shipment number goes to, from the
-    dispatch form's JSON {"<shipment no>": <store id>}. One destination:
-    every shipment goes there. Several: each shipment needs one, or
-    ALL_STORES."""
+) -> dict[str, list[int]]:
+    """Which destination(s) each shipment number goes to, from the
+    dispatch form's JSON {"<shipment no>": [<store id>, ...]} (or one id).
+    One destination: every shipment goes there. Several: each shipment
+    needs at least one; a shipment can cover several stores. Ids are kept
+    in the trip's store order."""
     if len(destination_ids) == 1:
-        return {n: destination_ids[0] for n in shipment_numbers}
+        return {n: [destination_ids[0]] for n in shipment_numbers}
     try:
         pairs = json.loads(raw) if isinstance(raw, str) and raw.strip() else (raw or {})
-        pairs = {str(k).strip(): int(v) for k, v in dict(pairs).items() if v not in (None, "")}
+        pairs = {str(k).strip(): set(_store_ids(v)) for k, v in dict(pairs).items()}
     except (TypeError, ValueError):
         raise HTTPException(status_code=400, detail="Invalid shipment store format.")
+    result = {}
     for number in shipment_numbers:
-        store_id = pairs.get(number)
-        if store_id is None:
+        store_ids = pairs.get(number)
+        if not store_ids:
             raise HTTPException(
                 status_code=400,
-                detail=f'Pick the store for shipment number "{number}".',
+                detail=f'Pick the store(s) for shipment number "{number}".',
             )
-        if store_id != ALL_STORES and store_id not in destination_ids:
+        if not store_ids <= set(destination_ids):
             raise HTTPException(
                 status_code=400,
-                detail=f'Shipment number "{number}" must go to one of the trip\'s stores.',
+                detail=f'Shipment number "{number}" must go to the trip\'s stores.',
             )
-    return {n: pairs[n] for n in shipment_numbers}
+        result[number] = [sid for sid in destination_ids if sid in store_ids]
+    return result
 
 
-def _load_shipment_stores(trip: Trip) -> dict[str, int]:
+def _load_shipment_stores(trip: Trip) -> dict[str, list[int]]:
     if not trip.shipment_stores:
         return {}
     try:
-        return {str(k): int(v) for k, v in json.loads(trip.shipment_stores).items()}
+        return {str(k): _store_ids(v) for k, v in json.loads(trip.shipment_stores).items()}
     except Exception:
         return {}
 
@@ -146,7 +155,7 @@ def shipments_for_store(trip: Trip, store_id: int | None) -> list[str]:
     numbers = _load_shipment_numbers(trip)
     if not pairs:
         return numbers
-    return [n for n in numbers if pairs.get(n) in (store_id, ALL_STORES)]
+    return [n for n in numbers if store_id in pairs.get(n, [])]
 
 
 def _load_planned_store_ids(trip: Trip) -> list[int]:

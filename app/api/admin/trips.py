@@ -960,8 +960,8 @@ class AssignedTripUpdate(BaseModel):
     origin_store_id: int
     destination_store_ids: list[int]
     shipment_numbers: list[str]
-    # {"<shipment no>": <store id>}; required with 2+ stores.
-    shipment_stores: dict[str, int] = {}
+    # {"<shipment no>": [<store id>, ...]} (or one id); required with 2+ stores.
+    shipment_stores: dict[str, list[int] | int] = {}
     helper_ids: list[int] = []
     reason: str | None = None
     # Unit other than the driver's own: why. Urgent: label only.

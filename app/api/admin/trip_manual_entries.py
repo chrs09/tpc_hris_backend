@@ -261,7 +261,7 @@ async def create_manual_entry(
     """Multipart form:
     driver_id, vehicle_unit_id, origin_store_id, reason (required)
     shipment_numbers: JSON list of 8-digit numbers
-    shipment_stores: JSON {"<shipment no>": <store id>} (2+ stores)
+    shipment_stores: JSON {"<shipment no>": [<store id>, ...]} (2+ stores)
     stops: JSON list in visiting order, each {store_id, arrived_at?,
       delivered_at?} (PH local "YYYY-MM-DDTHH:MM"; missing times are
       spread evenly between start and end)
