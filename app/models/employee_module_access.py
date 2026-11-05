@@ -7,6 +7,7 @@ from sqlalchemy import (
     ForeignKey,
     Integer,
     String,
+    Text,
     UniqueConstraint,
 )
 from sqlalchemy.orm import relationship
@@ -35,6 +36,10 @@ class EmployeeModuleAccess(Base):
     # False = view-only: the module opens, but changes (POST/PUT/PATCH/
     # DELETE) are refused -- see require_role_or_module.
     can_edit = Column(Boolean, nullable=False, default=True)
+
+    # Payroll grant only: JSON list of the payroll groups this person may
+    # work on; empty / null = every group (app/services/payroll_scope.py).
+    payroll_groups = Column(Text, nullable=True)
 
     granted_by_user_id = Column(Integer, ForeignKey("tpc_users.id"), nullable=True)
 

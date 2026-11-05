@@ -1,3 +1,5 @@
+import json
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import case
 from sqlalchemy.orm import Session
@@ -8,6 +10,7 @@ from app.models.user import User
 from app.models.employees import Employee
 from app.models.employee_module_access import EmployeeModuleAccess
 from app.schemas.employee_module_access import ModuleAccessSet
+from app.services.payroll_scope import PAYROLL_MODULE, load_groups
 
 router = APIRouter(prefix="/employee-module-access", tags=["Employee Module Access"])
 
@@ -241,6 +244,20 @@ def set_employee_module_access(
             )
         }
 
+    # Payroll groups: from the request, else what the Payroll grant had.
+    if payload.payroll_groups is not None:
+        payroll_groups = sorted({g.strip() for g in payload.payroll_groups if g and g.strip()})
+    else:
+        existing = (
+            db.query(EmployeeModuleAccess.payroll_groups)
+            .filter(
+                EmployeeModuleAccess.employee_id == employee_id,
+                EmployeeModuleAccess.module_key == PAYROLL_MODULE,
+            )
+            .first()
+        )
+        payroll_groups = load_groups(existing[0]) if existing else []
+
     # Full replace -- simplest semantics for a checkbox grid saved per row.
     db.query(EmployeeModuleAccess).filter(
         EmployeeModuleAccess.employee_id == employee_id
@@ -253,6 +270,11 @@ def set_employee_module_access(
                 module_key=key,
                 can_edit=key not in read_only,
                 granted_by_user_id=current_user.id,
+                payroll_groups=(
+                    json.dumps(payroll_groups)
+                    if key == PAYROLL_MODULE and payroll_groups
+                    else None
+                ),
             )
         )
 
@@ -268,6 +290,7 @@ def set_employee_module_access(
         "employee_id": employee_id,
         "module_keys": sorted(set(payload.module_keys)),
         "read_only_keys": sorted(read_only & set(payload.module_keys)),
+        "payroll_groups": payroll_groups if PAYROLL_MODULE in payload.module_keys else [],
         "has_custom_access": True,
     }
 

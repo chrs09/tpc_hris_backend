@@ -7,3 +7,6 @@ class ModuleAccessSet(BaseModel):
     # key's current setting (e.g. the Module Assignment page, which
     # doesn't edit this).
     read_only_keys: list[str] | None = None
+    # Payroll: the payroll groups they may work on ([] = all). Omit to
+    # keep what they had.
+    payroll_groups: list[str] | None = None

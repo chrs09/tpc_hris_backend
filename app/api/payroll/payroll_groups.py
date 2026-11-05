@@ -21,6 +21,8 @@ from app.models.payroll_group import PayrollGroup
 from app.models.payroll_run import PayrollRun
 from app.models.payslip_release import PayslipRelease
 from app.models.user import User
+from app.models.employee_module_access import EmployeeModuleAccess
+from app.services.payroll_scope import allowed_payroll_groups, load_groups
 from app.services.payroll_groups import (
     PAY_BASES,
     PAYROLL_TYPES,
@@ -81,6 +83,7 @@ def list_payroll_groups(
     """The groups, how many active employees each has, and anyone whose
     department / payroll type isn't in a group yet."""
     groups = active_groups(db)
+    allowed = allowed_payroll_groups(db, current_user)
     counts: Counter = Counter()
     unassigned: Counter = Counter()
     for dept, ptype in _employee_departments(db):
@@ -90,7 +93,11 @@ def list_payroll_groups(
         else:
             unassigned[(dept, ptype)] += 1
     return {
-        "groups": [{**_serialize(g), "employee_count": counts[g.id]} for g in groups],
+        "groups": [
+            {**_serialize(g), "employee_count": counts[g.id]}
+            for g in groups
+            if allowed is None or g.name in allowed
+        ],
         "departments": sorted({dept for dept, _ in _employee_departments(db)}),
         "unassigned": [
             {"department": dept, "payroll_type": ptype, "employees": n}
@@ -180,6 +187,15 @@ def update_payroll_group(
             db.query(model).filter(model.department == old_name).update(
                 {model.department: values["name"]}, synchronize_session=False
             )
+        # People whose Payroll access is limited to this group keep it.
+        for grant in db.query(EmployeeModuleAccess).filter(
+            EmployeeModuleAccess.payroll_groups.isnot(None)
+        ):
+            names = load_groups(grant.payroll_groups)
+            if old_name in names:
+                grant.payroll_groups = json.dumps(
+                    sorted(values["name"] if n == old_name else n for n in names)
+                )
     group.name = values["name"]
     group.pay_basis = values["pay_basis"]
     group.payroll_type = values["payroll_type"]

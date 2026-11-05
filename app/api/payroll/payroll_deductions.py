@@ -8,6 +8,12 @@ from fastapi import (
 
 from sqlalchemy.orm import Session
 
+from app.services.payroll_scope import (
+    allowed_employee_ids,
+    allowed_payroll_groups,
+    ensure_employee_allowed,
+    ensure_payroll_allowed,
+)
 from app.core.database import get_db
 from app.core.dependencies import get_current_user, require_role_or_module
 
@@ -50,6 +56,7 @@ def _save_deduction(db: Session, payload: dict, user: User) -> PayrollDeduction:
         )
     ensure_payroll_editable(db, payload.get("department"), payload.get("cutoff_period"))
     ensure_can_payroll(db, user, PAYROLL_PREPARE)
+    ensure_payroll_allowed(db, user, payload.get("department"))
 
     existing = (
         db.query(PayrollDeduction)
@@ -189,6 +196,9 @@ def get_cash_advance_for_cutoff(
         ids = [int(x) for x in employee_ids.split(",") if x.strip()]
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid employee ids.")
+    allowed = allowed_employee_ids(db, current_user)
+    if allowed is not None:
+        ids = [i for i in ids if i in allowed]
     suggestions = payroll_suggestions(db, ids, cutoff_period)
     return {str(emp): data for emp, data in suggestions.items()}
 
@@ -206,6 +216,9 @@ def get_trip_charges_for_cutoff(
         ids = [int(x) for x in employee_ids.split(",") if x.strip()]
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid employee ids.")
+    allowed = allowed_employee_ids(db, current_user)
+    if allowed is not None:
+        ids = [i for i in ids if i in allowed]
     suggestions = trip_charge_payroll.payroll_suggestions(db, ids, cutoff_period)
     return {str(emp): data for emp, data in suggestions.items()}
 
@@ -224,6 +237,9 @@ def get_payroll_deductions(
 
     if department:
         query = query.filter(PayrollDeduction.department == department)
+    allowed = allowed_payroll_groups(db, current_user)
+    if allowed is not None:
+        query = query.filter(PayrollDeduction.department.in_(allowed))
 
     records = query.order_by(PayrollDeduction.cutoff_period.desc()).all()
 
@@ -236,6 +252,7 @@ def get_employee_payroll_deductions(
     db: Session = Depends(get_db),
     current_user: User = Depends(_require_payroll),
 ):
+    ensure_employee_allowed(db, current_user, employee_id)
     records = (
         db.query(PayrollDeduction)
         .filter(PayrollDeduction.employee_id == employee_id)

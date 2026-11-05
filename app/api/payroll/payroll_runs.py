@@ -38,6 +38,11 @@ from app.services.payroll_lock import (
     ensure_can_payroll,
 )
 from app.models.user import User
+from app.services.payroll_scope import (
+    allowed_employee_ids,
+    allowed_payroll_groups,
+    ensure_payroll_allowed,
+)
 from app.utils.user_display import display_name
 
 router = APIRouter(prefix="/payroll-runs", tags=["Payroll Runs"])
@@ -166,6 +171,7 @@ def get_payroll_run(
     db: Session = Depends(get_db),
     current_user: User = Depends(_require_payroll),
 ):
+    ensure_payroll_allowed(db, current_user, department)
     run = (
         db.query(PayrollRun)
         .filter(PayrollRun.department == department, PayrollRun.cutoff_period == cutoff_period)
@@ -181,6 +187,7 @@ def list_payroll_runs(
     current_user: User = Depends(_require_payroll),
 ):
     """Status per cutoff, for labelling the period picker."""
+    ensure_payroll_allowed(db, current_user, department)
     runs = db.query(PayrollRun).filter(PayrollRun.department == department).all()
     return {run.cutoff_period: run.status for run in runs}
 
@@ -200,6 +207,7 @@ def mark_generated(
     current_user: User = Depends(get_current_user),
 ):
     ensure_can_payroll(db, current_user, PAYROLL_PREPARE)
+    ensure_payroll_allowed(db, current_user, payload.department)
     run = _get_or_new(db, payload.department, payload.cutoff_period)
     if run.status not in EDITABLE_STATUSES:
         raise HTTPException(
@@ -253,6 +261,7 @@ def transition_payroll_run(
     if who == "superadmin" and _role(current_user) != "superadmin":
         raise HTTPException(status_code=403, detail="Only a superadmin can unlock payroll.")
 
+    ensure_payroll_allowed(db, current_user, payload.department)
     note = (payload.note or "").strip() or None
     if needs_note and not note:
         raise HTTPException(status_code=400, detail="Please give a reason.")
@@ -313,6 +322,9 @@ def list_locked_payrolls(
         .order_by(PayrollRun.period_end.desc(), PayrollRun.department)
         .all()
     )
+    allowed = allowed_payroll_groups(db, current_user)
+    if allowed is not None:
+        runs = [run for run in runs if run.department in allowed]
     released = {}
     for dept, cutoff in db.query(PayslipRelease.department, PayslipRelease.cutoff_period):
         released[(dept, cutoff)] = released.get((dept, cutoff), 0) + 1
@@ -345,6 +357,7 @@ def list_payslip_releases(
     current_user: User = Depends(_require_payroll),
 ):
     """Released payslips of one payroll, keyed "employee id|segment"."""
+    ensure_payroll_allowed(db, current_user, department)
     rows = (
         db.query(PayslipRelease)
         .filter(
@@ -384,6 +397,7 @@ def release_payslip(
     """Release (or re-release) one employee's payslip -- Lock & Mark Paid
     step, and only once the payroll is Locked / Paid."""
     ensure_can_payroll(db, current_user, PAYROLL_RELEASE)
+    ensure_payroll_allowed(db, current_user, payload.department)
     run = (
         db.query(PayrollRun)
         .filter(
@@ -640,6 +654,9 @@ def get_trip_check(
         )
 
     rows.sort(key=lambda r: (r["date"], r["trip_id"] or 0))
+    ids = allowed_employee_ids(db, current_user)
+    if ids is not None:
+        rows = [r for r in rows if r.get("employee_id") in ids]
     return rows
 
 
@@ -659,4 +676,9 @@ def get_job_segments(
     from app.services.job_history import apply_due_changes, segments
 
     apply_due_changes(db)
-    return {str(emp): spans for emp, spans in segments(db, start, end).items()}
+    ids = allowed_employee_ids(db, current_user)
+    return {
+        str(emp): spans
+        for emp, spans in segments(db, start, end).items()
+        if ids is None or emp in ids
+    }

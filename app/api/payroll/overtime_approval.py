@@ -1,4 +1,5 @@
 from datetime import date, datetime
+from app.services.payroll_scope import allowed_employee_ids, ensure_employee_allowed
 from app.services.payroll_groups import payroll_key
 from app.services.payroll_lock import (
     PAYROLL_PREPARE,
@@ -40,9 +41,11 @@ def get_overtime_approvals(
     db: Session = Depends(get_db),
     current_user: User = Depends(_require_payroll),
 ):
-    records = (
-        db.query(OvertimeApproval).order_by(OvertimeApproval.created_at.desc()).all()
-    )
+    query = db.query(OvertimeApproval)
+    allowed = allowed_employee_ids(db, current_user)
+    if allowed is not None:
+        query = query.filter(OvertimeApproval.employee_id.in_(allowed or [0]))
+    records = query.order_by(OvertimeApproval.created_at.desc()).all()
 
     return records
 
@@ -53,6 +56,7 @@ def get_employee_overtime(
     db: Session = Depends(get_db),
     current_user: User = Depends(_require_payroll),
 ):
+    ensure_employee_allowed(db, current_user, employee_id)
     records = (
         db.query(OvertimeApproval)
         .filter(OvertimeApproval.employee_id == employee_id)

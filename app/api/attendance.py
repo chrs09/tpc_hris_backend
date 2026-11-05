@@ -1160,6 +1160,13 @@ def get_attendance_records(
         if scope == "all" and can_view_all_payroll(db, current_user)
         else team_scope(db, current_user)
     )
+    if team is None and scope == "all":
+        # Payroll limited to some payroll groups: only their employees.
+        from app.services.payroll_scope import allowed_employee_ids
+
+        payroll_ids = allowed_employee_ids(db, current_user)
+        if payroll_ids is not None:
+            team = {"employee_ids": sorted(payroll_ids), "unit_names": []}
 
     # ---------------------------------------
     # ATTENDANCE QUERY

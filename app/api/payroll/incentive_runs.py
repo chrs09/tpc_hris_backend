@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session, joinedload
 
+from app.services.payroll_scope import allowed_employee_ids
 from app.core.database import get_db
 from app.core.dependencies import get_current_user, require_role_or_module
 from app.models.employees import Employee
@@ -268,7 +269,11 @@ def incentives_for_payroll(
 ):
     """Approved / released "with payroll" runs for the cutoff, by employee
     id -- the Payroll page's separate Incentives column."""
-    return payroll_totals(db, start, end)
+    totals = payroll_totals(db, start, end)
+    allowed = allowed_employee_ids(db, current_user)
+    if allowed is not None:
+        totals = {emp: data for emp, data in totals.items() if int(emp) in allowed}
+    return totals
 
 
 @router.get("/{run_id}")

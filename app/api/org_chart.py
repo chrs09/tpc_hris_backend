@@ -15,6 +15,7 @@ from pydantic import BaseModel
 from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
+from app.services.payroll_scope import load_groups
 from app.core.database import get_db
 from app.core.dependencies import (
     get_current_user,
@@ -106,10 +107,13 @@ def get_org_chart(
 
     grants: dict[int, list[str]] = {}
     read_only: dict[int, list[str]] = {}
+    payroll_scope: dict[int, list[str]] = {}
     for row in db.query(EmployeeModuleAccess):
         grants.setdefault(row.employee_id, []).append(row.module_key)
         if not row.can_edit:
             read_only.setdefault(row.employee_id, []).append(row.module_key)
+        if row.module_key == "payroll.payroll" and row.payroll_groups:
+            payroll_scope[row.employee_id] = load_groups(row.payroll_groups)
 
     # Profile pictures (same file the Employees page shows); newest wins.
     photos: dict[int, str] = {}
@@ -137,6 +141,8 @@ def get_org_chart(
             "has_custom_access": bool(emp.has_custom_module_access),
             "module_keys": sorted(grants.get(emp.id, [])),
             "read_only_keys": sorted(read_only.get(emp.id, [])),
+            # Payroll groups their Payroll access is limited to ([] = all).
+            "payroll_groups": payroll_scope.get(emp.id, []),
         }
 
     def person_from_user(user: User) -> dict:
@@ -153,6 +159,7 @@ def get_org_chart(
             "has_custom_access": False,
             "module_keys": [],
             "read_only_keys": [],
+            "payroll_groups": [],
         }
 
     result = []
