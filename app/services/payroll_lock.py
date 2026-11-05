@@ -29,16 +29,18 @@ def _as_date(day) -> date | None:
         return None
 
 
-def locked_run(db: Session, department: str | None, day, end=None) -> PayrollRun | None:
-    """The locked run covering `day` (or any day of `day`..`end`)."""
+def locked_run(db: Session, department, day, end=None) -> PayrollRun | None:
+    """The locked run covering `day` (or any day of `day`..`end`).
+    `department` is a payroll name or a list of them (group + department)."""
     day = _as_date(day)
     end = _as_date(end) or day
-    if not department or day is None:
+    names = [d for d in (department if isinstance(department, (list, tuple)) else [department]) if d]
+    if not names or day is None:
         return None
     return (
         db.query(PayrollRun)
         .filter(
-            PayrollRun.department == department,
+            PayrollRun.department.in_(names),
             PayrollRun.status.in_(LOCKED_STATUSES),
             PayrollRun.period_start <= end,
             PayrollRun.period_end >= day,
@@ -55,10 +57,21 @@ def ensure_unlocked(
     if not employee_id:
         return
     employee = db.query(Employee).filter(Employee.id == employee_id).first()
-    # The department they were in that day (Work History), not today's.
-    from app.services.job_history import department_on
+    # The department / pay they had that day (Work History), not today's --
+    # paid in its payroll group (or the department, before groups).
+    from app.services.job_history import state_on
+    from app.services.payroll_groups import payroll_key
 
-    run = locked_run(db, department_on(db, employee, day), day, end)
+    if employee is None:
+        return
+    state = state_on(db, employee, _as_date(day)) if _as_date(day) else {
+        "department": employee.department,
+        "payroll_type": employee.payroll_type,
+    }
+    department = state.get("department")
+    run = locked_run(
+        db, [department, payroll_key(db, department, state.get("payroll_type"))], day, end
+    )
     if run:
         raise HTTPException(
             status_code=409,
@@ -76,6 +89,15 @@ def latest_locked_end(db: Session) -> date | None:
     Trip rates in effect up to here are part of a locked payroll; other
     departments (e.g. Motorpool) don't use trip rates, so their locks
     don't count."""
+    from app.models.payroll_group import PayrollGroup
+    from app.services.payroll_groups import TRIP_BASES
+
+    trip_groups = [
+        name
+        for (name,) in db.query(PayrollGroup.name)
+        .filter(PayrollGroup.pay_basis.in_(TRIP_BASES))
+        .all()
+    ]
     run = (
         db.query(PayrollRun)
         .filter(
@@ -83,6 +105,7 @@ def latest_locked_end(db: Session) -> date | None:
             or_(
                 PayrollRun.department.ilike("%driver%"),
                 PayrollRun.department.ilike("%helper%"),
+                PayrollRun.department.in_(trip_groups),
             ),
         )
         .order_by(PayrollRun.period_end.desc())
@@ -91,24 +114,27 @@ def latest_locked_end(db: Session) -> date | None:
     return run.period_end if run else None
 
 
-def ensure_payroll_editable(db: Session, department: str | None, cutoff_period: str | None):
+def ensure_payroll_editable(db: Session, department, cutoff_period: str | None):
     """Payroll figures (deductions, HR's OT approval) can change only
-    until the run is approved -- after that, Return it for correction."""
-    if not department or not cutoff_period:
+    until the run is approved -- after that, Return it for correction.
+    `department` is a payroll name or a list of them (group + department)."""
+    names = [d for d in (department if isinstance(department, (list, tuple)) else [department]) if d]
+    if not names or not cutoff_period:
         return
-    run = (
+    runs = (
         db.query(PayrollRun)
         .filter(
-            PayrollRun.department == department,
+            PayrollRun.department.in_(names),
             PayrollRun.cutoff_period == cutoff_period,
         )
-        .first()
+        .all()
     )
-    if run and run.status not in ("DRAFT", "GENERATED", "FOR_REVIEW"):
+    run = next((r for r in runs if r.status not in ("DRAFT", "GENERATED", "FOR_REVIEW")), None)
+    if run:
         raise HTTPException(
             status_code=409,
             detail=(
-                f"{department} payroll for this cutoff is {run.status.lower()} and can't "
+                f"{run.department} payroll for this cutoff is {run.status.lower()} and can't "
                 "be changed. Ask Finance to return it for correction first."
             ),
         )

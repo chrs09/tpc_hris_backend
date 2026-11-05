@@ -9,6 +9,7 @@ from app.models.user import User, UserRole
 from app.models.employees import Employee
 from app.models.user_revision import UserRevision
 from app.core.security import hash_password
+from app.services.user_roles import role_for_department
 
 
 def create_user_service(data, db: Session):
@@ -61,10 +62,10 @@ def bulk_create_users_service(db: Session):
     """Creates a User account for every active employee that doesn't
     already have one, following the exact username/password conventions
     of create_user_service above (lastname-based username, deduped with a
-    counter; lastname+year temporary password). Every new account is
-    role=EMPLOYEE -- anyone who needs a different role gets it changed
-    afterward via the existing Edit User flow, same as a single manual
-    create would require if the admin picked the wrong role.
+    counter; lastname+year temporary password). The role comes from the
+    department: Driver / Helper for the driver and helper departments,
+    Employee for everyone else (app/services/user_roles.py) -- anyone who
+    needs a different role gets it changed afterward via Edit User.
 
     Email is optional -- login is by username, not email, so an employee
     with no email on file still gets an account (email left null). Never
@@ -124,7 +125,7 @@ def bulk_create_users_service(db: Session):
             username=username,
             email=employee.email,
             hashed_password=hash_password(temporary_password),
-            role=UserRole.EMPLOYEE,
+            role=role_for_department(employee.department),
             employee_id=employee.id,
             is_active=True,
             must_change_password=False,

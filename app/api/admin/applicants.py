@@ -32,6 +32,7 @@ from app.services.onboarding_documents import (
 )
 from app.models.files import File as FileModel
 from app.models.user import User, UserRole
+from app.services.user_roles import role_for_department
 from app.core.security import hash_password
 from app.models.employee_personal import EmployeePersonalDetails
 from app.models.applicant_onboarding import ApplicantOnboarding
@@ -49,21 +50,10 @@ from app.schemas.applicant import (
 
 router = APIRouter(prefix="/api/admin/applicants", tags=["Admin Applicants"])
 
-# Departments that classify a new hire as a driver/helper login role --
-# same department set the rest of the app already uses to tell driver/
-# helper departments apart (see DRIVER_DEPARTMENTS in
-# tpc_hris_frontend/src/components/employees/EmployeeForm.jsx and the
-# CdcHelper/CpdcHelper pairing in app/api/driver/trips.py).
-DRIVER_DEPARTMENTS = {"CdcDriver", "CpdcDriver", "WingvanDriver"}
-HELPER_DEPARTMENTS = {"CdcHelper", "CpdcHelper"}
-
-
+# A new hire's login role from their department (Driver / Helper /
+# Employee) -- same rule as Bulk Create Accounts.
 def _infer_user_role(department: str) -> UserRole:
-    if department in DRIVER_DEPARTMENTS:
-        return UserRole.DRIVER
-    if department in HELPER_DEPARTMENTS:
-        return UserRole.HELPER
-    return UserRole.EMPLOYEE
+    return role_for_department(department)
 
 
 def _generate_unique_username(db: Session, last_name: str) -> str:

@@ -55,13 +55,20 @@ def cutoff_containing(rule: PayrollCutoffRule | None, day: date) -> tuple[date, 
 
 
 def employee_cutoff(db: Session, employee, day: date) -> tuple[date, date]:
-    """The cutoff `day` falls in for this employee's department."""
+    """The cutoff `day` falls in for this employee: their payroll group's
+    rule, else their department's."""
+    from app.services.payroll_groups import payroll_key
+
     department = getattr(employee, "department", None)
-    rule = (
-        db.query(PayrollCutoffRule)
-        .filter(PayrollCutoffRule.department == department)
-        .first()
-        if department
-        else None
-    )
+    rule = None
+    if department:
+        names = [payroll_key(db, department, getattr(employee, "payroll_type", None)), department]
+        for name in names:
+            rule = (
+                db.query(PayrollCutoffRule)
+                .filter(PayrollCutoffRule.department == name)
+                .first()
+            )
+            if rule:
+                break
     return cutoff_containing(rule, day)

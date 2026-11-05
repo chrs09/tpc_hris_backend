@@ -1,4 +1,5 @@
 from datetime import date, datetime
+from app.services.payroll_groups import payroll_key
 from app.services.payroll_lock import (
     PAYROLL_PREPARE,
     ensure_can_payroll,
@@ -97,7 +98,9 @@ def approve_overtime(
         )
     ensure_can_payroll(db, current_user, PAYROLL_PREPARE)
     ensure_payroll_editable(
-        db, employee.department, f"{payload['cutoff_start']}_{payload['cutoff_end']}"
+        db,
+        [employee.department, payroll_key(db, employee.department, employee.payroll_type)],
+        f"{payload['cutoff_start']}_{payload['cutoff_end']}",
     )
 
     existing = (
@@ -196,7 +199,9 @@ def reverse_overtime(
     ensure_can_payroll(db, current_user, PAYROLL_PREPARE)
     ensure_payroll_editable(
         db,
-        employee.department if employee else None,
+        [employee.department, payroll_key(db, employee.department, employee.payroll_type)]
+        if employee
+        else None,
         f"{payload['cutoff_start']}_{payload['cutoff_end']}",
     )
 

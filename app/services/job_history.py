@@ -154,9 +154,13 @@ def record_change(db: Session, employee: Employee, values: dict, effective: date
     if snapshot_equal(before, after):
         raise HTTPException(status_code=400, detail="Nothing changed -- edit at least one field.")
 
-    # Paid periods stay as paid: not into a locked cutoff of either side.
-    for dept in {before["department"], after["department"]}:
-        run = locked_run(db, dept, effective)
+    # Paid periods stay as paid: not into a locked cutoff of either side
+    # (its department, or its payroll group).
+    from app.services.payroll_groups import payroll_key
+
+    for side in (before, after):
+        dept = side["department"]
+        run = locked_run(db, [dept, payroll_key(db, dept, side.get("payroll_type"))], effective)
         if run:
             raise HTTPException(
                 status_code=409,
@@ -218,8 +222,11 @@ def cancel_change(db: Session, employee: Employee, row: EmployeeJobChange) -> No
         raise HTTPException(status_code=400, detail="The starting record can't be removed.")
     if row.status == "CANCELLED":
         return
-    for dept in {row.department, state_on(db, employee, row.effective_date - timedelta(days=1))["department"]}:
-        run = locked_run(db, dept, row.effective_date)
+    from app.services.payroll_groups import payroll_key
+
+    prior = state_on(db, employee, row.effective_date - timedelta(days=1))
+    for dept, ptype in ((row.department, row.payroll_type), (prior["department"], prior.get("payroll_type"))):
+        run = locked_run(db, [dept, payroll_key(db, dept, ptype)], row.effective_date)
         if run:
             raise HTTPException(
                 status_code=409,
