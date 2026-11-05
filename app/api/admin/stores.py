@@ -74,6 +74,8 @@ class StoreCreateRequest(BaseModel):
     area: Optional[str] = None
     # Also a supplier (listed in Suppliers, can be a trip start point).
     is_supplier: bool = False
+    # A customer; customer, supplier or both (at least one).
+    is_customer: bool = True
     # Creating a location for an existing supplier (Suppliers page ->
     # "Add map location"): link it to that supplier.
     supplier_id: Optional[int] = None
@@ -91,6 +93,7 @@ class StoreUpdateRequest(BaseModel):
     is_hub: Optional[bool] = None
     area: Optional[str] = None
     is_supplier: Optional[bool] = None
+    is_customer: Optional[bool] = None
 
     class Config:
         orm_mode = True
@@ -144,7 +147,17 @@ def build_store_response(store: Store) -> dict:
         "is_hub": store.is_hub,
         "area": store.area,
         "is_supplier": bool(store.is_supplier),
+        "is_customer": bool(store.is_customer),
     }
+
+
+def _ensure_customer_or_supplier(store: Store) -> None:
+    """A location is a customer, a supplier, or both -- never neither
+    (hubs are their own kind, set on the Hubs page)."""
+    if not store.is_hub and not store.is_customer and not store.is_supplier:
+        raise HTTPException(
+            status_code=400, detail="Tick Customer, Supplier, or both."
+        )
 
 
 def sync_supplier_link(db: Session, store: Store, supplier_id: int | None = None):
@@ -412,7 +425,9 @@ def create_store(
         is_hub=payload.is_hub,
         area=(payload.area or "").strip() or None,
         is_supplier=bool(payload.is_supplier or payload.supplier_id),
+        is_customer=bool(payload.is_customer),
     )
+    _ensure_customer_or_supplier(new_store)
 
     db.add(new_store)
     db.flush()
@@ -702,9 +717,12 @@ def update_store(
     if payload.area is not None:
         store.area = payload.area.strip() or None
 
+    if payload.is_customer is not None:
+        store.is_customer = payload.is_customer
     if payload.is_supplier is not None and payload.is_supplier != bool(store.is_supplier):
         store.is_supplier = payload.is_supplier
         sync_supplier_link(db, store)
+    _ensure_customer_or_supplier(store)
 
     db.commit()
     db.refresh(store)

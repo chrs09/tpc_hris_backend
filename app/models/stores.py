@@ -59,6 +59,9 @@ class Store(Base):
     # Also a supplier: listed in Suppliers, can be a trip's start point
     # and a driver rate's "From" (linked Supplier.store_id).
     is_supplier = Column(Boolean, default=False, nullable=False)
+    # A customer (deliveries go here). Customer, supplier or both -- at
+    # least one (Customers page checkboxes); existing rows are customers.
+    is_customer = Column(Boolean, default=True, server_default="1", nullable=False)
 
     # The area the store is in (e.g. Consolacion, Bohol) -- a lane's
     # destination for trip rates (app/services/trip_rates.py).
