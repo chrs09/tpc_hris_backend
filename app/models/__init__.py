@@ -60,6 +60,7 @@ from .holiday import Holiday as Holiday
 from .payroll_deductions import PayrollDeduction as PayrollDeduction
 from .payroll_cutoff_rule import PayrollCutoffRule as PayrollCutoffRule
 from .payroll_group import PayrollGroup as PayrollGroup
+from .payslip_release import PayslipRelease as PayslipRelease
 from .incentive_program import IncentiveProgram as IncentiveProgram
 from .company import Company as Company
 from .incentive_run import IncentiveRun as IncentiveRun

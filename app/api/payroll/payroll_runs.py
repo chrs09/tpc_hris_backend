@@ -11,7 +11,11 @@ role never grants these. Superadmin can always.
   review back to GENERATED), edit figures, submit for review.
 - Approve & Return: approve, or return for correction (with a reason).
 - Lock & Mark Paid: lock the period, mark it paid.
-- Unlock (back to APPROVED): superadmin only, with a reason.
+- Unlock (back to APPROVED): superadmin only, with a reason. Takes
+  back the payroll's released payslips (they're released again after
+  it's locked).
+- Release Payslip (Lock & Mark Paid, once Locked / Paid): one employee's
+  payslip, saved as Payroll had it, shows in their My Payslips.
 """
 
 import json
@@ -23,7 +27,9 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.dependencies import get_current_user, require_role_or_module
+from app.models.employees import Employee
 from app.models.payroll_run import PayrollRun
+from app.models.payslip_release import PayslipRelease
 from app.services.payroll_lock import (
     PAYROLL_APPROVE,
     PAYROLL_PREPARE,
@@ -269,9 +275,208 @@ def transition_payroll_run(
             run.approved_at = run.approved_by = None
         else:
             run.locked_at = run.locked_by = None
+            # Its figures can change again, so its released payslips are
+            # taken back until it's locked and released again.
+            recalled = (
+                db.query(PayslipRelease)
+                .filter(
+                    PayslipRelease.department == run.department,
+                    PayslipRelease.cutoff_period == run.cutoff_period,
+                )
+                .delete(synchronize_session=False)
+            )
+            if recalled:
+                plural = "s" if recalled != 1 else ""
+                note = f"{note} ({recalled} released payslip{plural} taken back)"
     _log(db, run, payload.action, current_user, note)
     db.commit()
     return _serialize(db, run, current_user, payload.department, payload.cutoff_period)
+
+
+# =========================================================
+# LOCKED PAYROLLS + RELEASE PAYSLIP
+# =========================================================
+RELEASABLE_STATUSES = ("LOCKED", "PAID")
+
+
+@router.get("/locked")
+def list_locked_payrolls(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(_require_payroll),
+):
+    """Every Locked / Paid payroll (all groups, and departments from
+    before groups), newest cutoff first, with how many payslips are
+    released."""
+    runs = (
+        db.query(PayrollRun)
+        .filter(PayrollRun.status.in_(RELEASABLE_STATUSES))
+        .order_by(PayrollRun.period_end.desc(), PayrollRun.department)
+        .all()
+    )
+    released = {}
+    for dept, cutoff in db.query(PayslipRelease.department, PayslipRelease.cutoff_period):
+        released[(dept, cutoff)] = released.get((dept, cutoff), 0) + 1
+    names = _names(db, [r.locked_by for r in runs] + [r.paid_by for r in runs])
+    return [
+        {
+            "department": run.department,
+            "cutoff_period": run.cutoff_period,
+            "period_start": run.period_start.isoformat(),
+            "period_end": run.period_end.isoformat(),
+            "status": run.status,
+            "employee_count": run.employee_count or 0,
+            "total_gross": float(run.total_gross or 0),
+            "total_net": float(run.total_net or 0),
+            "locked_at": run.locked_at.isoformat() if run.locked_at else None,
+            "locked_by": names.get(run.locked_by),
+            "paid_at": run.paid_at.isoformat() if run.paid_at else None,
+            "paid_by": names.get(run.paid_by),
+            "released_count": released.get((run.department, run.cutoff_period), 0),
+        }
+        for run in runs
+    ]
+
+
+@router.get("/releases")
+def list_payslip_releases(
+    department: str = Query(...),
+    cutoff_period: str = Query(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(_require_payroll),
+):
+    """Released payslips of one payroll, keyed "employee id|segment"."""
+    rows = (
+        db.query(PayslipRelease)
+        .filter(
+            PayslipRelease.department == department,
+            PayslipRelease.cutoff_period == cutoff_period,
+        )
+        .all()
+    )
+    names = _names(db, [r.released_by for r in rows])
+    return {
+        f"{r.employee_id}|{r.segment}": {
+            "released_at": r.released_at.isoformat() if r.released_at else None,
+            "released_by": names.get(r.released_by),
+        }
+        for r in rows
+    }
+
+
+class ReleaseIn(BaseModel):
+    department: str
+    cutoff_period: str
+    employee_id: int
+    segment: str = ""
+    payout_date: str | None = None
+    gross_pay: float = 0
+    net_pay: float = 0
+    # The payslip as Payroll has it (PayslipModal's row + period).
+    snapshot: dict
+
+
+@router.post("/release-payslip")
+def release_payslip(
+    payload: ReleaseIn,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Release (or re-release) one employee's payslip -- Lock & Mark Paid
+    step, and only once the payroll is Locked / Paid."""
+    ensure_can_payroll(db, current_user, PAYROLL_RELEASE)
+    run = (
+        db.query(PayrollRun)
+        .filter(
+            PayrollRun.department == payload.department,
+            PayrollRun.cutoff_period == payload.cutoff_period,
+        )
+        .first()
+    )
+    if not run or run.status not in RELEASABLE_STATUSES:
+        raise HTTPException(
+            status_code=409, detail="Payslips can be released only after the payroll is locked."
+        )
+    if not db.query(Employee.id).filter(Employee.id == payload.employee_id).first():
+        raise HTTPException(status_code=404, detail="Employee not found.")
+    segment = (payload.segment or "")[:20]
+    release = (
+        db.query(PayslipRelease)
+        .filter(
+            PayslipRelease.employee_id == payload.employee_id,
+            PayslipRelease.department == payload.department,
+            PayslipRelease.cutoff_period == payload.cutoff_period,
+            PayslipRelease.segment == segment,
+        )
+        .first()
+    )
+    if release is None:
+        release = PayslipRelease(
+            employee_id=payload.employee_id,
+            department=payload.department,
+            cutoff_period=payload.cutoff_period,
+            segment=segment,
+        )
+        db.add(release)
+    release.period_start = run.period_start
+    release.period_end = run.period_end
+    release.payout_date = (payload.payout_date or "")[:20] or None
+    release.gross_pay = payload.gross_pay
+    release.net_pay = payload.net_pay
+    release.snapshot = json.dumps(payload.snapshot)
+    release.released_at = datetime.utcnow()
+    release.released_by = current_user.id
+    db.commit()
+    return {
+        "key": f"{release.employee_id}|{release.segment}",
+        "released_at": release.released_at.isoformat(),
+        "released_by": display_name(db.get(User, current_user.id)),
+    }
+
+
+def _my_release(release: PayslipRelease, with_snapshot: bool = False) -> dict:
+    data = {
+        "id": release.id,
+        "payroll": release.department,
+        "cutoff_period": release.cutoff_period,
+        "period_start": release.period_start.isoformat(),
+        "period_end": release.period_end.isoformat(),
+        "payout_date": release.payout_date,
+        "gross_pay": float(release.gross_pay or 0),
+        "net_pay": float(release.net_pay or 0),
+        "released_at": release.released_at.isoformat() if release.released_at else None,
+    }
+    if with_snapshot:
+        data["snapshot"] = json.loads(release.snapshot or "{}")
+    return data
+
+
+@router.get("/my-payslips")
+def my_payslips(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """The logged-in employee's released payslips, newest first."""
+    if not current_user.employee_id:
+        return []
+    rows = (
+        db.query(PayslipRelease)
+        .filter(PayslipRelease.employee_id == current_user.employee_id)
+        .order_by(PayslipRelease.period_end.desc(), PayslipRelease.segment.desc())
+        .all()
+    )
+    return [_my_release(r) for r in rows]
+
+
+@router.get("/my-payslips/{release_id}")
+def my_payslip(
+    release_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    release = db.get(PayslipRelease, release_id)
+    if not release or release.employee_id != current_user.employee_id:
+        raise HTTPException(status_code=404, detail="Payslip not found.")
+    return _my_release(release, with_snapshot=True)
 
 
 # =========================================================

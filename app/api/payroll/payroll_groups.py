@@ -19,6 +19,7 @@ from app.models.payroll_cutoff_rule import PayrollCutoffRule
 from app.models.payroll_deductions import PayrollDeduction
 from app.models.payroll_group import PayrollGroup
 from app.models.payroll_run import PayrollRun
+from app.models.payslip_release import PayslipRelease
 from app.models.user import User
 from app.services.payroll_groups import (
     PAY_BASES,
@@ -173,8 +174,9 @@ def update_payroll_group(
 
     old_name = group.name
     if values["name"] != old_name:
-        # Its cutoff, payroll statuses and saved figures follow the name.
-        for model in (PayrollCutoffRule, PayrollRun, PayrollDeduction):
+        # Its cutoff, payroll statuses, saved figures and released
+        # payslips follow the name.
+        for model in (PayrollCutoffRule, PayrollRun, PayrollDeduction, PayslipRelease):
             db.query(model).filter(model.department == old_name).update(
                 {model.department: values["name"]}, synchronize_session=False
             )
