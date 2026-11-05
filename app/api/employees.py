@@ -1672,6 +1672,10 @@ def record_job_change(
         if value is not None and value < 0:
             raise HTTPException(status_code=400, detail="Rates can't be negative.")
     values = payload.model_dump(exclude={"effective_date", "reason"}, exclude_none=True)
+    # Blank fields mean "unchanged" -- except the schedule, where an explicit
+    # null means "no work schedule" (e.g. a driver, paid per trip).
+    if "schedule_template_id" in payload.model_fields_set:
+        values["schedule_template_id"] = payload.schedule_template_id
     job_history.record_change(db, employee, values, effective, payload.reason, current_user)
     employee.updated_by_user_id = current_user.id
     db.commit()
