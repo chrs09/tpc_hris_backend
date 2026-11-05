@@ -241,7 +241,7 @@ def set_default_hub(
         row = AppSetting(
             key=DEFAULT_HUB_KEY,
             value=str(hub.id),
-            description="Default hub (Trip Assignment start point, Customers map view).",
+            description="Default hub (Trip Dispatch start point, Customers map view).",
         )
         db.add(row)
     else:

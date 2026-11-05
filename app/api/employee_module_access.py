@@ -78,6 +78,9 @@ MODULE_GROUPS = {
         # True), just given their own management page here instead of
         # being a buried checkbox on the Customers page.
         "origins",
+        # Retired: the old empty "Trip Dispatch" menu item (dispatching is
+        # trip_assignment, now labeled Trip Dispatch). Kept so employees
+        # who still have it saved can be edited without an error.
         "daily_dispatch",
         # Lets superadmin (always) or a specifically granted employee
         # perform any step of a driver's trip on their behalf -- e.g.
