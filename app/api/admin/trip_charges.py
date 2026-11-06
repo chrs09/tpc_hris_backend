@@ -437,6 +437,10 @@ def list_charges(
     )
     if charge_type:
         query = query.filter(TripCharge.charge_type == charge_type)
+    else:
+        # Unspent trip budgets deducted in payroll are handled on Trip
+        # Expenses (app/api/trip_expenses.py), not here.
+        query = query.filter(TripCharge.charge_type != "liquidation")
     rows = [_serialize(c) for c in query.order_by(TripCharge.id.desc()).all()]
     if status:
         rows = [r for r in rows if r["display_status"] == status]

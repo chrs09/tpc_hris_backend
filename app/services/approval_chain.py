@@ -37,6 +37,9 @@ APPROVAL_KINDS = (
     "leave",
     "work_report",
     "fuel_request",
+    # Drivers' trip budgets (app/api/trip_expenses.py): heads approve
+    # before Finance releases the money.
+    "trip_expense",
     # Trip approval steps: who a trip is "For me" at each step, by its
     # driver's place on the chart. Others with access can still approve.
     "trip_coordinator",

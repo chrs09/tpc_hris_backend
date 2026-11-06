@@ -351,6 +351,23 @@ class CorrectionIn(BaseModel):
     reason: str
 
 
+@router.get("/time-corrections/eligibility")
+def time_correction_eligibility(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Whether this person files time corrections: anyone linked to an
+    employee who times in / out -- any role, superadmin included -- but
+    not drivers / helpers, whose attendance comes from their trips. The
+    web dashboards and the app show Time Correction only when true."""
+    employee = db.get(Employee, current_user.employee_id) if current_user.employee_id else None
+    if not employee:
+        return {"can_file": False, "reason": "Your login isn't linked to an employee."}
+    if is_trip_based(employee, current_user):
+        return {"can_file": False, "reason": "Your attendance comes from your trips."}
+    return {"can_file": True, "reason": None}
+
+
 @router.get("/time-corrections/mine")
 def my_time_corrections(
     db: Session = Depends(get_db),
@@ -491,6 +508,10 @@ def _acting(db: Session, c: TimeCorrectionRequest, user: User):
     is -- or a superadmin / "Can edit" grant (who finishes it)."""
     if c.status != "pending":
         raise HTTPException(status_code=400, detail="This request is already decided.")
+    if user.employee_id and user.employee_id == c.employee_id:
+        raise HTTPException(
+            status_code=403, detail="Someone else has to approve your own time correction."
+        )
     chain = [int(i) for i in load_json_list(c.approval_chain)]
     acting, skipped = acting_index(db, chain, c.approval_step, user.id) if chain else (None, [])
     if acting is None and not has_editable_grant(db, user, EDIT_GRANTS):

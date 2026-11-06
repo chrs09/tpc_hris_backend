@@ -37,6 +37,7 @@ from app.api import (
 )
 from app.api.payroll import incentive_programs, incentive_runs, overtime_approval, payroll_cutoffs, payroll_deductions, payroll_runs
 from app.api.payroll import payroll_groups
+from app.api import trip_expenses
 from app.api import schedule_template as schedule_template_router
 from app.api import attendance_locations as attendance_locations_router
 from app.api import attendance_requests as attendance_requests_router
@@ -300,6 +301,7 @@ app.include_router(overtime_approval.router, prefix="/api")
 app.include_router(payroll_deductions.router, prefix="/api")
 app.include_router(payroll_cutoffs.router, prefix="/api")
 app.include_router(payroll_groups.router, prefix="/api")
+app.include_router(trip_expenses.router, prefix="/api")
 app.include_router(incentive_programs.router, prefix="/api")
 app.include_router(incentive_runs.router, prefix="/api")
 app.include_router(payroll_runs.router, prefix="/api")
