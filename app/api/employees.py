@@ -26,6 +26,7 @@ from app.services.cv_parser import parse_cv
 from app.models.files import File as FileModel
 from app.services.file_service import FileService
 from app.models.employee_inactive import EmployeeInactiveRecord
+from app.services.employee_documents import expiry_map, expiry_payload, save_expiries
 
 # tpc_files rows logging every Employment Files upload (history).
 FILE_HISTORY_ENTITY = "employee_file_history"
@@ -439,6 +440,10 @@ def get_employee_detail(
             }
             for f in files
         ],
+        # {document_type: {has_expiry, expiry_date}} (HR Dashboard expiry)
+        "document_expiries": expiry_payload(
+            expiry_map(db, [employee.id]).get(employee.id, {})
+        ),
         "inactive_record": (
             {
                 "id": latest_inactive_record.id,
@@ -808,6 +813,8 @@ async def patch_employee(
     education_records: str = Form(None),
     employment_history: str = Form(None),
     character_references: str = Form(None),
+    # JSON {document_type: {has_expiry, expiry_date}} (Employment Files)
+    document_expiries: str = Form(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(_require_employee_editor),
 ):
@@ -815,6 +822,14 @@ async def patch_employee(
 
     if not employee:
         raise HTTPException(status_code=404, detail="Employee not found")
+
+    if document_expiries:
+        try:
+            parsed_expiries = json.loads(document_expiries)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid document expiries")
+        if isinstance(parsed_expiries, dict):
+            save_expiries(db, employee.id, parsed_expiries, current_user.id)
 
     previous_is_active = employee.is_active
 
@@ -1279,6 +1294,7 @@ async def patch_employee(
         "PAGIBIG",
         "PHILHEALTH",
         "NC3",
+        "DEFENSIVE_DRIVING",
     }
 
     if files and document_types:

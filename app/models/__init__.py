@@ -71,6 +71,7 @@ from .trip_charge import TripChargeDeductionLog as TripChargeDeductionLog
 from .trip_expense import TripExpense as TripExpense
 from .trip_expense import TripExpenseLine as TripExpenseLine
 from .schedule_change import ScheduleChangeRequest as ScheduleChangeRequest
+from .employee_document_expiry import EmployeeDocumentExpiry as EmployeeDocumentExpiry
 from .attendance_adjustment import AttendanceAdjustment as AttendanceAdjustment
 from .bank import Bank as Bank
 from .finance_expense import FinanceExpense as FinanceExpense
