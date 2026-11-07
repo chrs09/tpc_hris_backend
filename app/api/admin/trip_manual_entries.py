@@ -38,6 +38,7 @@ from app.api.admin.trips import CANCELLED_TICKET_MARKER
 from app.api.driver.trips import (
     MAX_PLANNED_STOPS,
     MAX_SHIPMENT_NUMBERS,
+    _generate_special_trip_code,
     _generate_trip_code,
     _invalid_shipment_number,
     _load_planned_store_ids,
@@ -262,6 +263,8 @@ async def create_manual_entry(
     driver_id, vehicle_unit_id, origin_store_id, reason (required)
     shipment_numbers: JSON list of 8-digit numbers
     shipment_stores: JSON {"<shipment no>": [<store id>, ...]} (2+ stores)
+    is_special: "true" for a special trip -- no shipment numbers; it gets
+      an "ST-########" code instead (same as Dispatch -> Special Trip)
     stops: JSON list in visiting order, each {store_id, arrived_at?,
       delivered_at?} (PH local "YYYY-MM-DDTHH:MM"; missing times are
       spread evenly between start and end)
@@ -335,12 +338,18 @@ async def create_manual_entry(
                 ),
             )
 
-    # ---- shipment numbers
-    shipment_numbers = [
-        str(n).strip()
-        for n in _json_list(form.get("shipment_numbers"), "shipment number")
-        if str(n).strip()
-    ]
+    # ---- shipment numbers (a special trip gets an ST- code instead)
+    is_special = str(form.get("is_special") or "").lower() in ("true", "1", "yes")
+    special_code = _generate_special_trip_code(db) if is_special else None
+    shipment_numbers = (
+        [special_code]
+        if special_code
+        else [
+            str(n).strip()
+            for n in _json_list(form.get("shipment_numbers"), "shipment number")
+            if str(n).strip()
+        ]
+    )
     if not shipment_numbers:
         raise HTTPException(status_code=400, detail="At least one shipment number is required.")
     if len(shipment_numbers) != len(set(shipment_numbers)):
@@ -350,7 +359,7 @@ async def create_manual_entry(
             status_code=400,
             detail=f"Maximum of {MAX_SHIPMENT_NUMBERS} shipment numbers allowed.",
         )
-    bad = _invalid_shipment_number(shipment_numbers)
+    bad = None if special_code else _invalid_shipment_number(shipment_numbers)
     if bad:
         raise HTTPException(
             status_code=400, detail=f'Shipment number "{bad}" must be exactly 8 digits.'
@@ -393,8 +402,11 @@ async def create_manual_entry(
     for sid in store_ids:
         if sid not in stores_by_id:
             raise HTTPException(status_code=400, detail=f"Store {sid} not found.")
-    shipment_store_map = _parse_shipment_stores(
-        form.get("shipment_stores"), shipment_numbers, store_ids
+    # A special trip's code isn't paired to one store (shown at every stop).
+    shipment_store_map = (
+        {}
+        if special_code
+        else _parse_shipment_stores(form.get("shipment_stores"), shipment_numbers, store_ids)
     )
 
     primary = stores_by_id[store_ids[0]]
@@ -497,7 +509,7 @@ async def create_manual_entry(
     )
     db.add(trip)
     db.flush()
-    trip.trip_code = _generate_trip_code(db, start_time)
+    trip.trip_code = special_code or _generate_trip_code(db, start_time)
 
     for hid in helper_ids:
         db.add(TripHelper(trip_id=trip.id, helper_id=hid))
@@ -564,6 +576,7 @@ async def create_manual_entry(
         ),
         "trip_id": trip.id,
         "trip_code": trip.trip_code,
+        "is_special": bool(special_code),
         "awaiting_approval": trip.status == TripStatus.PENDING_MANUAL_APPROVAL,
     }
 
