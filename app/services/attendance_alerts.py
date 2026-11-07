@@ -209,6 +209,10 @@ def scan(db: Session, now: datetime | None = None) -> list[AttendanceAlert]:
         )
     }
 
+    from app.services.schedule_changes import approved_changes
+
+    changes = approved_changes(db, [e.id for e in employees], first, today)
+
     created = []
     for employee in employees:
         if employee.id not in ranges:
@@ -216,7 +220,9 @@ def scan(db: Session, now: datetime | None = None) -> list[AttendanceAlert]:
         day = ranges[employee.id]
         while day <= today:
             this_day, day = day, day + timedelta(days=1)
-            sched = scheduled_in(employee, this_day)
+            # An approved schedule change sets that day's time in.
+            change = changes.get((employee.id, this_day))
+            sched = change[0] if change else scheduled_in(employee, this_day)
             if not sched or (employee.id, this_day) in asked or this_day in holidays:
                 continue
             if this_day == today and now < datetime.combine(today, sched, PH) + wait:

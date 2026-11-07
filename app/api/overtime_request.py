@@ -182,7 +182,16 @@ def _approver_for(db: Session, employee: Employee, user: User):
 
 def _get_scheduled_time_out(employee: Employee | None, on_date: date) -> time_cls | None:
     """The employee's assigned schedule_template's time-out for the given
-    date's weekday, or None if they have no schedule (or no template)."""
+    date's weekday, or None if they have no schedule (or no template).
+    An approved schedule change for that date wins."""
+    from sqlalchemy.orm import object_session
+
+    from app.services.schedule_changes import approved_change
+
+    session = object_session(employee) if employee else None
+    change = approved_change(session, employee.id, on_date) if session else None
+    if change:
+        return change[1]
     if not employee or not employee.schedule_template:
         return None
     day_name = on_date.strftime("%A").lower()

@@ -152,6 +152,10 @@ class Employee(Base):
         back_populates="employee",
     )
 
+    # May request a different time in / out for a specific day (Schedule
+    # Changes, approved by their Org Chart heads) -- set on the 201.
+    allow_schedule_change = Column(Boolean, nullable=False, default=False, server_default="0")
+
     schedule_template_id = Column(
         Integer,
         ForeignKey("tpc_schedule_templates.id"),

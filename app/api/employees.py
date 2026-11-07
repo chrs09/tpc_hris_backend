@@ -191,6 +191,7 @@ def get_employees(
             "employment_type": emp.employment_type,
             "payroll_type": emp.payroll_type,
             "schedule_template_id": emp.schedule_template_id,
+            "allow_schedule_change": bool(emp.allow_schedule_change),
             "schedule_template": (
                 {
                     "id": emp.schedule_template.id,
@@ -306,6 +307,7 @@ def get_employee_detail(
         "employment_type": employee.employment_type,
         "payroll_type": employee.payroll_type,
         "schedule_template_id": employee.schedule_template_id,
+        "allow_schedule_change": bool(employee.allow_schedule_change),
         "schedule_template": (
             {
                 "id": employee.schedule_template.id,
@@ -761,6 +763,8 @@ async def patch_employee(
     employment_type: str = Form(None),
     payroll_type: str = Form(None),
     schedule_template_id: int = Form(None),
+    # May request schedule changes (a different time on a day): "1"/"0".
+    allow_schedule_change: str = Form(None),
     # INACTIVE DETAILS
     inactive_reason: str = Form(None),
     inactive_date: str = Form(None),
@@ -922,6 +926,9 @@ async def patch_employee(
 
     if date_hired:
         employee.date_hired = parse_date(date_hired)
+
+    if allow_schedule_change is not None and allow_schedule_change != "":
+        employee.allow_schedule_change = str(allow_schedule_change).lower() in ("1", "true", "yes")
 
     if is_active is not None:
         employee.is_active = is_active
