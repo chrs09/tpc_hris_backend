@@ -23,6 +23,9 @@ class TimeCorrectionRequest(Base):
     time_in = Column(DateTime, nullable=True)
     time_out = Column(DateTime, nullable=True)
     reason = Column(Text, nullable=False)
+    # Proof (optional): photos / screenshots for the time in and time out.
+    time_in_photo_url = Column(String(1000), nullable=True)
+    time_out_photo_url = Column(String(1000), nullable=True)
 
     # pending / approved / rejected / cancelled
     status = Column(String(20), nullable=False, default="pending", index=True)

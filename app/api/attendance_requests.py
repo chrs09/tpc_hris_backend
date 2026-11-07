@@ -14,7 +14,7 @@
 from datetime import date, datetime, timedelta
 
 import pytz
-from fastapi import APIRouter, Body, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel
 from sqlalchemy.orm import Session, joinedload
 
@@ -335,6 +335,8 @@ def _correction_payload(db: Session, c: TimeCorrectionRequest, user: User | None
         "current_time_out": format_attendance_time_only(record.check_out_time) if record else None,
         "current_status": record.status if record else None,
         "reason": c.reason,
+        "time_in_photo_url": c.time_in_photo_url,
+        "time_out_photo_url": c.time_out_photo_url,
         "status": c.status,
         "created_at": c.created_at.isoformat() if c.created_at else None,
         "decided_at": c.decided_at.isoformat() if c.decided_at else None,
@@ -459,6 +461,39 @@ def cancel_time_correction(
     c.approval_log = append_log(c.approval_log, current_user, "cancelled")
     db.commit()
     return {"message": "Cancelled."}
+
+
+@router.post("/time-corrections/{correction_id}/photos")
+def upload_time_correction_photos(
+    correction_id: int,
+    time_in_photo: UploadFile | None = File(None),
+    time_out_photo: UploadFile | None = File(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Proof for the time in and / or time out (photo or screenshot) --
+    sent right after filing, while it's still pending. Shown to the
+    approvers."""
+    from app.services.file_service import FileService
+
+    c = db.get(TimeCorrectionRequest, correction_id)
+    if not c or c.employee_id != current_user.employee_id:
+        raise HTTPException(status_code=404, detail="Not found.")
+    if c.status != "pending":
+        raise HTTPException(status_code=400, detail="Only a pending request can take photos.")
+    uploads = [(f, field) for f, field in ((time_in_photo, "time_in"), (time_out_photo, "time_out")) if f and f.filename]
+    if not uploads:
+        raise HTTPException(status_code=400, detail="Attach a photo.")
+    for upload, field in uploads:
+        if not (upload.content_type or "").startswith("image/"):
+            raise HTTPException(status_code=400, detail="Photos must be images.")
+        url = FileService().upload(upload, f"time_corrections/{c.id}/{field}")
+        setattr(c, f"{field}_photo_url", url)
+    db.commit()
+    return {
+        "time_in_photo_url": c.time_in_photo_url,
+        "time_out_photo_url": c.time_out_photo_url,
+    }
 
 
 def _current_approver(db: Session, c: TimeCorrectionRequest) -> int | None:
