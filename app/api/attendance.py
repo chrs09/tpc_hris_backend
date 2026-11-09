@@ -72,6 +72,39 @@ router = APIRouter(prefix="/attendance", tags=["Attendance"])
 
 logger = logging.getLogger("attendance")
 
+ATTENDANCE_MODULE_KEYS = (
+    "hris.attendance",
+    "hris.attendance_list_view",
+    "hris.attendance_grid_view",
+)
+
+
+def _can_view_all_attendance(db: Session, user: User) -> bool:
+    """Same rule as the web sidebar's Attendance item: superadmin; an
+    employee whose access is set on the Org Chart only via an Attendance
+    grant; otherwise the default "admin" role."""
+    role = (getattr(user.role, "value", user.role) or "").lower()
+    if role == "superadmin":
+        return True
+    employee = (
+        db.query(Employee).filter(Employee.id == user.employee_id).first()
+        if user.employee_id
+        else None
+    )
+    if employee and employee.has_custom_module_access:
+        from app.models.employee_module_access import EmployeeModuleAccess
+
+        return (
+            db.query(EmployeeModuleAccess.id)
+            .filter(
+                EmployeeModuleAccess.employee_id == employee.id,
+                EmployeeModuleAccess.module_key.in_(ATTENDANCE_MODULE_KEYS),
+            )
+            .first()
+            is not None
+        )
+    return role == "admin"
+
 PH_TZ = pytz.timezone("Asia/Manila")
 UTC = pytz.utc
 
@@ -1155,11 +1188,8 @@ def get_attendance_records(
 ):
     sync_trip_attendance_records(db, current_user.id)
 
-    team = (
-        None
-        if scope == "all" and can_view_all_payroll(db, current_user)
-        else team_scope(db, current_user)
-    )
+    payroll_view = scope == "all" and can_view_all_payroll(db, current_user)
+    team = None if payroll_view else team_scope(db, current_user)
     if team is None and scope == "all":
         # Payroll limited to some payroll groups: only their employees.
         from app.services.payroll_scope import allowed_employee_ids
@@ -1167,6 +1197,12 @@ def get_attendance_records(
         payroll_ids = allowed_employee_ids(db, current_user)
         if payroll_ids is not None:
             team = {"employee_ids": sorted(payroll_ids), "unit_names": []}
+    if team is None and not payroll_view and not _can_view_all_attendance(db, current_user):
+        # Not an org chart head and no Attendance access: only their own.
+        team = {
+            "employee_ids": [current_user.employee_id] if current_user.employee_id else [],
+            "unit_names": [],
+        }
 
     # ---------------------------------------
     # ATTENDANCE QUERY
