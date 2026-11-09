@@ -29,6 +29,7 @@ from app.models.cash_advance_request import CashAdvanceRequest
 from app.models.cash_advance_deduction_option import CashAdvanceDeductionOption
 from app.models.cash_advance_deduction_log import CashAdvanceDeductionLog
 from app.models.cash_advance_terms import CashAdvanceTerms
+from app.models.cash_advance_purpose import CashAdvancePurpose
 from app.models.notification import Notification
 from app.services.notification_service import create_notification
 from app.models.files import File as FileModel
@@ -382,6 +383,19 @@ def file_cash_advance_request(
         raise HTTPException(
             status_code=400,
             detail="You must acknowledge the terms and conditions to proceed.",
+        )
+
+    # Loan purpose must come with details ("Medical Emergency - check-up
+    # of my mother at XYZ Hospital"), not just the bare preset purpose.
+    reason_text = (payload.reason or "").strip()
+    preset_labels = {
+        (label or "").strip().lower()
+        for (label,) in db.query(CashAdvancePurpose.label).all()
+    }
+    if not reason_text or reason_text.lower() in preset_labels:
+        raise HTTPException(
+            status_code=400,
+            detail="Please specify the details of your loan purpose.",
         )
 
     employee = (
