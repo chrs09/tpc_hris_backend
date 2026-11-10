@@ -37,6 +37,7 @@ from app.services.notification_service import create_notification
 from app.services.route_ride import busy_on_trip, my_role, on_my_trip, riders_of
 from app.services.trip_rates import load_rules, resolve_trip_rates
 from app.services.vehicle_assignment import check_unit_for_trip
+from app.services.user_roles import check_trip_crew, driver_user_condition
 from app.services.trip_payroll_service import (
     to_ph,
     now_ph,
@@ -417,7 +418,7 @@ def get_available_helpers(
     if driver_id and _can_dispatch(db, current_user):
         target_user = (
             db.query(User)
-            .filter(User.id == driver_id, User.role == UserRole.DRIVER)
+            .filter(User.id == driver_id, driver_user_condition())
             .first()
         )
         if not target_user:
@@ -446,6 +447,17 @@ def get_available_helpers(
             Employee.department.in_(required_departments),
             Employee.is_active == 1,
             Employee.is_available == 1,
+            # Not the driver themselves (a relief driver is a helper too).
+            Employee.id != employee_id,
+            # Nor a relief driver who is driving a trip right now.
+            ~Employee.id.in_(
+                db.query(User.employee_id)
+                .join(Trip, Trip.driver_id == User.id)
+                .filter(
+                    User.employee_id.isnot(None),
+                    Trip.status.in_([TripStatus.ASSIGNED, TripStatus.ACTIVE]),
+                )
+            ),
         )
         .all()
     )
@@ -931,7 +943,7 @@ def dispatch_trip(
 
     target_user = (
         db.query(User)
-        .filter(User.id == driver_id, User.role == UserRole.DRIVER)
+        .filter(User.id == driver_id, driver_user_condition())
         .first()
     )
     if not target_user:
@@ -985,6 +997,8 @@ def dispatch_trip(
                 status_code=400, detail=f"{helper.first_name} is unavailable."
             )
         helper_objects.append(helper)
+    # Relief drivers: one slot per person, and not busy in the other role.
+    check_trip_crew(db, target_user, helper_ids)
 
     try:
         new_trip = Trip(

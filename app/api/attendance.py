@@ -1375,6 +1375,7 @@ def get_attendance_records(
     #     below can look its trips up in memory instead of querying
     #     the trips table again. ---
     trips_by_employee_date = defaultdict(list)
+    crew_role_by_trip = {}
     seen_trip_ids_by_key = defaultdict(set)
     # Route rides (assigned on a completed trip, or manual) per
     # (employee_id, date): paid the Route Ride rate.
@@ -1463,7 +1464,9 @@ def get_attendance_records(
                     }
                 )
 
-        for trip, trip_employee_id in driver_trips + helper_trips:
+        for (trip, trip_employee_id), crew_role in [
+            (row, "driver") for row in driver_trips
+        ] + [(row, "helper") for row in helper_trips]:
             trip_date = utc_to_ph_date(trip.start_time)
 
             if trip_date is None:
@@ -1476,6 +1479,9 @@ def get_attendance_records(
 
             seen_trip_ids_by_key[key].add(trip.id)
             trips_by_employee_date[key].append(trip)
+            # Their role on this trip -- a relief driver (helper who can
+            # drive) is paid the driver rate on the trips they drive.
+            crew_role_by_trip[(trip_employee_id, trip.id)] = crew_role
 
     response = []
 
@@ -1517,6 +1523,8 @@ def get_attendance_records(
                 {
                     "trip_id": trip.id,
                     "ticket_no": trip.ticket_no,
+                    # "driver" / "helper": this employee's role on the trip.
+                    "role": crew_role_by_trip.get((record.employee_id, trip.id)),
                     "vehicle_unit_id": trip.vehicle_unit_id,
 
                     "vehicle_unit": (

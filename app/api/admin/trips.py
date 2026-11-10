@@ -37,6 +37,7 @@ from app.services.trip_remarks import (
     serialize_trip_remarks,
 )
 from app.utils.timezone import ph_to_utc, utc_to_ph
+from app.services.user_roles import check_trip_crew, driver_user_condition, is_relief_driver
 from app.utils.user_display import display_name as _display_name
 from app.services.approval_chain import immediate_head, trips_for_me
 from app.models.route_ride import RouteRide
@@ -266,7 +267,7 @@ def get_available_drivers(
     drivers = (
         db.query(User)
         .options(joinedload(User.employee))
-        .filter(User.role == UserRole.DRIVER, User.is_active.is_(True))
+        .filter(driver_user_condition(), User.is_active.is_(True))
         .order_by(User.username.asc())
         .all()
     )
@@ -281,9 +282,14 @@ def get_available_drivers(
                 if driver.employee
                 else None
             ),
+            # A helper picked to drive (relief driver): dispatch's "Helper as Driver" list.
+            "is_relief_driver": is_relief_driver(driver),
+            "position": driver.employee.position if driver.employee else None,
         }
         for driver in drivers
         if driver.id not in drivers_with_active_trip
+        # A relief driver out on a trip as a helper is busy too.
+        and not (is_relief_driver(driver) and not driver.employee.is_available)
     ]
 
 
@@ -1094,7 +1100,7 @@ def update_assigned_trip(
     driver = (
         db.query(User)
         .options(joinedload(User.employee))
-        .filter(User.id == payload.driver_id, User.role == UserRole.DRIVER)
+        .filter(User.id == payload.driver_id, driver_user_condition())
         .first()
     )
     if not driver or not driver.employee:
@@ -1156,6 +1162,13 @@ def update_assigned_trip(
                 status_code=400, detail=f"{helper.first_name} is unavailable."
             )
         new_helpers[hid] = helper
+    check_trip_crew(
+        db,
+        driver,
+        payload.helper_ids,
+        trip_id=trip.id,
+        keep_helper_ids=current_helper_ids,
+    )
 
     # ---- what changed
     changes = []

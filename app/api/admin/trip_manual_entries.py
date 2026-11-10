@@ -33,6 +33,7 @@ from app.models.user import User, UserRole
 from app.models.vehicle_unit import VehicleUnit
 from app.services.file_service import FileService
 from app.utils.timezone import ph_to_utc, utc_to_ph
+from app.services.user_roles import driver_user_condition, is_relief_driver
 from app.utils.user_display import display_name
 from app.api.admin.trips import CANCELLED_TICKET_MARKER
 from app.api.driver.trips import (
@@ -104,7 +105,7 @@ def get_manual_entry_options(
     drivers = (
         db.query(User)
         .options(joinedload(User.employee))
-        .filter(User.role == UserRole.DRIVER)
+        .filter(driver_user_condition())
         .order_by(User.username.asc())
         .all()
     )
@@ -126,10 +127,14 @@ def get_manual_entry_options(
                 "id": d.id,
                 "label": (
                     f"{d.employee.first_name} {d.employee.last_name} ({d.username})"
+                    + (" · Helper" if is_relief_driver(d) else "")
                     if d.employee
                     else d.username
                 ),
                 "is_active": bool(d.is_active),
+                # The screen hides the driver from the helper list.
+                "employee_id": d.employee_id,
+                "is_relief_driver": is_relief_driver(d),
             }
             for d in drivers
         ],
@@ -292,7 +297,7 @@ async def create_manual_entry(
 
     driver = (
         db.query(User)
-        .filter(User.id == driver_id, User.role == UserRole.DRIVER)
+        .filter(User.id == driver_id, driver_user_condition())
         .first()
     )
     if not driver:
@@ -463,6 +468,11 @@ async def create_manual_entry(
             helper_ids.append(int(hid))
         except (TypeError, ValueError):
             raise HTTPException(status_code=400, detail="Invalid helper format.")
+    if driver.employee_id and driver.employee_id in helper_ids:
+        raise HTTPException(
+            status_code=400,
+            detail="The driver can't also be a helper on the same trip.",
+        )
     if len(helper_ids) != len(set(helper_ids)):
         raise HTTPException(status_code=400, detail="Duplicate helpers selected.")
     if len(helper_ids) > 3:
