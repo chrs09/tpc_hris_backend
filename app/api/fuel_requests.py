@@ -52,21 +52,17 @@ def _fmt(dt):
     return utc_to_ph(dt).strftime("%b %d, %Y %I:%M %p") if dt else None
 
 
-def _expire_codes(db: Session) -> None:
-    """Issued codes past their expiry (never used) -> `expired`, so the
-    driver can request a new one. Run before reading/acting on requests --
-    no scheduler needed."""
-    changed = (
-        db.query(FuelRequest)
-        .filter(
-            FuelRequest.status == "issued",
-            FuelRequest.code_expires_at.isnot(None),
-            FuelRequest.code_expires_at <= datetime.utcnow(),
-        )
-        .update({FuelRequest.status: "expired"}, synchronize_session=False)
+def _code_expired(req: FuelRequest) -> bool:
+    """An issued code past its expiry. It is NOT closed automatically: the
+    driver may have used it, so it stays open until they upload the
+    receipt or mark it as not used (cancel-code, with a reason) -- and
+    they can't request a new code until then. (Older rows may still have
+    the former auto status "expired".)"""
+    return bool(
+        req.status in ("issued", "returned")
+        and req.code_expires_at is not None
+        and req.code_expires_at <= datetime.utcnow()
     )
-    if changed:
-        db.commit()
 
 
 def _needs_action_filter():
@@ -103,6 +99,8 @@ def _serialize(req: FuelRequest, db: Session | None = None) -> dict:
         "issued_by": display_name(req.issued_by) if req.issued_by else None,
         "issued_at": _fmt(req.issued_at),
         "code_expires_at": _fmt(req.code_expires_at),
+        # Past expiry, still waiting for the receipt (or "not used").
+        "code_expired": _code_expired(req),
         "code_cancelled_at": _fmt(req.code_cancelled_at),
         "cancel_reason": req.cancel_reason,
         "receipt_photo_url": req.receipt_photo_url,
@@ -176,15 +174,23 @@ def create_fuel_request(
     if odometer_reading is not None and not 0 <= odometer_reading <= 9_999_999:
         raise HTTPException(status_code=400, detail="Enter a valid odometer reading.")
 
-    _expire_codes(db)
     open_request = (
-        db.query(FuelRequest.id)
+        db.query(FuelRequest)
         .filter(
             FuelRequest.user_id == current_user.id,
             FuelRequest.status.in_(OPEN_STATUSES),
         )
         .first()
     )
+    if open_request and _code_expired(open_request):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Fuel code {open_request.fuel_code or ''} expired on "
+                f"{_fmt(open_request.code_expires_at)}. Upload its receipt first, "
+                "or mark it as not used, before requesting a new code."
+            ),
+        )
     if open_request:
         raise HTTPException(
             status_code=400,
@@ -227,7 +233,6 @@ def list_my_fuel_requests(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    _expire_codes(db)
     rows = (
         _query(db)
         .filter(FuelRequest.user_id == current_user.id)
@@ -245,16 +250,12 @@ def submit_fuel_receipt(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    _expire_codes(db)
     req = _get_locked(db, request_id)
-    if req.user_id == current_user.id and req.status == "expired":
-        raise HTTPException(
-            status_code=400,
-            detail="This fuel code has expired. Request a new code.",
-        )
     if req.user_id != current_user.id:
         raise HTTPException(status_code=404, detail="Fuel request not found.")
-    if req.status not in ("issued", "returned"):
+    # Past its expiry is fine: the code may have been used, and the receipt
+    # is what closes it ("expired" = older rows closed automatically).
+    if req.status not in ("issued", "returned", "expired"):
         raise HTTPException(
             status_code=400,
             detail="A receipt can only be sent after the fuel code is issued.",
@@ -297,9 +298,10 @@ def cancel_fuel_code(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Driver drops an issued code they won't use (e.g. changed unit). The
-    code is ignored and they can request a new one."""
-    _expire_codes(db)
+    """Driver drops an issued code they won't use / didn't use (e.g.
+    changed unit) -- also how a code past its expiry that was never used is
+    closed ("Not used"). The reason is shown to the coordinator; then they
+    can request a new one."""
     req = _get_locked(db, request_id)
     if req.user_id != current_user.id:
         raise HTTPException(status_code=404, detail="Fuel request not found.")
@@ -329,7 +331,6 @@ def list_fuel_requests(
 ):
     """`status`: a single status, "open" (everything still in progress),
     or omitted for all. Newest first."""
-    _expire_codes(db)
     q = _query(db)
     if status == "open":
         q = q.filter(FuelRequest.status.in_(OPEN_STATUSES))
@@ -353,7 +354,6 @@ def fuel_request_alerts(
 ):
     """For the web bell: requests waiting for a fuel code or a receipt
     check, oldest first."""
-    _expire_codes(db)
     rows = (
         _query(db)
         .filter(_needs_action_filter())
@@ -482,7 +482,6 @@ def get_fuel_request(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    _expire_codes(db)
     req = _query(db).filter(FuelRequest.id == request_id).first()
     if not req:
         raise HTTPException(status_code=404, detail="Fuel request not found.")
@@ -495,7 +494,8 @@ def issue_fuel_code(
     request_id: int,
     fuel_code: str = Body(..., embed=True),
     liters: float = Body(..., embed=True),
-    # "YYYY-MM-DDTHH:MM", Philippine time. Unused past it -> expired.
+    # "YYYY-MM-DDTHH:MM", Philippine time. Past it the code stays open
+    # until the driver uploads the receipt or marks it not used.
     code_expires_at: str | None = Body(None, embed=True),
     request: Request = None,
     db: Session = Depends(get_db),
