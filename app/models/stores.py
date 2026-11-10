@@ -81,6 +81,13 @@ class Store(Base):
         index=True,
     )
 
+    # Customer Chart: the customer tier this location belongs to (so its
+    # customer). None = not on the chart yet ("Unassigned").
+    customer_tier_id = Column(
+        Integer, ForeignKey("tpc_customer_tiers.id"), nullable=True, index=True
+    )
+
     # Relationships
+    customer_tier = relationship("CustomerTier")
     trip_stops = relationship("TripStop", back_populates="store", cascade="all, delete")
     trip_rate_profile = relationship("TripRateProfile", back_populates="stores")

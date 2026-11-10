@@ -332,3 +332,42 @@ def category_rate_changes(profile, rules: list[TripRateRule]) -> list[dict]:
         }
         for rule in changes
     ]
+
+
+# Shown wherever a trip's category is shown, for a trip paid by a lane rate
+# alone (a lane tier's location with no trip profile).
+LANE_RATE_LABEL = "Lane rate"
+
+
+def category_label(trip) -> str | None:
+    """The trip's category name, or LANE_RATE_LABEL when it has none."""
+    profile = getattr(trip, "trip_rate_profile", None)
+    if profile is not None:
+        return profile.profile_name
+    return LANE_RATE_LABEL if trip is not None else None
+
+
+def lane_rule_for(origin_store_id, destination, vehicle, on, rules):
+    """The lane rate (a rule with no category, its lane matching and a
+    Driver 1st set) a trip from `origin_store_id` to `destination` in
+    `vehicle` pays on `on`; None when there's none."""
+    facts = {
+        "trip_rate_profile_id": None,
+        "truck_type_id": vehicle.truck_type_id if vehicle else None,
+        "origin_store_id": origin_store_id,
+        "destination_area": _norm(destination.area),
+        "destination_store_id": destination.id,
+    }
+    ranked = sorted(
+        (
+            (score, rule)
+            for rule in rules
+            if rule.trip_rate_profile_id is None
+            and (rule.origin_store_id or rule.destination_area or rule.destination_store_id)
+            and rule.driver_first_trip_rate is not None
+            and (score := _matches(rule, facts, on)) is not None
+        ),
+        key=lambda pair: (pair[0], pair[1].effective_from, pair[1].id),
+        reverse=True,
+    )
+    return ranked[0][1] if ranked else None

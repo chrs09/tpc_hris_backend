@@ -35,8 +35,9 @@ from app.models.app_setting import AppSetting
 from app.services.gps_service import calculate_distance_meters, find_nearest_store
 from app.services.notification_service import create_notification
 from app.services.route_ride import busy_on_trip, my_role, on_my_trip, riders_of
-from app.services.trip_rates import load_rules, resolve_trip_rates
+from app.services.trip_rates import LANE_RATE_LABEL, category_label, load_rules, resolve_trip_rates
 from app.services.vehicle_assignment import check_unit_for_trip
+from app.services.customer_tiers import plan_trip
 from app.services.user_roles import check_trip_crew, driver_user_condition
 from app.services.trip_payroll_service import (
     to_ph,
@@ -740,19 +741,18 @@ def get_active_trip(
             if trip.vehicle_unit
             else None
         ),
-        "trip_rate_profile": (
-            {
-                "id": trip.trip_rate_profile.id,
-                "profile_name": trip.trip_rate_profile.profile_name,
-                "helper_count": trip.trip_rate_profile.helper_count,
-                # This trip's own rate (truck type / lane / effective date
-                # rules applied) -- app/services/trip_rates.py.
-                "driver_first_trip_rate": active_rates["driver_first_trip_rate"],
-                "driver_next_trip_rate": active_rates["driver_next_trip_rate"],
-            }
-            if trip.trip_rate_profile
-            else None
-        ),
+        # A lane-rate trip may have no category: id None, "Lane rate".
+        "trip_rate_profile": {
+            "id": trip.trip_rate_profile_id,
+            "profile_name": category_label(trip),
+            "helper_count": (
+                trip.trip_rate_profile.helper_count if trip.trip_rate_profile else 0
+            ),
+            # This trip's own rate (truck type / lane / effective date
+            # rules applied) -- app/services/trip_rates.py.
+            "driver_first_trip_rate": active_rates["driver_first_trip_rate"],
+            "driver_next_trip_rate": active_rates["driver_next_trip_rate"],
+        },
         "status": trip.status.value if hasattr(trip.status, "value") else trip.status,
         # Route ride: "route_rider" = this user rides along (can do every
         # step; GPS is tracked from the driver's phone).
@@ -789,6 +789,9 @@ def dispatch_trip(
     vehicle_unit_id: int = Form(...),
     origin_store_id: int = Form(...),
     destination_store_ids: str = Form(...),
+    # Customer Chart: the tier picked on Trip Dispatch (checked against
+    # the first destination's tier). Optional for older clients.
+    customer_tier_id: int | None = Form(None),
     # Not needed for a special trip (is_special) -- it gets an ST- code.
     shipment_no: str = Form("[]"),
     # JSON {"<shipment no>": <store id>}; required with 2+ stores.
@@ -916,31 +919,6 @@ def dispatch_trip(
 
     primary_store = stores_by_id[destination_store_ids[0]]
 
-    if not primary_store.trip_rate_profile_id:
-        where = (
-            "Trip Management -> Origins (Trip category when it's a destination)"
-            if primary_store.is_hub
-            else "the store"
-        )
-        raise HTTPException(
-            status_code=400,
-            detail=f'"{primary_store.name}" has no trip rate profile configured. Set one on {where} before dispatching to it.',
-        )
-
-    trip_category = (
-        db.query(TripRateProfile)
-        .filter(
-            TripRateProfile.id == primary_store.trip_rate_profile_id,
-            TripRateProfile.is_active.is_(True),
-        )
-        .first()
-    )
-    if not trip_category:
-        raise HTTPException(
-            status_code=400,
-            detail=f'"{primary_store.name}"\'s trip rate profile is inactive. Update the store or reactivate the profile.',
-        )
-
     target_user = (
         db.query(User)
         .filter(User.id == driver_id, driver_user_condition())
@@ -976,6 +954,18 @@ def dispatch_trip(
     if not origin_store:
         raise HTTPException(status_code=400, detail="Pick a start point.")
 
+    # Customer Chart: the first destination's customer + tier, and the
+    # trip category / lane rate that pays it (app/services/customer_tiers.py).
+    plan = plan_trip(
+        db,
+        [stores_by_id[sid] for sid in destination_store_ids],
+        origin_store,
+        vehicle,
+        to_ph(datetime.utcnow()).date(),
+        expected_tier_id=customer_tier_id,
+    )
+    trip_category = plan.profile
+
     driver_employee = (
         db.query(Employee).filter(Employee.id == target_user.employee_id).first()
     )
@@ -1007,7 +997,9 @@ def dispatch_trip(
             vehicle_unit_id=vehicle.id,
             destination_store_id=primary_store.id,
             planned_store_ids=json.dumps(destination_store_ids),
-            trip_rate_profile_id=trip_category.id,
+            trip_rate_profile_id=trip_category.id if trip_category else None,
+            customer_id=plan.customer_id,
+            customer_tier_id=plan.tier.id if plan.tier else None,
             ticket_no=shipment_no_display,
             shipment_numbers=json.dumps(shipment_numbers),
             shipment_stores=json.dumps(shipment_store_map),
@@ -1045,7 +1037,7 @@ def dispatch_trip(
         "destinations": [stores_by_id[sid].name for sid in destination_store_ids],
         "shipment_numbers": shipment_numbers,
         "shipment_no": shipment_no_display,
-        "trip_category": trip_category.profile_name,
+        "trip_category": trip_category.profile_name if trip_category else LANE_RATE_LABEL,
         "helpers_assigned": len(helper_objects),
     }
 

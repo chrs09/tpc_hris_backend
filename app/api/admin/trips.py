@@ -37,6 +37,8 @@ from app.services.trip_remarks import (
     serialize_trip_remarks,
 )
 from app.utils.timezone import ph_to_utc, utc_to_ph
+from app.services.customer_tiers import apply_plan, plan_trip
+from app.services.trip_rates import category_label
 from app.services.user_roles import check_trip_crew, driver_user_condition, is_relief_driver
 from app.utils.user_display import display_name as _display_name
 from app.services.approval_chain import immediate_head, trips_for_me
@@ -561,11 +563,7 @@ def get_approval_pipeline(
                 "ticket_no": trip.ticket_no,
                 "driver_name": _display_name(trip.driver) if trip.driver else None,
                 "username": trip.driver.username if trip.driver else None,
-                "trip_category": (
-                    trip.trip_rate_profile.profile_name
-                    if trip.trip_rate_profile
-                    else None
-                ),
+                "trip_category": category_label(trip),
                 "stores": [
                     store_names.get(sid, f"Store #{sid}")
                     for sid in planned_by_trip[trip.id]
@@ -642,9 +640,7 @@ def get_active_trips(
                 "trip_code": trip.trip_code,
                 "ticket_no": trip.ticket_no,
                 "vehicle_unit": (trip.vehicle_unit.unit_code if trip.vehicle_unit else "-"),
-                "trip_profile": (
-                    trip.trip_rate_profile.profile_name if trip.trip_rate_profile else "-"
-                ),
+                "trip_profile": category_label(trip),
                 "status": trip.status.value,
                 "current_step": trip.current_step,
                 "current_step_label": _current_step_label(trip.current_step),
@@ -719,11 +715,7 @@ def get_assigned_trips(
                 "vehicle_unit": (
                     trip.vehicle_unit.unit_code if trip.vehicle_unit else "-"
                 ),
-                "trip_profile": (
-                    trip.trip_rate_profile.profile_name
-                    if trip.trip_rate_profile
-                    else "-"
-                ),
+                "trip_profile": category_label(trip),
                 "origin_store": (
                     trip.origin_store.name if trip.origin_store else "-"
                 ),
@@ -1077,24 +1069,6 @@ def update_assigned_trip(
         else _parse_shipment_stores(payload.shipment_stores, shipment_numbers, dest_ids)
     )
     primary_store = stores_by_id[dest_ids[0]]
-    if not primary_store.trip_rate_profile_id:
-        raise HTTPException(
-            status_code=400,
-            detail=f'"{primary_store.name}" has no trip rate profile configured.',
-        )
-    rate_profile = (
-        db.query(TripRateProfile)
-        .filter(
-            TripRateProfile.id == primary_store.trip_rate_profile_id,
-            TripRateProfile.is_active.is_(True),
-        )
-        .first()
-    )
-    if not rate_profile:
-        raise HTTPException(
-            status_code=400,
-            detail=f'"{primary_store.name}" trip rate profile is inactive.',
-        )
 
     # ---- driver
     driver = (
@@ -1140,6 +1114,16 @@ def update_assigned_trip(
     # Any location: hub, supplier (pick-up) or customer (e.g. returns).
     if not origin:
         raise HTTPException(status_code=400, detail="Pick a start point.")
+
+    # Customer Chart: the first destination's customer + tier and the
+    # category / lane rate that pays it (app/services/customer_tiers.py).
+    plan = plan_trip(
+        db,
+        [stores_by_id[sid] for sid in dest_ids],
+        origin,
+        vehicle,
+        utc_to_ph(trip.start_time or trip.created_at or datetime.utcnow()).date(),
+    )
 
     # ---- helpers
     if len(payload.helper_ids) != len(set(payload.helper_ids)):
@@ -1216,7 +1200,7 @@ def update_assigned_trip(
     trip.origin_store_id = origin.id
     trip.destination_store_id = primary_store.id
     trip.planned_store_ids = json.dumps(dest_ids)
-    trip.trip_rate_profile_id = rate_profile.id
+    apply_plan(trip, plan)
     trip.shipment_numbers = json.dumps(shipment_numbers)
     trip.shipment_stores = json.dumps(shipment_store_map)
     trip.ticket_no = ", ".join(shipment_numbers)

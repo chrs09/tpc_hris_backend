@@ -47,6 +47,7 @@ from .vehicle_unit_checklist import VehicleUnitChecklist as VehicleUnitChecklist
 
 # Fleet Management
 from .customer import Customer as Customer
+from .customer import CustomerTier as CustomerTier
 from .supplier import Supplier as Supplier
 from .vehicle_maintenance import VehicleMaintenance as VehicleMaintenance
 

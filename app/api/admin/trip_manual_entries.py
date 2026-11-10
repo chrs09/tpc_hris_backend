@@ -33,6 +33,8 @@ from app.models.user import User, UserRole
 from app.models.vehicle_unit import VehicleUnit
 from app.services.file_service import FileService
 from app.utils.timezone import ph_to_utc, utc_to_ph
+from app.services.customer_tiers import plan_trip
+from app.services.trip_rates import category_label
 from app.services.user_roles import driver_user_condition, is_relief_driver
 from app.utils.user_display import display_name
 from app.api.admin.trips import CANCELLED_TICKET_MARKER
@@ -415,21 +417,16 @@ async def create_manual_entry(
     )
 
     primary = stores_by_id[store_ids[0]]
-    rate_profile = (
-        db.query(TripRateProfile)
-        .filter(
-            TripRateProfile.id == primary.trip_rate_profile_id,
-            TripRateProfile.is_active.is_(True),
-        )
-        .first()
-        if primary.trip_rate_profile_id
-        else None
+    # Customer Chart: customer + tier of the first stop, and the category /
+    # lane rate that pays it (app/services/customer_tiers.py).
+    plan = plan_trip(
+        db,
+        [stores_by_id[sid] for sid in store_ids],
+        origin,
+        vehicle,
+        utc_to_ph(start_time).date(),
     )
-    if not rate_profile:
-        raise HTTPException(
-            status_code=400,
-            detail=f'"{primary.name}" has no active trip rate profile. Set one on the store first.',
-        )
+    rate_profile = plan.profile
 
     # Per-stop times: entered ones are used; missing ones are spread
     # evenly across the trip so the timeline stays in order.
@@ -500,7 +497,9 @@ async def create_manual_entry(
         vehicle_unit_id=vehicle.id,
         destination_store_id=primary.id,
         planned_store_ids=json.dumps(store_ids),
-        trip_rate_profile_id=rate_profile.id,
+        trip_rate_profile_id=rate_profile.id if rate_profile else None,
+        customer_id=plan.customer_id,
+        customer_tier_id=plan.tier.id if plan.tier else None,
         ticket_no=", ".join(shipment_numbers),
         shipment_numbers=json.dumps(shipment_numbers),
         shipment_stores=json.dumps(shipment_store_map),
@@ -824,7 +823,7 @@ def get_manual_entry(
         ),
         "origin": trip.origin_store.name if trip.origin_store else None,
         "trip_category": (
-            trip.trip_rate_profile.profile_name if trip.trip_rate_profile else None
+            category_label(trip)
         ),
         "shipment_numbers": json.loads(trip.shipment_numbers)
         if trip.shipment_numbers

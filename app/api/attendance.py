@@ -39,7 +39,7 @@ from app.models.user import User
 from app.models.trips import Trip
 from app.models.trip_helper import TripHelper
 from app.models.files import File as FileModel
-from app.services.trip_rates import load_rules, resolve_trip_rates
+from app.services.trip_rates import category_label, load_rules, resolve_trip_rates
 from app.services.payroll_lock import ensure_unlocked
 from app.services.file_service import FileService, _watermark_timestamp
 from app.services.face_recognition_service import FaceRecognitionService
@@ -1541,11 +1541,7 @@ def get_attendance_records(
 
                     "trip_rate_profile_id": trip.trip_rate_profile_id,
 
-                    "trip_rate_profile": (
-                        trip.trip_rate_profile.profile_name
-                        if trip.trip_rate_profile
-                        else None
-                    ),
+                    "trip_rate_profile": category_label(trip),
 
                     # Rates with truck type / lane / effective date rules
                     # applied (app/services/trip_rates.py).

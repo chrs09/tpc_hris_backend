@@ -518,7 +518,7 @@ def get_trip_check(
     from app.models.attendance import AttendanceRecord
     from app.models.trip_helper import TripHelper
     from app.models.trips import Trip
-    from app.services.trip_rates import load_rules, resolve_trip_rates
+    from app.services.trip_rates import category_label, load_rules, resolve_trip_rates
     from app.utils.timezone import utc_to_ph_date
 
     ph = pytz.timezone("Asia/Manila")
@@ -584,7 +584,7 @@ def get_trip_check(
                 "status": status,
                 "vehicle_unit": trip.vehicle_unit.unit_code if trip.vehicle_unit else None,
                 "plate_number": trip.vehicle_unit.plate_number if trip.vehicle_unit else None,
-                "trip_rate_profile": trip.trip_rate_profile.profile_name if trip.trip_rate_profile else None,
+                "trip_rate_profile": category_label(trip),
                 "first_trip_rate": rates[f"{role}_first_trip_rate"],
                 "has_attendance": has_attendance,
                 "counted": status in PAID_TRIP_STATUSES and has_attendance,

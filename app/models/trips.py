@@ -105,6 +105,13 @@ class Trip(Base):
         nullable=True,
     )
 
+    # Customer Chart: the customer and tier the trip is for (from its
+    # first destination's tier). None on trips before the chart existed.
+    customer_id = Column(Integer, ForeignKey("tpc_customers.id"), nullable=True, index=True)
+    customer_tier_id = Column(
+        Integer, ForeignKey("tpc_customer_tiers.id"), nullable=True, index=True
+    )
+
     status = Column(
         Enum(TripStatus, name="trip_status_enum"),
         default=TripStatus.ACTIVE,
@@ -194,6 +201,8 @@ class Trip(Base):
 
     vehicle_unit = relationship("VehicleUnit", foreign_keys=[vehicle_unit_id])
 
+    customer = relationship("Customer")
+    customer_tier = relationship("CustomerTier")
     trip_rate_profile = relationship(
         "TripRateProfile", foreign_keys=[trip_rate_profile_id]
     )

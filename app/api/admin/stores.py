@@ -148,6 +148,14 @@ def build_store_response(store: Store) -> dict:
         "area": store.area,
         "is_supplier": bool(store.is_supplier),
         "is_customer": bool(store.is_customer),
+        "trip_rate_profile_id": store.trip_rate_profile_id,
+        # Customer Chart: its tier and customer (None = unassigned).
+        "customer_tier_id": store.customer_tier_id,
+        "customer_id": store.customer_tier.customer_id if store.customer_tier else None,
+        "customer_tier_name": store.customer_tier.name if store.customer_tier else None,
+        "customer_name": (
+            store.customer_tier.customer.name if store.customer_tier else None
+        ),
     }
 
 
