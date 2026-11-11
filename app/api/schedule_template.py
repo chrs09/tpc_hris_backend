@@ -2,6 +2,7 @@ from datetime import datetime
 
 from fastapi import (
     APIRouter,
+    Body,
     Depends,
     Form,
     HTTPException,
@@ -91,6 +92,59 @@ def get_schedule_templates(
             for t in templates
         ]
     )
+
+
+# =========================================================
+# NAME FOR "NO WORK SCHEDULE" (blank)
+# =========================================================
+# Drivers / helpers usually have no schedule (paid per trip, no fixed work
+# hours). Blank still means exactly that everywhere (attendance, payroll);
+# this only names it -- shown in the 201 Work Schedule field, Work History
+# and Payroll instead of "-". Set on the Work Schedules page.
+NO_SCHEDULE_LABEL_KEY = "no_schedule_label"
+NO_SCHEDULE_LABEL_DEFAULT = "Per Trip"
+
+
+def no_schedule_label(db: Session) -> str:
+    from app.models.app_setting import AppSetting
+
+    row = db.query(AppSetting).filter(AppSetting.key == NO_SCHEDULE_LABEL_KEY).first()
+    return (row.value if row and row.value.strip() else NO_SCHEDULE_LABEL_DEFAULT)
+
+
+@router.get("/no-schedule-label")
+def get_no_schedule_label(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    return {"label": no_schedule_label(db), "default": NO_SCHEDULE_LABEL_DEFAULT}
+
+
+@router.put("/no-schedule-label")
+def set_no_schedule_label(
+    label: str = Body(..., embed=True),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(_require_schedule_write_access),
+):
+    from app.models.app_setting import AppSetting
+
+    label = (label or "").strip()
+    if not label:
+        raise HTTPException(status_code=400, detail="Enter a name, e.g. Per Trip.")
+    if len(label) > 50:
+        raise HTTPException(status_code=400, detail="Keep the name to 50 characters.")
+    row = db.query(AppSetting).filter(AppSetting.key == NO_SCHEDULE_LABEL_KEY).first()
+    if row is None:
+        row = AppSetting(
+            key=NO_SCHEDULE_LABEL_KEY,
+            value=label,
+            description='Name shown for "no work schedule" (blank) -- e.g. drivers / helpers paid per trip.',
+        )
+        db.add(row)
+    else:
+        row.value = label
+    db.commit()
+    return {"label": label, "message": "Saved."}
 
 
 @router.get("/{template_id}")
