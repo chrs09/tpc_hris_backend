@@ -58,6 +58,7 @@ from app.api.driver.trips import (
     MAX_SHIPMENT_NUMBERS,
 )
 from app.models.vehicle_unit import VehicleUnit
+from app.models.truck_type import TruckType
 from app.models.TripRate import TripRateProfile
 from app.services.vehicle_assignment import check_unit_for_trip, trip_unit_flags
 from pydantic import BaseModel
@@ -237,6 +238,11 @@ def get_trip_summary(
         )
         .count(),
         "succeeding_trips_today": trips_today - drivers_today,
+        # Truck type filter on the dashboard (10wwv, 6W Dropside, ...).
+        "truck_types": [
+            {"id": t.id, "name": t.name}
+            for t in db.query(TruckType).order_by(TruckType.name.asc()).all()
+        ],
     }
 
 
@@ -412,6 +418,8 @@ PIPELINE_STATUSES = {
 def get_approval_pipeline(
     status: str | None = Query(None),
     search: str | None = Query(None),
+    # Trip Management Dashboard: only trips on this truck type's units.
+    truck_type_id: int | None = Query(None),
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
@@ -425,6 +433,12 @@ def get_approval_pipeline(
     # Per-status counts for the filter (before the status filter itself,
     # but after search, so the numbers match what the search finds).
     query = base
+    if truck_type_id:
+        query = query.filter(
+            Trip.vehicle_unit_id.in_(
+                db.query(VehicleUnit.id).filter(VehicleUnit.truck_type_id == truck_type_id)
+            )
+        )
     if search and search.strip():
         like = f"%{search.strip()}%"
         store_ids = [
@@ -492,6 +506,7 @@ def get_approval_pipeline(
         query.options(
             joinedload(Trip.driver).joinedload(User.employee),
             joinedload(Trip.trip_rate_profile),
+            joinedload(Trip.vehicle_unit).joinedload(VehicleUnit.truck_type),
         )
         .order_by(Trip.end_time.desc(), Trip.id.desc())
         .offset(offset)
@@ -559,6 +574,7 @@ def get_approval_pipeline(
         items.append(
             {
                 "id": trip.id,
+                **_truck_type_fields(trip),
                 "trip_code": trip.trip_code,
                 "ticket_no": trip.ticket_no,
                 "driver_name": _display_name(trip.driver) if trip.driver else None,
@@ -637,6 +653,7 @@ def get_active_trips(
         result.append(
             {
                 "id": trip.id,
+                **_truck_type_fields(trip),
                 "trip_code": trip.trip_code,
                 "ticket_no": trip.ticket_no,
                 "vehicle_unit": (trip.vehicle_unit.unit_code if trip.vehicle_unit else "-"),
@@ -704,6 +721,7 @@ def get_assigned_trips(
         result.append(
             {
                 "id": trip.id,
+                **_truck_type_fields(trip),
                 "trip_code": trip.trip_code,
                 "ticket_no": trip.ticket_no,
                 "driver_name": _display_name(trip.driver),
@@ -2342,3 +2360,13 @@ def acknowledge_hub_alert(
     return {"message": "Alert acknowledged."}
 
     return {"message": "Location tracked"}
+
+
+def _truck_type_fields(trip) -> dict:
+    """The trip unit's truck type (e.g. 10wwv, 6W Dropside) -- a column and
+    filter on the Trip Management Dashboard."""
+    truck = trip.vehicle_unit.truck_type if trip.vehicle_unit else None
+    return {
+        "truck_type_id": truck.id if truck else None,
+        "truck_type": truck.name if truck else None,
+    }
