@@ -805,3 +805,167 @@ def archive_office_review_trip(
 
     return {"message": "Trip archived.", "trip_id": trip.id}
 
+
+# =========================================================
+# TRIP DOCUMENTS: every trip with its document status
+# (Trip Management -> Trip Document -> All Trips)
+# =========================================================
+# The status is worked out from where the trip is in the flow -- nothing
+# extra is stored. Order and wording agreed for the Trip Documents ticket.
+PENDING_AFTER_HOURS = 48
+
+DOCUMENT_STATUSES = [
+    {"key": "assigned", "no": 1, "label": "Assigned", "responsible": "Coordinator",
+     "meaning": "Trip assigned to driver"},
+    {"key": "delivered", "no": 2, "label": "Delivered", "responsible": "Driver",
+     "meaning": "Delivery completed; driver returned to base"},
+    {"key": "submitted", "no": 3, "label": "Submitted", "responsible": "Coordinator",
+     "meaning": "Initial documents reviewed and forwarded to Office"},
+    {"key": "pending", "no": 4, "label": "Pending", "responsible": "Office",
+     "meaning": f"Not acknowledged within {PENDING_AFTER_HOURS} hours"},
+    {"key": "returned", "no": 5, "label": "Returned", "responsible": "Office / assigned resolver",
+     "meaning": "Document issue needs resolution"},
+    {"key": "verified", "no": 6, "label": "Verified", "responsible": "Office",
+     "meaning": "Documents checked, complete, and correct; forwarded to Finance"},
+    {"key": "cleared", "no": 7, "label": "Cleared", "responsible": "Finance",
+     "meaning": "Finance review completed; eligible for payroll processing"},
+    {"key": "blocked", "no": 8, "label": "Blocked", "responsible": "Finance",
+     "meaning": "Not valid"},
+]
+_STATUS_BY_KEY = {row["key"]: row for row in DOCUMENT_STATUSES}
+
+_require_documents = require_role_or_module(
+    roles=["superadmin", "coordinator_admin", "office_admin"],
+    module_key="trip_management.office_trip_review",
+)
+
+
+def document_status(trip: Trip, review: TripFinanceReview | None, now: datetime):
+    """-> (status key, since datetime). None key = cancelled."""
+    status = trip.status
+    review_status = review.status if review else None
+    if status == TripStatus.CANCELLED:
+        return None, trip.end_time or trip.created_at
+    if status in (TripStatus.ASSIGNED, TripStatus.ACTIVE):
+        return "assigned", trip.created_at
+    if review_status == FinanceReviewStatus.RETURNED and status == TripStatus.PENDING_APPROVAL:
+        return "returned", review.returned_at
+    if status in (TripStatus.PENDING_APPROVAL, TripStatus.PENDING_MANUAL_APPROVAL):
+        return "delivered", trip.end_time
+    if status == TripStatus.PENDING_OFFICE_REVIEW:
+        sent = (review.coordinator_settlement_date or review.submitted_at) if review else None
+        late = sent and (now - sent).total_seconds() >= PENDING_AFTER_HOURS * 3600
+        return ("pending" if late else "submitted"), sent
+    if review_status == FinanceReviewStatus.BLOCKED:
+        return "blocked", review.blocked_at
+    if status == TripStatus.PENDING_FINANCE_REVIEW:
+        return "verified", review.office_reviewed_at if review else None
+    if status == TripStatus.COMPLETED:
+        return "cleared", review.approved_at if review else trip.end_time
+    return "delivered", trip.end_time
+
+
+@router.get("/documents")
+def get_trip_documents(
+    status: str | None = None,
+    driver_id: int | None = None,
+    # Shipment number, ticket or trip code (part of it).
+    q: str | None = None,
+    # Period covered: trip date (PH), "YYYY-MM-DD", both inclusive.
+    date_from: str | None = None,
+    date_to: str | None = None,
+    include_cancelled: bool = False,
+    db: Session = Depends(get_db),
+    current_user=Depends(_require_documents),
+):
+    """Every trip in the period with its document status, who's
+    responsible for it now, and how many trips are in each status."""
+    from datetime import date as _date, time as _time, timedelta
+
+    from sqlalchemy import func, or_
+
+    from app.utils.timezone import ph_to_utc
+
+    def parse(value, label):
+        try:
+            return _date.fromisoformat(value) if value else None
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid {label} date.")
+
+    start = parse(date_from, "from")
+    end = parse(date_to, "to")
+    when = func.coalesce(Trip.start_time, Trip.created_at)
+
+    query = (
+        db.query(Trip)
+        .options(
+            joinedload(Trip.driver).joinedload(User.employee),
+            joinedload(Trip.vehicle_unit),
+            joinedload(Trip.finance_review),
+        )
+        .filter(Trip.is_archived.is_(False))
+    )
+    if start:
+        query = query.filter(when >= ph_to_utc(datetime.combine(start, _time.min)))
+    if end:
+        query = query.filter(when < ph_to_utc(datetime.combine(end + timedelta(days=1), _time.min)))
+    if driver_id:
+        query = query.filter(Trip.driver_id == driver_id)
+    term = (q or "").strip()
+    if term:
+        like = f"%{term}%"
+        query = query.filter(
+            or_(
+                Trip.ticket_no.ilike(like),
+                Trip.shipment_numbers.ilike(like),
+                Trip.trip_code.ilike(like),
+            )
+        )
+
+    now = datetime.utcnow()
+    counts = {row["key"]: 0 for row in DOCUMENT_STATUSES}
+    rows = []
+    for trip in query.order_by(when.desc()).all():
+        review = trip.finance_review
+        key, since = document_status(trip, review, now)
+        if key is None and not include_cancelled:
+            continue
+        if key:
+            counts[key] += 1
+        if status and key != status:
+            continue
+        meta = _STATUS_BY_KEY.get(key, {"key": "cancelled", "no": 9, "label": "Cancelled",
+                                         "responsible": "-", "meaning": "Trip cancelled"})
+        note = None
+        if key == "returned" and review:
+            note = review.return_reason
+        elif key == "blocked" and review:
+            note = review.block_reason
+        rows.append({
+            "trip_id": trip.id,
+            "trip_code": trip.trip_code,
+            "ticket_no": trip.ticket_no,
+            "driver_id": trip.driver_id,
+            "driver_name": _display_name(trip.driver) if trip.driver else None,
+            "plate_number": trip.vehicle_unit.plate_number if trip.vehicle_unit else None,
+            "trip_date": to_ph(trip.start_time or trip.created_at),
+            "status": meta["key"],
+            "status_no": meta["no"],
+            "status_label": meta["label"],
+            "responsible": meta["responsible"],
+            "meaning": meta["meaning"],
+            "since": to_ph(since),
+            "hours_waiting": (
+                int((now - since).total_seconds() // 3600)
+                if since and key in ("submitted", "pending")
+                else None
+            ),
+            "note": note,
+        })
+
+    return {
+        "statuses": DOCUMENT_STATUSES,
+        "counts": counts,
+        "total": sum(counts.values()),
+        "trips": rows,
+    }

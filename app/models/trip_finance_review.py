@@ -25,6 +25,10 @@ class FinanceReviewStatus(str, enum.Enum):
     # approve_trip in app/api/admin/trips.py) rather than creating a
     # second one -- trip_id is unique on this table.
     RETURNED = "returned"
+    # Finance found the trip's documents not valid: not paid (not
+    # COMPLETED) until Finance unblocks it back to finance_review. The
+    # trip stays PENDING_FINANCE_REVIEW. Trip Documents shows "Blocked".
+    BLOCKED = "blocked"
 
 
 class TripFinanceReview(Base):
@@ -151,6 +155,26 @@ class TripFinanceReview(Base):
     # =====================================================
     # FINANCE REVIEW
     # =====================================================
+
+    # =====================================================
+    # BLOCKED BY FINANCE (documents not valid)
+    # =====================================================
+
+    blocked_by_user_id = Column(
+        Integer,
+        ForeignKey("tpc_users.id"),
+        nullable=True,
+    )
+
+    block_reason = Column(
+        String(1000),
+        nullable=True,
+    )
+
+    blocked_at = Column(
+        DateTime,
+        nullable=True,
+    )
 
     finance_reviewer_id = Column(
         Integer,

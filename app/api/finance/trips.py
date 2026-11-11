@@ -1,7 +1,7 @@
 # app/api/finance/trips.py
 
 from datetime import datetime
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException
 from sqlalchemy.orm import Session, joinedload
 
 from app.core.database import get_db
@@ -60,9 +60,16 @@ def get_finance_trip_summary(
         .count()
     )
 
+    blocked = (
+        db.query(TripFinanceReview)
+        .filter(TripFinanceReview.status == FinanceReviewStatus.BLOCKED)
+        .count()
+    )
+
     return {
         "finance_review_count": finance_review,
         "approved_count": approved,
+        "blocked_count": blocked,
         "total_count": finance_review + approved,
         "synced_to_payroll_count": approved,
     }
@@ -160,6 +167,8 @@ def get_finance_trips(
                 if review.approved_at
                 else None
             ),
+            "block_reason": review.block_reason,
+            "blocked_at": to_ph(review.blocked_at) if review.blocked_at else None,
         }
         for review in reviews
     ]
@@ -390,6 +399,9 @@ def get_finance_trip_detail(
             if review.approved_at
             else None
         ),
+        # Blocked by Finance (documents not valid)
+        "block_reason": review.block_reason,
+        "blocked_at": to_ph(review.blocked_at) if review.blocked_at else None,
     }
 
 
@@ -431,3 +443,58 @@ def approve_finance_trip(
     db.commit()
 
     return {"message": "Trip approved and synced to attendance & payroll."}
+
+
+# =========================
+# BLOCK / UNBLOCK (documents not valid)
+# =========================
+@router.post("/{trip_id}/block")
+def block_finance_trip(
+    trip_id: int,
+    reason: str = Body(..., embed=True),
+    db: Session = Depends(get_db),
+    current_admin=Depends(require_role_or_module(roles=["admin", "superadmin"], module_key="finance.finance_trips")),
+):
+    """Finance marks the trip's documents not valid: it isn't paid until
+    unblocked. Shown as "Blocked" on Trip Documents."""
+    review = (
+        db.query(TripFinanceReview)
+        .filter(TripFinanceReview.trip_id == trip_id)
+        .first()
+    )
+    if not review:
+        raise HTTPException(404, "Trip not submitted for finance review.")
+    if review.status != FinanceReviewStatus.FINANCE_REVIEW:
+        raise HTTPException(
+            status_code=400,
+            detail="Only a trip awaiting finance review can be blocked.",
+        )
+    reason = (reason or "").strip()
+    if not reason:
+        raise HTTPException(status_code=400, detail="Enter why the trip is blocked.")
+
+    review.status = FinanceReviewStatus.BLOCKED
+    review.block_reason = reason[:1000]
+    review.blocked_by_user_id = current_admin.id
+    review.blocked_at = datetime.utcnow()
+    db.commit()
+    return {"message": "Trip blocked."}
+
+
+@router.post("/{trip_id}/unblock")
+def unblock_finance_trip(
+    trip_id: int,
+    db: Session = Depends(get_db),
+    current_admin=Depends(require_role_or_module(roles=["admin", "superadmin"], module_key="finance.finance_trips")),
+):
+    """Back to For Finance Review (the reason stays on record)."""
+    review = (
+        db.query(TripFinanceReview)
+        .filter(TripFinanceReview.trip_id == trip_id)
+        .first()
+    )
+    if not review or review.status != FinanceReviewStatus.BLOCKED:
+        raise HTTPException(status_code=400, detail="This trip isn't blocked.")
+    review.status = FinanceReviewStatus.FINANCE_REVIEW
+    db.commit()
+    return {"message": "Trip back in finance review."}
