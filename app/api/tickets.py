@@ -349,6 +349,10 @@ def update_category(
 # =========================
 @router.get("")
 def list_tickets(
+    # "mine" (default): tickets the user filed, is assigned, or their Org
+    # Chart unit handles -- for everyone, even with the Tickets grant.
+    # "all": every ticket, only for the Tickets grant (the "Everyone" view).
+    scope: str = "mine",
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -357,7 +361,7 @@ def list_tickets(
         joinedload(Ticket.assigned_to).joinedload(User.employee),
         joinedload(Ticket.category).joinedload(TicketCategory.org_unit),
     )
-    if not sees_all_tickets(db, current_user):
+    if not (scope == "all" and sees_all_tickets(db, current_user)):
         unit_ids = my_unit_ids(db, current_user)
         category_ids = [
             cid for (cid,) in db.query(TicketCategory.id).filter(
