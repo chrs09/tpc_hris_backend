@@ -9,6 +9,7 @@ from sqlalchemy import (
     ForeignKey,
     Integer,
     String,
+    Text,
 )
 
 from app.core.database import Base
@@ -107,9 +108,37 @@ class VehicleUnit(Base):
     company_id = Column(Integer, ForeignKey("tpc_companies.id"), nullable=True, index=True)
     company = relationship("Company")
 
+    # Fleet status set by Fleet Management (Vehicle List -> Set status):
+    # available / breakdown / maintenance / hold / retired. "Assigned" and
+    # "In transit" aren't stored -- they come from the unit's trips (see
+    # app/services/fleet_status.py). Anything but available can't be
+    # dispatched.
+    fleet_status = Column(String(20), nullable=False, default="available", server_default="available")
+    status_reason = Column(Text, nullable=True)
+    status_since = Column(DateTime, nullable=True)
+    # Expected back in service (breakdown / maintenance / hold), optional.
+    status_until = Column(Date, nullable=True)
+    status_updated_by = Column(Integer, ForeignKey("tpc_users.id"), nullable=True)
+
     truck_type = relationship("TruckType", back_populates="vehicle_units")
 
     trips = relationship(
         "Trip",
         back_populates="vehicle_unit",
     )
+
+
+class VehicleStatusLog(Base):
+    """Each period a unit spent in a fleet status other than available
+    (breakdown / maintenance / hold / retired) -- downtime for the Truck
+    Utilization report. ended_at None = still in that status."""
+
+    __tablename__ = "tpc_vehicle_status_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    vehicle_unit_id = Column(Integer, ForeignKey("tpc_vehicle_units.id"), nullable=False, index=True)
+    status = Column(String(20), nullable=False)
+    reason = Column(Text, nullable=True)
+    started_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    ended_at = Column(DateTime, nullable=True)
+    created_by = Column(Integer, ForeignKey("tpc_users.id"), nullable=True)

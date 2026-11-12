@@ -112,3 +112,4 @@ from .payroll_run import PayrollRun as PayrollRun
 from .ticket_category import TicketCategory as TicketCategory
 from .attendance_alert import AttendanceAlert as AttendanceAlert
 from .time_correction import TimeCorrectionRequest as TimeCorrectionRequest
+from .vehicle_unit import VehicleStatusLog as VehicleStatusLog

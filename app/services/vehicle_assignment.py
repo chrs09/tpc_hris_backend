@@ -89,6 +89,10 @@ def check_unit_for_trip(
 ) -> tuple[str | None, str | None]:
     """Raises if the unit can't go; otherwise (reason_type, reason_text) to
     save on the trip -- (None, None) when it's the driver's own unit."""
+    # Fleet status breakdown / maintenance / hold / retired: can't go.
+    from app.services.fleet_status import ensure_dispatchable
+
+    ensure_dispatchable(vehicle)
     repair = repair_info(open_repair(db, vehicle.id))
     if repair:
         raise HTTPException(

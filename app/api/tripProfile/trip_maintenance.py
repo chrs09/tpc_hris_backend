@@ -7,7 +7,8 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.core.database import get_db
 
-from app.core.dependencies import get_current_user
+from app.core.dependencies import get_current_user, require_role_or_module
+from pydantic import BaseModel
 from app.models.user import User
 from app.models.vehicle_unit import VehicleUnit
 from app.models.truck_type import TruckType
@@ -33,6 +34,8 @@ from app.services.trip_rates import (
 )
 from zoneinfo import ZoneInfo
 from app.utils.user_display import display_name
+
+from app.services import fleet_status
 
 ALLOWED_CR_OR_CONTENT_TYPES = {
     "image/png",
@@ -68,7 +71,113 @@ def _unit_extras(db: Session, unit) -> dict:
         "assigned_driver_name": display_name(driver) if driver else None,
         "is_available": bool(unit.is_available),
         "in_repair": repair_info(open_repair(db, unit.id)),
+        # Fleet status: available / assigned / in transit / breakdown /
+        # maintenance / hold / retired (app/services/fleet_status.py).
+        **fleet_status.unit_statuses(db, [unit])[unit.id],
     }
+
+
+# =========================
+# FLEET STATUS / TRUCK AVAILABILITY / UTILIZATION
+# =========================
+_require_fleet_editor = require_role_or_module(
+    roles=["superadmin", "coordinator_admin"], module_key="fleet_management.vehicle_list"
+)
+
+
+class FleetStatusPayload(BaseModel):
+    status: str
+    reason: str | None = None
+    # Expected back in service, "YYYY-MM-DD" (optional).
+    until: str | None = None
+
+
+@router.put("/vehicle-units/{unit_id}/status")
+def set_vehicle_unit_status(
+    unit_id: int,
+    payload: FleetStatusPayload,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(_require_fleet_editor),
+):
+    """Fleet sets a unit to Available, Breakdown, Maintenance, Hold or
+    Retired (Assigned / In transit come from its trips)."""
+    unit = db.query(VehicleUnit).filter(VehicleUnit.id == unit_id).first()
+    if not unit:
+        raise HTTPException(status_code=404, detail="Vehicle unit not found.")
+    fleet_status.set_status(
+        db, unit, payload.status, payload.reason,
+        _parse_expiration_date(payload.until), current_user.id,
+    )
+    db.commit()
+    return {
+        "message": f"{unit.plate_number or unit.unit_code} is now {fleet_status._BY_KEY[payload.status]['label']}.",
+        **fleet_status.unit_statuses(db, [unit])[unit.id],
+    }
+
+
+@router.get("/fleet-board")
+def get_fleet_board(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Truck availability for Trip Dispatch: counts per group and every
+    unit with its status (retired units only counted)."""
+    units = (
+        db.query(VehicleUnit)
+        .options(joinedload(VehicleUnit.truck_type), joinedload(VehicleUnit.assigned_driver))
+        .order_by(VehicleUnit.unit_code.asc())
+        .all()
+    )
+    statuses = fleet_status.unit_statuses(db, units)
+    counts = {g["key"]: 0 for g in fleet_status.GROUPS}
+    status_counts = {s["key"]: 0 for s in fleet_status.STATUSES}
+    rows = []
+    for unit in units:
+        st = statuses[unit.id]
+        counts[st["status_group"]] += 1
+        status_counts[st["status"]] += 1
+        if st["status"] == "retired":
+            continue
+        rows.append({
+            "id": unit.id,
+            "unit_code": unit.unit_code,
+            "plate_number": unit.plate_number,
+            "truck_type": unit.truck_type.name if unit.truck_type else None,
+            "truck_type_id": unit.truck_type_id,
+            "assigned_driver_name": (
+                display_name(unit.assigned_driver) if unit.assigned_driver else None
+            ),
+            **st,
+        })
+    return {
+        "groups": fleet_status.GROUPS,
+        "statuses": fleet_status.STATUSES,
+        "counts": counts,
+        "status_counts": status_counts,
+        "units": rows,
+    }
+
+
+@router.get("/utilization")
+def get_truck_utilization(
+    date_from: str,
+    date_to: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(
+        require_role_or_module(
+            roles=["superadmin", "coordinator_admin"],
+            module_key="fleet_management.vehicle_list",
+        )
+    ),
+):
+    """Truck Utilization report (Fleet Management)."""
+    start = _parse_expiration_date(date_from)
+    end = _parse_expiration_date(date_to)
+    if not start or not end or end < start:
+        raise HTTPException(status_code=400, detail="Pick a valid period.")
+    if (end - start).days > 366:
+        raise HTTPException(status_code=400, detail="Pick a period of one year or less.")
+    return fleet_status.utilization(db, start, end)
 
 
 @router.get("/vehicle-units/drivers")

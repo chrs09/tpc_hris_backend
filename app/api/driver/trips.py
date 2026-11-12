@@ -491,6 +491,8 @@ def get_available_vehicles(
         .filter(
             VehicleUnit.is_active.is_(True),
             VehicleUnit.is_available.is_(True),
+            # Breakdown / maintenance / hold / retired can't be dispatched.
+            VehicleUnit.fleet_status == "available",
         )
         .order_by(VehicleUnit.unit_code.asc())
         .all()
