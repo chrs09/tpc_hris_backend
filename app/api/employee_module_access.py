@@ -68,6 +68,9 @@ MODULE_GROUPS = {
         "delivery_summary",
         "trips",
         "office_trip_review",
+        # Correction Requests / History: request a change to a finished
+        # trip (Finance approves -- app/api/admin/trip_corrections.py).
+        "trip_corrections",
         # Renamed from "trip_bypass" -- this is dispatch (assigning a
         # driver/vehicle/hub to start a trip), now called Trip
         # Assignment. The name "trip_bypass" now belongs to the

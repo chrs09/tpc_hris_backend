@@ -516,6 +516,10 @@ def get_approval_pipeline(
 
     trip_ids = [trip.id for trip in trips]
     manual_ids = _manual_entry_trip_ids(db, trip_ids)
+    # Trips with an approved correction ("Corrected" badge).
+    from app.api.admin.trip_corrections import corrected_trip_ids
+
+    corrected_ids = corrected_trip_ids(db, trip_ids)
     # Route riders on these trips (route ride).
     pipeline_riders = riders_of(db, trip_ids)
     # Who cancelled and why (latest cancel log per trip).
@@ -575,6 +579,7 @@ def get_approval_pipeline(
             {
                 "id": trip.id,
                 **_truck_type_fields(trip),
+                "is_corrected": trip.id in corrected_ids,
                 "trip_code": trip.trip_code,
                 "ticket_no": trip.ticket_no,
                 "driver_name": _display_name(trip.driver) if trip.driver else None,
