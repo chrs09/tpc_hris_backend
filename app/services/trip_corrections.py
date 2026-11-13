@@ -263,15 +263,30 @@ def apply(db: Session, trip: Trip, changes: dict) -> dict:
         )
 
     # ---- rate (customer tier / category) for the corrected trip
-    if dest_ids:
-        plan = plan_trip(
-            db,
-            [stores[i] for i in dest_ids],
-            origin,
-            vehicle,
-            utc_to_ph(trip.start_time or trip.created_at).date(),
-        )
-        apply_plan(trip, plan)
+    # Worked out again only when what decides it changed: the start point,
+    # the vehicle or the stops. A time / shipment / crew fix keeps the
+    # trip's rate as dispatched -- even if its location's trip profile was
+    # turned off since (e.g. hubs whose profiles were removed).
+    route_changed = any(
+        k in changes for k in ("origin_store_id", "vehicle_unit_id", "destination_store_ids")
+    )
+    if dest_ids and route_changed:
+        try:
+            plan = plan_trip(
+                db,
+                [stores[i] for i in dest_ids],
+                origin,
+                vehicle,
+                utc_to_ph(trip.start_time or trip.created_at).date(),
+            )
+            apply_plan(trip, plan)
+        except HTTPException:
+            # Same first stop and the trip already has a rate: keep it
+            # (the start point or truck was wrong, not the location).
+            # A new first stop must have a rate of its own.
+            same_first_stop = old_dest[:1] == dest_ids[:1]
+            if not (same_first_stop and (trip.trip_rate_profile_id or trip.customer_tier_id)):
+                raise
 
     db.flush()
     # The corrected trip must not land in a locked payroll either.
