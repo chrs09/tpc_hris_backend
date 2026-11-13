@@ -4,6 +4,7 @@ from app.services.vehicle_assignment import trip_unit_flags
 from datetime import datetime
 
 from fastapi import APIRouter, Body, Depends, HTTPException
+from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
 from app.services.payroll_lock import ensure_trip_unlocked
@@ -865,6 +866,58 @@ def document_status(trip: Trip, review: TripFinanceReview | None, now: datetime)
     return "delivered", trip.end_time
 
 
+def _ordinal(n: int) -> str:
+    if 10 <= n % 100 <= 20:
+        return f"{n}th"
+    return f"{n}{ {1: 'st', 2: 'nd', 3: 'rd'}.get(n % 10, 'th') }"
+
+
+def _trip_orders(db: Session, trips: list) -> dict:
+    """{trip_id: {employee_id: n}} -- for each person on the trip (driver
+    and helpers, by employee id) which trip of their day it is (PH date,
+    by start time): 1 = their 1st trip that day, 2 = 2nd... Same idea as
+    payroll's 1st / Next. Cancelled and archived trips don't count."""
+    from datetime import time as _time, timedelta
+
+    from app.utils.timezone import ph_to_utc, utc_to_ph_date
+
+    if not trips:
+        return {}
+    days = {utc_to_ph_date(t.start_time or t.created_at) for t in trips}
+    days.discard(None)
+    if not days:
+        return {}
+    lo = ph_to_utc(datetime.combine(min(days), _time.min))
+    hi = ph_to_utc(datetime.combine(max(days) + timedelta(days=1), _time.min))
+    when = func.coalesce(Trip.start_time, Trip.created_at)
+    day_trips = (
+        db.query(Trip)
+        .options(joinedload(Trip.driver).joinedload(User.employee), joinedload(Trip.trip_helpers))
+        .filter(
+            Trip.is_archived.is_(False),
+            Trip.status != TripStatus.CANCELLED,
+            when >= lo,
+            when < hi,
+        )
+        .order_by(when.asc(), Trip.id.asc())
+        .all()
+    )
+    seen: dict = {}  # (employee_id, date) -> count so far
+    out: dict = {}
+    for t in day_trips:
+        day = utc_to_ph_date(t.start_time or t.created_at)
+        people = set()
+        if t.driver and t.driver.employee:
+            people.add(t.driver.employee.id)
+        people.update(h.helper_id for h in t.trip_helpers)
+        mine = {}
+        for emp_id in people:
+            seen[(emp_id, day)] = seen.get((emp_id, day), 0) + 1
+            mine[emp_id] = seen[(emp_id, day)]
+        out[t.id] = mine
+    return out
+
+
 @router.get("/documents")
 def get_trip_documents(
     status: str | None = None,
@@ -902,6 +955,7 @@ def get_trip_documents(
             joinedload(Trip.driver).joinedload(User.employee),
             joinedload(Trip.vehicle_unit),
             joinedload(Trip.finance_review),
+            joinedload(Trip.trip_helpers).joinedload(TripHelper.helper),
         )
         .filter(Trip.is_archived.is_(False))
     )
@@ -925,7 +979,9 @@ def get_trip_documents(
     now = datetime.utcnow()
     counts = {row["key"]: 0 for row in DOCUMENT_STATUSES}
     rows = []
-    for trip in query.order_by(when.desc()).all():
+    trips = query.order_by(when.desc()).all()
+    orders = _trip_orders(db, trips)
+    for trip in trips:
         review = trip.finance_review
         key, since = document_status(trip, review, now)
         if key is None and not include_cancelled:
@@ -941,12 +997,28 @@ def get_trip_documents(
             note = review.return_reason
         elif key == "blocked" and review:
             note = review.block_reason
+        driver_emp = trip.driver.employee if trip.driver else None
+        order = orders.get(trip.id, {})
+        driver_no = order.get(driver_emp.id) if driver_emp else None
         rows.append({
             "trip_id": trip.id,
             "trip_code": trip.trip_code,
             "ticket_no": trip.ticket_no,
             "driver_id": trip.driver_id,
+            "driver_employee_id": driver_emp.id if driver_emp else None,
             "driver_name": _display_name(trip.driver) if trip.driver else None,
+            # Which trip of the driver's day it is (1 = 1st), and each
+            # helper's own count -- a helper may have ridden other trips.
+            "trip_no": driver_no,
+            "trip_no_label": _ordinal(driver_no) if driver_no else None,
+            "helpers": [
+                {
+                    "employee_id": h.helper_id,
+                    "name": f"{h.helper.first_name} {h.helper.last_name}".strip() if h.helper else f"Helper #{h.helper_id}",
+                    "trip_no": order.get(h.helper_id),
+                }
+                for h in trip.trip_helpers
+            ],
             "plate_number": trip.vehicle_unit.plate_number if trip.vehicle_unit else None,
             "trip_date": to_ph(trip.start_time or trip.created_at),
             "status": meta["key"],
