@@ -7,7 +7,6 @@ from sqlalchemy.orm import Session, joinedload
 from app.core.database import get_db
 from app.core.dependencies import get_current_admin, require_role_or_module
 from app.services.approval_chain import trips_for_me
-from app.services.payroll_lock import ensure_trip_unlocked
 from app.models.trips import Trip, TripStatus
 from app.models.trip_finance_review import TripFinanceReview, FinanceReviewStatus
 from app.models.trip_stops import TripStop
@@ -480,48 +479,6 @@ def block_finance_trip(
     review.blocked_at = datetime.utcnow()
     db.commit()
     return {"message": "Trip blocked."}
-
-
-@router.post("/{trip_id}/return")
-def return_finance_trip(
-    trip_id: int,
-    reason: str = Body(..., embed=True),
-    db: Session = Depends(get_db),
-    current_admin=Depends(require_role_or_module(roles=["admin", "superadmin"], module_key="finance.finance_trips")),
-):
-    """Finance sends the trip back to the coordinator to fix a document
-    issue (e.g. files don't match) and upload the corrected document.
-    Once the coordinator re-submits it comes straight back to Finance --
-    Office already verified it (see approve_trip in app/api/admin/trips.py).
-    Shown as "Returned" on Trip Documents."""
-    review = (
-        db.query(TripFinanceReview)
-        .filter(TripFinanceReview.trip_id == trip_id)
-        .first()
-    )
-    if not review:
-        raise HTTPException(404, "Trip not submitted for finance review.")
-    if review.status not in (FinanceReviewStatus.FINANCE_REVIEW, FinanceReviewStatus.BLOCKED):
-        raise HTTPException(
-            status_code=400,
-            detail="Only a trip awaiting finance review (or blocked) can be returned.",
-        )
-    reason = (reason or "").strip()
-    if not reason:
-        raise HTTPException(status_code=400, detail="Enter what the coordinator needs to fix.")
-    trip = db.query(Trip).filter(Trip.id == trip_id).first()
-    if not trip:
-        raise HTTPException(404, "Trip not found.")
-    ensure_trip_unlocked(db, trip, "this trip")
-
-    trip.status = TripStatus.PENDING_APPROVAL
-    review.status = FinanceReviewStatus.RETURNED
-    review.returned_from = "finance"
-    review.return_reason = reason[:1000]
-    review.returned_by_user_id = current_admin.id
-    review.returned_at = datetime.utcnow()
-    db.commit()
-    return {"message": "Trip returned to the coordinator for correction."}
 
 
 @router.post("/{trip_id}/unblock")

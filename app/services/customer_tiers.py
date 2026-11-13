@@ -9,10 +9,11 @@ location sits under one tier of one customer). The tier decides the rate:
                                  location's trip profile. Neither: blocked.
   rate_source "trip_profile"  -- the location's trip profile (a more
                                  specific Driver Rates rule still
-                                 overrides it, as before). None: blocked.
+                                 overrides it, as before). No profile:
+                                 a lane rule. Neither: blocked.
 
-A location not on the chart yet ("Unassigned") works as before: its trip
-profile, required. All destinations of one trip must be the same customer.
+A location not on the chart yet ("Unassigned") works the same: its trip
+profile, else a lane rule (hubs no longer have profiles). All destinations of one trip must be the same customer.
 """
 
 import json
@@ -107,10 +108,22 @@ def plan_trip(
                 ),
             )
     elif profile is None:
-        raise HTTPException(
-            status_code=400,
-            detail=f'"{primary.name}" has no active trip profile. Set one on the location first.',
-        )
+        # No trip profile (e.g. a hub -- hub profiles were removed): a
+        # Driver Rates lane rate for this truck + start point -> location
+        # pays it, same as T1 (Bacolod Plant -> Consolacion DC, 10wwv).
+        rules = rules if rules is not None else load_rules(db)
+        lane_rule = lane_rule_for(origin.id if origin else None, primary, vehicle, on, rules)
+        if lane_rule is None:
+            truck = vehicle.truck_type.name if vehicle and vehicle.truck_type else "this truck"
+            origin_name = origin.name if origin else "the start point"
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f'"{primary.name}" has no active trip profile and there\'s no lane rate for '
+                    f"{truck} · {origin_name} → {primary.name}. Add the lane in "
+                    "Trip Category & Rates → Driver Rates."
+                ),
+            )
 
     return SimpleNamespace(
         profile=profile,

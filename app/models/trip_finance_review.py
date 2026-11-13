@@ -133,17 +133,19 @@ class TripFinanceReview(Base):
     )
 
     # =====================================================
-    # RETURNED TO COORDINATOR (correction requested by Office or Finance)
+    # RETURNED TO COORDINATOR (correction requested by office)
     # =====================================================
 
-    # Who sent it back: "office" (Office review) or "finance" (Finance
-    # review). A Finance return comes straight back to Finance once the
-    # coordinator re-submits -- Office already verified it. NULL on old
-    # rows = office.
-    returned_from = Column(
-        String(20),
-        nullable=True,
-    )
+    # While returned, the coordinator_admin (Trip Approvals) can hand it
+    # to a coordinator to fix -- upload the corrected document -- and get
+    # it back marked fixed. Open = resolver set, resolved_at empty.
+    # Cleared each time Office returns the trip.
+    resolver_user_id = Column(Integer, ForeignKey("tpc_users.id"), nullable=True)
+    resolver_note = Column(String(1000), nullable=True)
+    resolver_assigned_by_user_id = Column(Integer, ForeignKey("tpc_users.id"), nullable=True)
+    resolver_assigned_at = Column(DateTime, nullable=True)
+    resolved_at = Column(DateTime, nullable=True)
+    resolved_note = Column(String(1000), nullable=True)
 
     returned_by_user_id = Column(
         Integer,

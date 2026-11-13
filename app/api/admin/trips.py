@@ -339,7 +339,7 @@ def get_pending_trips(
     # requiring the coordinator to open each one first.
     trip_ids = [trip.id for trip in trips]
     return_reasons = {}
-    returned_from = {}
+    fix_info = {}
     if trip_ids:
         returned_reviews = (
             db.query(TripFinanceReview)
@@ -350,7 +350,7 @@ def get_pending_trips(
             .all()
         )
         return_reasons = {r.trip_id: r.return_reason for r in returned_reviews}
-        returned_from = {r.trip_id: r.returned_from or "office" for r in returned_reviews}
+        fix_info = {r.trip_id: _fix_info(db, r) for r in returned_reviews}
 
     # Assigned stores per trip, in the coordinator's route order. One
     # store lookup for the whole list rather than one per trip.
@@ -378,7 +378,7 @@ def get_pending_trips(
             .count(),
             "username": trip.driver.username,
             "return_reason": return_reasons.get(trip.id),
-            "returned_from": returned_from.get(trip.id),
+            **(fix_info.get(trip.id) or _fix_info(db, None)),
             "is_manual_entry": trip.id in manual_ids,
             **trip_unit_flags(trip),
             "awaiting_manual_approval": (
@@ -1319,6 +1319,15 @@ def approve_trip(
             status_code=400,
             detail="Trip already has a review record",
         )
+    if existing_review and existing_review.resolver_user_id and not existing_review.resolved_at:
+        resolver = db.get(User, existing_review.resolver_user_id)
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"This trip is with {_display_name(resolver) if resolver else 'a coordinator'} "
+                "to fix. Wait for them to mark it fixed, or take it back first."
+            ),
+        )
 
     # =========================================================
     # 5. SET COORDINATOR SETTLEMENT DATE
@@ -1330,14 +1339,7 @@ def approve_trip(
     # 6. MOVE TRIP TO OFFICE REVIEW
     # =========================================================
 
-    # A trip Finance returned goes straight back to Finance (Office
-    # already verified it); everything else goes to Office review.
-    back_to_finance = bool(
-        existing_review and existing_review.returned_from == "finance"
-    )
-    trip.status = (
-        TripStatus.PENDING_FINANCE_REVIEW if back_to_finance else TripStatus.PENDING_OFFICE_REVIEW
-    )
+    trip.status = TripStatus.PENDING_OFFICE_REVIEW
 
     # =========================================================
     # 7. CREATE OR REUSE REVIEW RECORD
@@ -1348,9 +1350,7 @@ def approve_trip(
         review.coordinator_id = current_admin.id
         review.coordinator_remarks = remarks.strip()
         review.coordinator_settlement_date = now
-        review.status = (
-            FinanceReviewStatus.FINANCE_REVIEW if back_to_finance else FinanceReviewStatus.OFFICE_REVIEW
-        )
+        review.status = FinanceReviewStatus.OFFICE_REVIEW
     else:
         review = TripFinanceReview(
             trip_id=trip.id,
@@ -1398,9 +1398,8 @@ def approve_trip(
     return {
         "message": (
             f"Trip approved by {coordinator_name} "
-            + ("and sent back to Finance review" if back_to_finance else "and sent for office review")
+            "and sent for office review"
         ),
-        "sent_to": "finance" if back_to_finance else "office",
         "trip_id": trip.id,
         "trip_status": trip.status.value,
         "review_status": review.status.value,
@@ -2023,12 +2022,14 @@ def review_trip(
             and finance_review.status == FinanceReviewStatus.RETURNED
             else None
         ),
-        "returned_from": (
-            (finance_review.returned_from or "office")
-            if finance_review
-            and finance_review.status == FinanceReviewStatus.RETURNED
-            else None
+        # Handed to a coordinator to fix (see send_to_coordinator)
+        **_fix_info(
+            db,
+            finance_review
+            if finance_review and finance_review.status == FinanceReviewStatus.RETURNED
+            else None,
         ),
+        "dispatched_by_user_id": trip.dispatched_by_user_id,
     }
 
 
@@ -2047,7 +2048,9 @@ def replace_trip_file(
     file_id: int,
     photo: UploadFile = FastAPIFile(...),
     db: Session = Depends(get_db),
-    current_admin=Depends(require_role_or_module(roles=["admin", "superadmin", "coordinator_admin"], module_key="trip_management.trips")),
+    # A coordinator may too, but only on a trip handed to them to fix
+    # (checked below).
+    current_admin=Depends(require_role_or_module(roles=["admin", "superadmin", "coordinator_admin", "coordinator"], module_key=["trip_management.trips", "trip_management.trip_dashboard"])),
 ):
     file_row = db.query(File).filter(File.id == file_id).first()
 
@@ -2067,6 +2070,13 @@ def replace_trip_file(
         )
 
     trip_row = db.query(Trip).filter(Trip.id == trip_id).first()
+    if not _can_approve_trips(db, current_admin):
+        review = db.query(TripFinanceReview).filter(TripFinanceReview.trip_id == trip_id).first()
+        if not (review and review.resolver_user_id == current_admin.id and not review.resolved_at):
+            raise HTTPException(
+                status_code=403,
+                detail="You can only replace photos on a trip handed to you to fix.",
+            )
     if not trip_row or trip_row.status != TripStatus.PENDING_APPROVAL:
         raise HTTPException(
             status_code=400,
@@ -2093,6 +2103,185 @@ def replace_trip_file(
         "document_type": file_row.document_type,
         "file_url": file_row.file_url,
     }
+
+
+# =========================
+# RETURNED TRIP -> COORDINATOR TO FIX
+#
+# Office returns a trip to Trip Approvals (the coordinator_admin's list).
+# The coordinator_admin can hand it to a coordinator to resolve -- e.g.
+# get the right document from the driver and upload it -- who marks it
+# fixed; it then waits in Trip Approvals again, marked Fixed, for the
+# coordinator_admin to approve (-> Office).
+# =========================
+_APPROVER_ROLES = ("admin", "superadmin", "coordinator_admin")
+
+
+def _ph(dt):
+    return utc_to_ph(dt).strftime("%b %d, %Y %I:%M %p") if dt else None
+
+
+def _role_of(user) -> str:
+    return (getattr(user.role, "value", user.role) or "").lower()
+
+
+def _can_approve_trips(db: Session, user) -> bool:
+    from app.core.dependencies import has_editable_grant
+
+    return _role_of(user) in _APPROVER_ROLES or has_editable_grant(db, user, ["trip_management.trips"])
+
+
+def _fix_info(db: Session, review) -> dict:
+    """Where a returned trip's fix stands, for lists and the review."""
+    if not review or not review.resolver_user_id:
+        return {"fix_status": None, "resolver_user_id": None, "resolver_name": None,
+                "resolver_note": None, "resolver_assigned_at": None, "resolver_assigned_by": None,
+                "resolved_at": None, "resolved_note": None}
+    resolver = db.get(User, review.resolver_user_id)
+    by = db.get(User, review.resolver_assigned_by_user_id) if review.resolver_assigned_by_user_id else None
+    return {
+        "fix_status": "fixed" if review.resolved_at else "with_coordinator",
+        "resolver_user_id": review.resolver_user_id,
+        "resolver_name": _display_name(resolver) if resolver else None,
+        "resolver_note": review.resolver_note,
+        "resolver_assigned_at": _ph(review.resolver_assigned_at),
+        "resolver_assigned_by": _display_name(by) if by else None,
+        "resolved_at": _ph(review.resolved_at),
+        "resolved_note": review.resolved_note,
+    }
+
+
+def _returned_review(db: Session, trip_id: int) -> tuple:
+    trip = db.query(Trip).filter(Trip.id == trip_id).first()
+    if not trip:
+        raise HTTPException(status_code=404, detail="Trip not found.")
+    review = db.query(TripFinanceReview).filter(TripFinanceReview.trip_id == trip_id).first()
+    if (
+        trip.status != TripStatus.PENDING_APPROVAL
+        or not review
+        or review.status != FinanceReviewStatus.RETURNED
+    ):
+        raise HTTPException(status_code=400, detail="Only a trip Office returned can be sent to a coordinator.")
+    return trip, review
+
+
+@router.get("/coordinators")
+def list_coordinators(
+    db: Session = Depends(get_db),
+    current_admin=Depends(require_role_or_module(roles=list(_APPROVER_ROLES), module_key="trip_management.trips")),
+):
+    """Who a returned trip can be handed to: active coordinators (and
+    coordinator admins)."""
+    users = (
+        db.query(User)
+        .options(joinedload(User.employee))
+        .filter(
+            User.is_active.is_(True),
+            User.role.in_([UserRole.COORDINATOR, UserRole.COORDINATOR_ADMIN]),
+        )
+        .all()
+    )
+    rows = [{"id": u.id, "name": _display_name(u), "role": _role_of(u)} for u in users]
+    return sorted(rows, key=lambda r: (r["role"] != "coordinator", r["name"].lower()))
+
+
+@router.post("/{trip_id}/send-to-coordinator")
+def send_to_coordinator(
+    trip_id: int,
+    coordinator_user_id: int = Body(...),
+    note: str = Body(...),
+    db: Session = Depends(get_db),
+    current_admin=Depends(require_role_or_module(roles=list(_APPROVER_ROLES), module_key="trip_management.trips")),
+):
+    trip, review = _returned_review(db, trip_id)
+    ensure_trip_unlocked(db, trip, "this trip")
+    note = (note or "").strip()
+    if not note:
+        raise HTTPException(status_code=400, detail="Say what the coordinator needs to fix.")
+    coordinator = db.query(User).filter(User.id == coordinator_user_id, User.is_active.is_(True)).first()
+    if not coordinator or _role_of(coordinator) not in ("coordinator", "coordinator_admin"):
+        raise HTTPException(status_code=400, detail="Pick a coordinator.")
+    review.resolver_user_id = coordinator.id
+    review.resolver_note = note[:1000]
+    review.resolver_assigned_by_user_id = current_admin.id
+    review.resolver_assigned_at = datetime.utcnow()
+    review.resolved_at = None
+    review.resolved_note = None
+    db.commit()
+    return {"message": f"Sent to {_display_name(coordinator)} to fix.", **_fix_info(db, review)}
+
+
+@router.post("/{trip_id}/take-back")
+def take_back_from_coordinator(
+    trip_id: int,
+    db: Session = Depends(get_db),
+    current_admin=Depends(require_role_or_module(roles=list(_APPROVER_ROLES), module_key="trip_management.trips")),
+):
+    """The coordinator_admin takes a trip back before it's fixed (e.g.
+    the coordinator is out) -- it's in their own hands again."""
+    _, review = _returned_review(db, trip_id)
+    if not review.resolver_user_id or review.resolved_at:
+        raise HTTPException(status_code=400, detail="This trip isn't with a coordinator.")
+    review.resolver_user_id = None
+    review.resolver_note = None
+    review.resolver_assigned_by_user_id = None
+    review.resolver_assigned_at = None
+    db.commit()
+    return {"message": "Taken back."}
+
+
+@router.get("/to-fix")
+def trips_to_fix(
+    db: Session = Depends(get_db),
+    current_user=Depends(require_role_or_module(roles=["admin", "superadmin", "coordinator_admin", "coordinator"], module_key=["trip_management.trips", "trip_management.trip_dashboard"])),
+):
+    """Returned trips handed to me to fix (a superadmin sees everyone's)."""
+    query = (
+        db.query(TripFinanceReview)
+        .join(Trip, Trip.id == TripFinanceReview.trip_id)
+        .filter(
+            TripFinanceReview.status == FinanceReviewStatus.RETURNED,
+            TripFinanceReview.resolver_user_id.isnot(None),
+            TripFinanceReview.resolved_at.is_(None),
+            Trip.status == TripStatus.PENDING_APPROVAL,
+        )
+    )
+    if _role_of(current_user) != "superadmin":
+        query = query.filter(TripFinanceReview.resolver_user_id == current_user.id)
+    rows = []
+    for review in query.order_by(TripFinanceReview.resolver_assigned_at.asc()).all():
+        trip = review.trip if hasattr(review, "trip") and review.trip else db.get(Trip, review.trip_id)
+        rows.append({
+            "id": trip.id,
+            "trip_code": trip.trip_code,
+            "ticket_no": trip.ticket_no,
+            "driver_name": _display_name(trip.driver) if trip.driver else None,
+            "start_time": _ph(trip.start_time),
+            "return_reason": review.return_reason,
+            "returned_at": _ph(review.returned_at),
+            **_fix_info(db, review),
+        })
+    return rows
+
+
+@router.post("/{trip_id}/mark-fixed")
+def mark_trip_fixed(
+    trip_id: int,
+    note: str = Body("", embed=True),
+    db: Session = Depends(get_db),
+    current_user=Depends(require_role_or_module(roles=["admin", "superadmin", "coordinator_admin", "coordinator"], module_key=["trip_management.trips", "trip_management.trip_dashboard"])),
+):
+    """The coordinator is done (corrected document uploaded): back to the
+    coordinator_admin's Trip Approvals, marked Fixed."""
+    trip, review = _returned_review(db, trip_id)
+    if not review.resolver_user_id or review.resolved_at:
+        raise HTTPException(status_code=400, detail="This trip isn't waiting on a fix.")
+    if review.resolver_user_id != current_user.id and _role_of(current_user) != "superadmin":
+        raise HTTPException(status_code=403, detail="This trip was handed to someone else.")
+    review.resolved_at = datetime.utcnow()
+    review.resolved_note = (note or "").strip()[:1000] or None
+    db.commit()
+    return {"message": "Marked fixed. It's back in Trip Approvals.", **_fix_info(db, review)}
 
 
 # =========================

@@ -240,7 +240,11 @@ def request_correction(
     changes = C.changes_only(db, trip, payload.changes or {})
     if not changes:
         raise HTTPException(status_code=400, detail="Nothing was changed.")
-    original = C.dry_run(db, trip, changes)
+    warnings: list = []
+    original = C.dry_run(db, trip, changes, warnings)
+    if warnings:
+        # Shown to Finance with the request (e.g. the rate was kept).
+        reason = f"{reason}\n[Note: {'; '.join(warnings)}]"
 
     correction = TripCorrection(
         trip_id=trip.id,
@@ -253,7 +257,12 @@ def request_correction(
     )
     db.add(correction)
     db.commit()
-    return {"id": correction.id, "message": "Correction sent to Finance for approval."}
+    return {
+        "id": correction.id,
+        "message": "Correction sent to Finance for approval."
+        + (f" Note: {'; '.join(warnings)}" if warnings else ""),
+        "warnings": warnings,
+    }
 
 
 def _get_pending(db: Session, correction_id: int) -> TripCorrection:

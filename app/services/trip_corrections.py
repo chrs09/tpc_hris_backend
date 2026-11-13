@@ -153,9 +153,10 @@ def changes_only(db: Session, trip: Trip, payload: dict) -> dict:
     return out
 
 
-def apply(db: Session, trip: Trip, changes: dict) -> dict:
+def apply(db: Session, trip: Trip, changes: dict, warnings: list | None = None) -> dict:
     """Changes the trip; returns the values it had for those fields.
-    Raises HTTPException with what to fix."""
+    Raises HTTPException with what to fix. Things Finance should know but
+    that don't block (e.g. the rate was kept) go into `warnings`."""
     from app.api.driver.trips import (
         MAX_SHIPMENT_NUMBERS,
         _invalid_shipment_number,
@@ -280,13 +281,13 @@ def apply(db: Session, trip: Trip, changes: dict) -> dict:
                 utc_to_ph(trip.start_time or trip.created_at).date(),
             )
             apply_plan(trip, plan)
-        except HTTPException:
-            # Same first stop and the trip already has a rate: keep it
-            # (the start point or truck was wrong, not the location).
-            # A new first stop must have a rate of its own.
-            same_first_stop = old_dest[:1] == dest_ids[:1]
-            if not (same_first_stop and (trip.trip_rate_profile_id or trip.customer_tier_id)):
-                raise
+        except HTTPException as exc:
+            # The rate setup can't place the corrected route (e.g. a hub
+            # whose trip profile was removed). A correction fixes what
+            # happened, so it isn't blocked: the trip keeps the rate it was
+            # dispatched with, and Finance sees why when approving.
+            if warnings is not None:
+                warnings.append(f"Rate kept from the original trip -- {exc.detail}")
 
     db.flush()
     # The corrected trip must not land in a locked payroll either.
@@ -294,12 +295,12 @@ def apply(db: Session, trip: Trip, changes: dict) -> dict:
     return original
 
 
-def dry_run(db: Session, trip: Trip, changes: dict) -> dict:
+def dry_run(db: Session, trip: Trip, changes: dict, warnings: list | None = None) -> dict:
     """Validates a request by applying it inside a savepoint that's
     always rolled back. Returns the trip's current values for the fields."""
     nested = db.begin_nested()
     try:
-        return apply(db, trip, changes)
+        return apply(db, trip, changes, warnings)
     finally:
         nested.rollback()
         db.expire(trip)

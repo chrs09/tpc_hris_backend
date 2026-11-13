@@ -749,7 +749,13 @@ def return_trip_to_approval(
     trip.status = TripStatus.PENDING_APPROVAL
 
     finance_review.status = FinanceReviewStatus.RETURNED
-    finance_review.returned_from = "office"
+    # A new return starts fresh: no coordinator assigned to fix it yet.
+    finance_review.resolver_user_id = None
+    finance_review.resolver_note = None
+    finance_review.resolver_assigned_by_user_id = None
+    finance_review.resolver_assigned_at = None
+    finance_review.resolved_at = None
+    finance_review.resolved_note = None
     finance_review.return_reason = remarks.strip()
     finance_review.returned_by_user_id = current_user.id
     finance_review.returned_at = datetime.utcnow()
@@ -995,8 +1001,11 @@ def get_trip_documents(
                                          "responsible": "-", "meaning": "Trip cancelled"})
         note = None
         if key == "returned" and review:
-            who = "Finance" if review.returned_from == "finance" else "Office"
-            note = f"Returned by {who}: {review.return_reason or ''}".strip()
+            note = review.return_reason
+            if review.resolver_user_id and not review.resolved_at:
+                note = f"{note} · With coordinator to fix"
+            elif review.resolver_user_id and review.resolved_at:
+                note = f"{note} · Fixed, back with coordinator admin"
         elif key == "blocked" and review:
             note = review.block_reason
         driver_emp = trip.driver.employee if trip.driver else None
