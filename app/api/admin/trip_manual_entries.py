@@ -575,12 +575,15 @@ async def create_manual_entry(
             reason=reason,
         )
     )
+    if trip.status == TripStatus.PENDING_APPROVAL:
+        # A superadmin's own entry: straight to Trip Document.
+        _send_to_trip_document(db, trip, current_user.id, f"Manual entry: {reason}"[:1000])
     db.commit()
 
     return {
         "message": (
-            "Trip entered. It's now waiting in Trip Approvals."
-            if trip.status == TripStatus.PENDING_APPROVAL
+            "Trip entered. It's now in Trip Document for office review."
+            if trip.status == TripStatus.PENDING_OFFICE_REVIEW
             else "Trip entered. It's waiting for superadmin approval."
         ),
         "trip_id": trip.id,
@@ -588,6 +591,24 @@ async def create_manual_entry(
         "is_special": bool(special_code),
         "awaiting_approval": trip.status == TripStatus.PENDING_MANUAL_APPROVAL,
     }
+
+
+def _send_to_trip_document(db: Session, trip: Trip, coordinator_id: int, note: str) -> None:
+    """An accepted manual entry skips Trip Approvals (the coordinator is
+    the one who entered it) and goes straight to Trip Document -- office
+    review -- like a coordinator-approved trip."""
+    from app.models.trip_finance_review import FinanceReviewStatus, TripFinanceReview
+
+    now = datetime.utcnow()
+    trip.status = TripStatus.PENDING_OFFICE_REVIEW
+    review = db.query(TripFinanceReview).filter(TripFinanceReview.trip_id == trip.id).first()
+    if review is None:
+        review = TripFinanceReview(trip_id=trip.id)
+        db.add(review)
+    review.coordinator_id = coordinator_id
+    review.coordinator_remarks = note
+    review.coordinator_settlement_date = now
+    review.status = FinanceReviewStatus.OFFICE_REVIEW
 
 
 def _get_waiting_entry(db: Session, trip_id: int) -> Trip:
@@ -609,11 +630,15 @@ def approve_manual_entry(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_superadmin),
 ):
-    """Superadmin accepts a coordinator_admin's entry -- it moves on to
-    Trip Approvals like any finished trip."""
+    """Superadmin accepts a coordinator_admin's entry -- it goes straight
+    to Trip Document (office review); the coordinator who entered it counts
+    as the coordinator's approval."""
     trip = _get_waiting_entry(db, trip_id)
     ensure_trip_unlocked(db, trip, "this trip")
-    trip.status = TripStatus.PENDING_APPROVAL
+    note = "Manual entry approved by superadmin" + (
+        f": {remarks.strip()}" if remarks and remarks.strip() else ""
+    )
+    _send_to_trip_document(db, trip, trip.dispatched_by_user_id or current_user.id, note[:1000])
     db.add(
         TripBypassLog(
             trip_id=trip.id,
@@ -623,7 +648,7 @@ def approve_manual_entry(
         )
     )
     db.commit()
-    return {"message": "Approved. The trip is now in Trip Approvals."}
+    return {"message": "Approved. The trip is now in Trip Document for office review."}
 
 
 @router.post("/{trip_id}/reject")
