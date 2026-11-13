@@ -749,6 +749,7 @@ def return_trip_to_approval(
     trip.status = TripStatus.PENDING_APPROVAL
 
     finance_review.status = FinanceReviewStatus.RETURNED
+    finance_review.returned_from = "office"
     finance_review.return_reason = remarks.strip()
     finance_review.returned_by_user_id = current_user.id
     finance_review.returned_at = datetime.utcnow()
@@ -994,7 +995,8 @@ def get_trip_documents(
                                          "responsible": "-", "meaning": "Trip cancelled"})
         note = None
         if key == "returned" and review:
-            note = review.return_reason
+            who = "Finance" if review.returned_from == "finance" else "Office"
+            note = f"Returned by {who}: {review.return_reason or ''}".strip()
         elif key == "blocked" and review:
             note = review.block_reason
         driver_emp = trip.driver.employee if trip.driver else None

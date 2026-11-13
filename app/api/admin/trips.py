@@ -339,6 +339,7 @@ def get_pending_trips(
     # requiring the coordinator to open each one first.
     trip_ids = [trip.id for trip in trips]
     return_reasons = {}
+    returned_from = {}
     if trip_ids:
         returned_reviews = (
             db.query(TripFinanceReview)
@@ -349,6 +350,7 @@ def get_pending_trips(
             .all()
         )
         return_reasons = {r.trip_id: r.return_reason for r in returned_reviews}
+        returned_from = {r.trip_id: r.returned_from or "office" for r in returned_reviews}
 
     # Assigned stores per trip, in the coordinator's route order. One
     # store lookup for the whole list rather than one per trip.
@@ -376,6 +378,7 @@ def get_pending_trips(
             .count(),
             "username": trip.driver.username,
             "return_reason": return_reasons.get(trip.id),
+            "returned_from": returned_from.get(trip.id),
             "is_manual_entry": trip.id in manual_ids,
             **trip_unit_flags(trip),
             "awaiting_manual_approval": (
@@ -1327,7 +1330,14 @@ def approve_trip(
     # 6. MOVE TRIP TO OFFICE REVIEW
     # =========================================================
 
-    trip.status = TripStatus.PENDING_OFFICE_REVIEW
+    # A trip Finance returned goes straight back to Finance (Office
+    # already verified it); everything else goes to Office review.
+    back_to_finance = bool(
+        existing_review and existing_review.returned_from == "finance"
+    )
+    trip.status = (
+        TripStatus.PENDING_FINANCE_REVIEW if back_to_finance else TripStatus.PENDING_OFFICE_REVIEW
+    )
 
     # =========================================================
     # 7. CREATE OR REUSE REVIEW RECORD
@@ -1338,7 +1348,9 @@ def approve_trip(
         review.coordinator_id = current_admin.id
         review.coordinator_remarks = remarks.strip()
         review.coordinator_settlement_date = now
-        review.status = FinanceReviewStatus.OFFICE_REVIEW
+        review.status = (
+            FinanceReviewStatus.FINANCE_REVIEW if back_to_finance else FinanceReviewStatus.OFFICE_REVIEW
+        )
     else:
         review = TripFinanceReview(
             trip_id=trip.id,
@@ -1386,8 +1398,9 @@ def approve_trip(
     return {
         "message": (
             f"Trip approved by {coordinator_name} "
-            "and sent for office review"
+            + ("and sent back to Finance review" if back_to_finance else "and sent for office review")
         ),
+        "sent_to": "finance" if back_to_finance else "office",
         "trip_id": trip.id,
         "trip_status": trip.status.value,
         "review_status": review.status.value,
@@ -2006,6 +2019,12 @@ def review_trip(
         ),
         "returned_at": (
             to_ph(finance_review.returned_at)
+            if finance_review
+            and finance_review.status == FinanceReviewStatus.RETURNED
+            else None
+        ),
+        "returned_from": (
+            (finance_review.returned_from or "office")
             if finance_review
             and finance_review.status == FinanceReviewStatus.RETURNED
             else None

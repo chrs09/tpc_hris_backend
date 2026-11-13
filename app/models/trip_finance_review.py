@@ -133,8 +133,17 @@ class TripFinanceReview(Base):
     )
 
     # =====================================================
-    # RETURNED TO COORDINATOR (correction requested by office)
+    # RETURNED TO COORDINATOR (correction requested by Office or Finance)
     # =====================================================
+
+    # Who sent it back: "office" (Office review) or "finance" (Finance
+    # review). A Finance return comes straight back to Finance once the
+    # coordinator re-submits -- Office already verified it. NULL on old
+    # rows = office.
+    returned_from = Column(
+        String(20),
+        nullable=True,
+    )
 
     returned_by_user_id = Column(
         Integer,
