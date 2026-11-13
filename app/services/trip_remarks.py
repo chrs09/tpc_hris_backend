@@ -59,6 +59,7 @@ BYPASS_ACTION_LABELS = {
     "assign-store": "Linked stop to store",
     "edit": "Edited dispatch",
     "reorder": "Changed stop order",
+    "change-store": "Changed a store on the trip",
     "cancel": "Cancelled trip",
     "manual-entry": "Manual trip entry",
     "manual-entry-approved": "Manual entry approved",

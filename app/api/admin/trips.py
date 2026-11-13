@@ -657,11 +657,25 @@ def get_active_trips(
     for trip in trips:
         planned_ids = _load_planned_store_ids(trip)
         delivered_ids = _delivered_store_ids(db, trip.id) if planned_ids else set()
+        stop_names = (
+            {st.id: st.name for st in db.query(Store).filter(Store.id.in_(planned_ids))}
+            if planned_ids
+            else {}
+        )
 
         result.append(
             {
                 "id": trip.id,
                 **_truck_type_fields(trip),
+                # The route's stores, for Change store (not-delivered ones).
+                "stops": [
+                    {
+                        "store_id": sid,
+                        "name": stop_names.get(sid, f"Store #{sid}"),
+                        "delivered": sid in delivered_ids,
+                    }
+                    for sid in planned_ids
+                ],
                 "trip_code": trip.trip_code,
                 "ticket_no": trip.ticket_no,
                 "vehicle_unit": (trip.vehicle_unit.unit_code if trip.vehicle_unit else "-"),
@@ -2102,6 +2116,126 @@ def replace_trip_file(
         "file_id": file_row.id,
         "document_type": file_row.document_type,
         "file_url": file_row.file_url,
+    }
+
+
+# =========================
+# CHANGE A STORE ON A TRIP IN PROGRESS
+#
+# The dispatch had a wrong store and the driver has already checked out:
+# a coordinator swaps that stop for the right store (one not delivered
+# yet), so the driver's app checks in there normally. Same place in the
+# route, its shipment numbers move with it. Logged with a reason (Trip
+# Bypass log, action "change-store").
+# =========================
+@router.post("/{trip_id}/change-store")
+def change_trip_store(
+    trip_id: int,
+    old_store_id: int = Body(...),
+    new_store_id: int = Body(...),
+    reason: str = Body(...),
+    db: Session = Depends(get_db),
+    current_admin=Depends(
+        require_role_or_module(
+            roles=["admin", "superadmin", "coordinator_admin", "coordinator"],
+            module_key="trip_management.trip_dashboard",
+        )
+    ),
+):
+    reason = (reason or "").strip()
+    if not reason:
+        raise HTTPException(status_code=400, detail="Say why the store is being changed.")
+    trip = db.query(Trip).filter(Trip.id == trip_id).with_for_update().first()
+    if not trip:
+        raise HTTPException(status_code=404, detail="Trip not found.")
+    if trip.status not in (TripStatus.ASSIGNED, TripStatus.ACTIVE):
+        raise HTTPException(
+            status_code=400,
+            detail="Only a trip that's assigned or in progress can have a store changed here. "
+            "For a finished trip, use Correction Requests.",
+        )
+    ensure_trip_unlocked(db, trip, "this trip")
+
+    planned = _load_planned_store_ids(trip)
+    if old_store_id not in planned:
+        raise HTTPException(status_code=400, detail="That store isn't on this trip.")
+    if old_store_id in _delivered_store_ids(db, trip.id):
+        raise HTTPException(
+            status_code=400,
+            detail="That store is already delivered. Use a Correction Request after the trip.",
+        )
+    at_store_now = (
+        db.query(TripStop.id)
+        .filter(
+            TripStop.trip_id == trip.id,
+            TripStop.store_id == old_store_id,
+            TripStop.status != StopStatus.DELIVERED,
+        )
+        .first()
+    )
+    if at_store_now:
+        raise HTTPException(
+            status_code=400,
+            detail="The driver is checked in at that store right now. Change it after they leave, "
+            "or use Trip Bypass.",
+        )
+    if new_store_id == old_store_id:
+        raise HTTPException(status_code=400, detail="Pick a different store.")
+    if new_store_id in planned:
+        raise HTTPException(status_code=400, detail="That store is already on this trip.")
+    old_store = db.get(Store, old_store_id)
+    new_store = db.get(Store, new_store_id)
+    if not new_store:
+        raise HTTPException(status_code=400, detail="Store not found.")
+
+    # Same place in the route.
+    new_planned = [new_store_id if sid == old_store_id else sid for sid in planned]
+    trip.planned_store_ids = json.dumps(new_planned)
+    trip.destination_store_id = new_planned[0] if new_planned else None
+
+    # Its shipment numbers now go to the new store.
+    pairs = _load_shipment_stores(trip)
+    if pairs:
+        trip.shipment_stores = json.dumps(
+            {n: [new_store_id if sid == old_store_id else sid for sid in ids] for n, ids in pairs.items()}
+        )
+
+    # Rate / customer follow the first stop. If the rate setup can't place
+    # the new route, the trip keeps its rate and the coordinator is told.
+    note = None
+    if new_planned and new_planned[0] != planned[0]:
+        stores = {s.id: s for s in db.query(Store).filter(Store.id.in_(new_planned))}
+        origin = db.get(Store, trip.origin_store_id) if trip.origin_store_id else None
+        vehicle = db.get(VehicleUnit, trip.vehicle_unit_id) if trip.vehicle_unit_id else None
+        try:
+            plan = plan_trip(
+                db,
+                [stores[sid] for sid in new_planned if sid in stores],
+                origin,
+                vehicle,
+                utc_to_ph(trip.start_time or trip.created_at or datetime.utcnow()).date(),
+            )
+            apply_plan(trip, plan)
+        except HTTPException as exc:
+            note = f"Rate kept from the original trip -- {exc.detail}"
+
+    db.add(
+        TripBypassLog(
+            trip_id=trip.id,
+            action="change-store",
+            performed_by_user_id=current_admin.id,
+            reason=(
+                f"Store changed: {old_store.name if old_store else old_store_id} → {new_store.name}. {reason}"
+                + (f" ({note})" if note else "")
+            )[:2000],
+        )
+    )
+    db.commit()
+    return {
+        "message": f"Store changed to {new_store.name}. The driver's app picks it up on its next refresh."
+        + (f" Note: {note}" if note else ""),
+        "planned_store_ids": new_planned,
+        "note": note,
     }
 
 
