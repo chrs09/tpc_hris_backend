@@ -597,6 +597,76 @@ def cancel_cash_advance_request(
     return _serialize(request, db)
 
 
+def _employee_balances(db: Session, employee_ids) -> dict:
+    """{employee_id: {"outstanding": total still owed, "open_advances": n}}
+    across their approved, not-yet-paid cash advances -- shown to approvers
+    so they can recommend (or not) a new one."""
+    ids = [i for i in set(employee_ids) if i]
+    out = {i: {"outstanding": 0.0, "open_advances": 0} for i in ids}
+    if not ids:
+        return out
+    for req in db.query(CashAdvanceRequest).filter(
+        CashAdvanceRequest.employee_id.in_(ids),
+        CashAdvanceRequest.status == "approved",
+    ):
+        row = _serialize(req, db)
+        if row["is_fully_paid"] or row["remaining_balance"] <= 0:
+            continue
+        out[req.employee_id]["outstanding"] = round(
+            out[req.employee_id]["outstanding"] + row["remaining_balance"], 2
+        )
+        out[req.employee_id]["open_advances"] += 1
+    return out
+
+
+def _with_balance(rows: list[dict], balances: dict) -> list[dict]:
+    for row in rows:
+        bal = balances.get(row.get("employee_id")) or {"outstanding": 0.0, "open_advances": 0}
+        row["employee_outstanding_balance"] = bal["outstanding"]
+        row["employee_open_advances"] = bal["open_advances"]
+    return rows
+
+
+@router.get("/my-team")
+def get_my_team_cash_advances(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Every cash advance (any status) of the approver's team: the people
+    under the Org Chart units they head, plus anyone whose approval chain
+    includes them. Each row carries the person's outstanding balance.
+    Read-only -- approving stays on "For me"."""
+    from app.services.approval_chain import team_scope
+
+    team = team_scope(db, current_user)
+    team_ids = set(team["employee_ids"]) if team else set()
+    if current_user.employee_id:
+        team_ids.discard(current_user.employee_id)
+    me = str(current_user.id)
+    requests = (
+        db.query(CashAdvanceRequest)
+        .options(
+            joinedload(CashAdvanceRequest.employee),
+            joinedload(CashAdvanceRequest.requested_by),
+        )
+        .filter(CashAdvanceRequest.is_archived.is_(False))
+        .order_by(CashAdvanceRequest.created_at.desc())
+        .all()
+    )
+    mine = [
+        r for r in requests
+        if r.employee_id in team_ids
+        or (r.approval_chain and me in [str(i) for i in load_json_list(r.approval_chain)])
+    ]
+    for r in mine:
+        r._can_act = r.status == "pending" and _can_review(r, current_user, db)
+    rows = [_serialize(r, db) for r in mine]
+    return {
+        "requests": _with_balance(rows, _employee_balances(db, [r.employee_id for r in mine])),
+        "team_size": len(team_ids),
+    }
+
+
 @router.get("/for-my-approval")
 def get_requests_for_my_approval(
     db: Session = Depends(get_db),
@@ -631,7 +701,9 @@ def get_requests_for_my_approval(
                 r._can_act = False
                 r._away = away
                 mine.append(r)
-    return [_serialize(r, db) for r in mine]
+    rows = [_serialize(r, db) for r in mine]
+    # The person's current CA balance, to help decide.
+    return _with_balance(rows, _employee_balances(db, [r.employee_id for r in mine]))
 
 
 @router.post("/{request_id}/approve")
