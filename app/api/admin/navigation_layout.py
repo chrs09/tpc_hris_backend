@@ -1,13 +1,13 @@
 # app/api/admin/navigation_layout.py
 #
-# How the menu is arranged for everyone, set by the superadmin in
-# Administrator -> Settings -> Navigation:
+# A superadmin's own menu arrangement, set in Administrator -> Settings ->
+# Navigation. Saved per superadmin account; everyone else (and a View As
+# session) always gets the default menu.
 #   sidebar_order -- sidebar groups, top to bottom, by label ("Payroll",
 #                    "Trip Management" ...). Groups not listed keep their
 #                    default place after the listed ones.
 #   mobile_tabs   -- the groups in the phone's bottom bar, between Home and
-#                    Menu (up to 4). Each person only sees the ones they
-#                    can open.
+#                    Menu (up to 4).
 # Kept in tpc_app_settings (one JSON row each) -- no table of its own.
 
 import json
@@ -21,8 +21,15 @@ from app.models.app_setting import AppSetting
 
 router = APIRouter(prefix="/navigation-layout", tags=["Navigation Layout"])
 
-SIDEBAR_KEY = "nav.sidebar_order"
-TABS_KEY = "nav.mobile_tabs"
+
+def _keys(user) -> tuple[str, str]:
+    return f"nav.sidebar_order.user.{user.id}", f"nav.mobile_tabs.user.{user.id}"
+
+
+def _is_superadmin(user) -> bool:
+    return (getattr(user.role, "value", user.role) or "").lower() == "superadmin"
+
+
 DEFAULT_TABS = ["Approvals", "Trip Management", "Tickets"]
 MAX_TABS = 4
 _MAX_LABEL = 40
@@ -69,9 +76,12 @@ def get_navigation_layout(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
+    if not _is_superadmin(current_user):
+        return {"sidebar_order": [], "mobile_tabs": list(DEFAULT_TABS)}
+    sidebar_key, tabs_key = _keys(current_user)
     return {
-        "sidebar_order": _read(db, SIDEBAR_KEY, []),
-        "mobile_tabs": _read(db, TABS_KEY, DEFAULT_TABS),
+        "sidebar_order": _read(db, sidebar_key, []),
+        "mobile_tabs": _read(db, tabs_key, DEFAULT_TABS),
     }
 
 
@@ -82,14 +92,15 @@ def set_navigation_layout(
     db: Session = Depends(get_db),
     current_user=Depends(require_superadmin),
 ):
-    """Saves whichever of the two is sent. An empty sidebar_order goes back
-    to the default order."""
+    """Saves the signed-in superadmin's own arrangement (whichever of the
+    two is sent). An empty sidebar_order goes back to the default order."""
+    sidebar_key, tabs_key = _keys(current_user)
     if sidebar_order is not None:
-        _write(db, SIDEBAR_KEY, _clean(sidebar_order, "Sidebar order"), "Sidebar group order")
+        _write(db, sidebar_key, _clean(sidebar_order, "Sidebar order"), "Sidebar group order")
     if mobile_tabs is not None:
         tabs = _clean(mobile_tabs, "Bottom bar")
         if len(tabs) > MAX_TABS:
             raise HTTPException(status_code=400, detail=f"Pick up to {MAX_TABS} for the bottom bar.")
-        _write(db, TABS_KEY, tabs, "Phone bottom bar groups")
+        _write(db, tabs_key, tabs, "Phone bottom bar groups")
     db.commit()
     return get_navigation_layout(db, current_user)
