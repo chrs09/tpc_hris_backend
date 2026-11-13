@@ -91,6 +91,40 @@ def _record(db: Session, employee_id: int, day: date):
     )
 
 
+def _close_settled(db: Session, alerts: list) -> list:
+    """Alerts still open / waiting whose day is already settled -- the
+    attendance record is Absent, or has a time in -- are closed, so a day
+    marked Absent elsewhere (e.g. the Attendance grid) no longer asks the
+    employee to file their time. Returns the alerts still open."""
+    if not alerts:
+        return alerts
+    days = {(a.employee_id, a.attendance_date) for a in alerts}
+    records = {
+        (r.employee_id, r.attendance_date): r
+        for r in db.query(AttendanceRecord).filter(
+            AttendanceRecord.employee_id.in_({e for e, _ in days}),
+            AttendanceRecord.attendance_date.in_({d for _, d in days}),
+        )
+    }
+    still_open, changed = [], False
+    for a in alerts:
+        r = records.get((a.employee_id, a.attendance_date))
+        settled = r is not None and (
+            (r.status or "").strip().lower() == "absent" or r.check_in_time is not None
+        )
+        # "waiting_time_in" with a time in is turned into Delay / Halfday
+        # elsewhere; only close it here when the day is Absent.
+        if settled and (a.status != "waiting_time_in" or (r.status or "").lower() == "absent"):
+            a.status = "closed"
+            a.closed_at = datetime.utcnow()
+            changed = True
+        else:
+            still_open.append(a)
+    if changed:
+        db.commit()
+    return still_open
+
+
 # =====================================================================
 # MISSED TIME IN -- heads
 # =====================================================================
@@ -122,6 +156,12 @@ def _alert_payload(db: Session, alert: AttendanceAlert, user: User, sees_all: bo
         "head_name": display_name(head) if head else None,
         "needs_answer": needs_answer,
         "can_act": needs_answer and (sees_all or alert.head_user_id == user.id),
+        # An answer given by mistake can be taken back (asked again) while
+        # it's still waiting: superadmin / Attendance "Can edit", or the head
+        # who answered.
+        "can_undo": (not needs_answer)
+        and alert.status in ("waiting_employee", "waiting_time_in")
+        and (sees_all or alert.decided_by_user_id == user.id),
     }
 
 
@@ -148,7 +188,7 @@ def missed_time_in_for_me(
     )
     if not sees_all:
         query = query.filter(AttendanceAlert.head_user_id == current_user.id)
-    alerts = query.order_by(AttendanceAlert.attendance_date.desc()).all()
+    alerts = _close_settled(db, query.order_by(AttendanceAlert.attendance_date.desc()).all())
     team = team_scope(db, current_user) if sees_all else None
     if team is not None:
         alerts = [
@@ -246,6 +286,48 @@ def decide_missed_time_in(
     return {"message": message, "id": alert.id, "status": alert.status}
 
 
+@router.post("/missed-time-in/{alert_id}/undo")
+def undo_missed_time_in(
+    alert_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Takes back an answer given by mistake ("Yes, they worked", Late,
+    2nd half) while it's still waiting: the question is asked again, so it
+    can be answered properly (e.g. Absent). Not once the employee has filed
+    a time correction for that day -- reject that instead."""
+    alert = db.get(AttendanceAlert, alert_id)
+    if not alert:
+        raise HTTPException(status_code=404, detail="Not found.")
+    sees_all = has_editable_grant(db, current_user, EDIT_GRANTS)
+    if not (sees_all or alert.decided_by_user_id == current_user.id):
+        raise HTTPException(status_code=403, detail="Only the person who answered or a superadmin can undo it.")
+    if alert.status not in ("waiting_employee", "waiting_time_in"):
+        raise HTTPException(status_code=400, detail="This answer can't be undone any more.")
+    ensure_unlocked(db, alert.employee_id, alert.attendance_date, "attendance")
+    filed = (
+        db.query(TimeCorrectionRequest.id)
+        .filter(
+            TimeCorrectionRequest.employee_id == alert.employee_id,
+            TimeCorrectionRequest.attendance_date == alert.attendance_date,
+            TimeCorrectionRequest.status == "pending",
+        )
+        .first()
+    )
+    if filed:
+        raise HTTPException(
+            status_code=400,
+            detail="They already filed a time correction for this day. Reject that correction instead.",
+        )
+    alert.status = "open"
+    alert.decision = None
+    alert.reason = None
+    alert.decided_by_user_id = None
+    alert.decided_at = None
+    db.commit()
+    return {"message": "Answer undone. Answer it again.", "id": alert.id, "status": alert.status}
+
+
 @router.get("/my-alerts")
 def my_missed_days(
     db: Session = Depends(get_db),
@@ -264,6 +346,8 @@ def my_missed_days(
         .order_by(AttendanceAlert.attendance_date.asc())
         .all()
     )
+    # A day since marked Absent (or timed in) no longer asks them to file.
+    alerts = _close_settled(db, alerts)
     pending = {
         c.attendance_date
         for c in db.query(TimeCorrectionRequest.attendance_date).filter(
