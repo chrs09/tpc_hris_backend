@@ -2135,10 +2135,11 @@ def change_trip_store(
     new_store_id: int = Body(...),
     reason: str = Body(...),
     db: Session = Depends(get_db),
+    # Trip Dashboard -> Active Trips, and Trip Bypass.
     current_admin=Depends(
         require_role_or_module(
             roles=["admin", "superadmin", "coordinator_admin", "coordinator"],
-            module_key="trip_management.trip_dashboard",
+            module_key=["trip_management.trip_dashboard", "trip_management.trip_bypass_actions"],
         )
     ),
 ):
