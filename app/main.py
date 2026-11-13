@@ -59,6 +59,8 @@ from app.api.admin import truck_types as truck_types
 from app.api.admin import dispatch as admin_dispatch
 from app.api.admin import settings as admin_settings
 from app.api.admin import page_titles
+from app.api.admin import navigation_layout
+from app.api.admin import global_search
 from app.api.admin import companies as admin_companies
 from app.api.admin.applicants import router as admin_applicants_router
 from app.api.public.public_applicant import router as public_applicant_router
@@ -333,6 +335,8 @@ app.include_router(truck_types.router, prefix="/api")
 app.include_router(admin_dispatch.router, prefix="/api")
 app.include_router(admin_settings.router, prefix="/api")
 app.include_router(page_titles.router, prefix="/api")
+app.include_router(navigation_layout.router, prefix="/api")
+app.include_router(global_search.router, prefix="/api")
 app.include_router(admin_companies.router, prefix="/api")
 app.include_router(admin_applicants_router)
 app.include_router(admin_applicant_questions_router)
