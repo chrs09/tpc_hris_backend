@@ -32,6 +32,9 @@ class ReleaseInfoUpdate(BaseModel):
     # Proof the approved funds were actually handed over -- a GCash
     # reference number, check number, payroll-release note, etc.
     release_reference: str
+    # The day the money actually went out ("YYYY-MM-DD", PH). Optional:
+    # without it the release is stamped now.
+    released_date: str | None = None
 
 
 class CashAdvanceAdjustment(BaseModel):

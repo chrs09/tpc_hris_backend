@@ -1377,6 +1377,33 @@ def create_opening_balance(
     return _serialize(request, db)
 
 
+def _release_moment(request: CashAdvanceRequest, value: str | None) -> datetime:
+    """When the cash advance was actually released: the given PH date
+    ("YYYY-MM-DD"), or now. Not in the future, not before approval."""
+    from zoneinfo import ZoneInfo
+
+    from app.utils.timezone import ph_to_utc, utc_to_ph
+
+    if not value:
+        return datetime.utcnow()
+    try:
+        day = datetime.strptime(value.strip()[:10], "%Y-%m-%d").date()
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Enter the release date as YYYY-MM-DD.")
+    today = datetime.now(ZoneInfo("Asia/Manila")).date()
+    if day > today:
+        raise HTTPException(status_code=400, detail="The release date can't be in the future.")
+    if request.approved_at and day < utc_to_ph(request.approved_at).date():
+        raise HTTPException(
+            status_code=400,
+            detail="The release date can't be before the cash advance was approved.",
+        )
+    if day == today:
+        return datetime.utcnow()
+    # A past day: noon PH, so it stays on that date in every view.
+    return ph_to_utc(datetime.combine(day, datetime.min.time()).replace(hour=12))
+
+
 @router.post("/{request_id}/release")
 def set_release_info(
     request_id: int,
@@ -1410,7 +1437,7 @@ def set_release_info(
     _ensure_terms_settled(request)
 
     request.release_reference = payload.release_reference.strip()
-    request.released_at = datetime.utcnow()
+    request.released_at = _release_moment(request, payload.released_date)
     request.released_by_user_id = current_user.id
 
     db.commit()
@@ -1565,6 +1592,9 @@ def upload_release_receipt(
     request_id: int,
     receipt: UploadFile = File(...),
     release_reference: str | None = Form(None),
+    # The day the money actually went out ("YYYY-MM-DD"); default now --
+    # not the day the photo is uploaded.
+    released_date: str | None = Form(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -1584,6 +1614,7 @@ def upload_release_receipt(
         raise HTTPException(status_code=403, detail="You can't add a receipt to this cash advance.")
     if not (receipt.content_type or "").startswith("image/"):
         raise HTTPException(status_code=400, detail="The receipt must be a photo.")
+    released_at = _release_moment(request, released_date)
 
     url = FileService().upload(receipt, f"cash_advance/{request.id}/receipt")
     db.add(
@@ -1599,7 +1630,7 @@ def upload_release_receipt(
         request.release_reference = release_reference.strip()[:255]
     elif not request.release_reference:
         request.release_reference = "Receipt photo"
-    request.released_at = datetime.utcnow()
+    request.released_at = released_at
     request.released_by_user_id = current_user.id
     db.commit()
     db.refresh(request)
