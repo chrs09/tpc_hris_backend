@@ -2083,22 +2083,7 @@ def replace_trip_file(
             status_code=400, detail="This file cannot be overridden here."
         )
 
-    trip_row = db.query(Trip).filter(Trip.id == trip_id).first()
-    if not _can_approve_trips(db, current_admin):
-        review = db.query(TripFinanceReview).filter(TripFinanceReview.trip_id == trip_id).first()
-        if not (review and review.resolver_user_id == current_admin.id and not review.resolved_at):
-            raise HTTPException(
-                status_code=403,
-                detail="You can only replace photos on a trip handed to you to fix.",
-            )
-    if not trip_row or trip_row.status != TripStatus.PENDING_APPROVAL:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "This trip is already approved, so its photos can't be "
-                "changed. Add a remark instead."
-            ),
-        )
+    trip_row = _doc_edit_trip(db, trip_id, current_admin)
 
     file_service = FileService()
     new_url = file_service.upload(
@@ -2417,6 +2402,168 @@ def mark_trip_fixed(
     review.resolved_note = (note or "").strip()[:1000] or None
     db.commit()
     return {"message": "Marked fixed. It's back in Trip Approvals.", **_fix_info(db, review)}
+
+
+def _doc_edit_trip(db: Session, trip_id: int, user) -> Trip:
+    """The trip whose documents `user` may correct: still in Trip
+    Approvals (PENDING_APPROVAL), and the user approves trips -- or is the
+    coordinator a returned trip was handed to fix."""
+    trip_row = db.query(Trip).filter(Trip.id == trip_id).first()
+    if not _can_approve_trips(db, user):
+        review = db.query(TripFinanceReview).filter(TripFinanceReview.trip_id == trip_id).first()
+        if not (review and review.resolver_user_id == user.id and not review.resolved_at):
+            raise HTTPException(
+                status_code=403,
+                detail="You can only change documents on a trip handed to you to fix.",
+            )
+    if not trip_row or trip_row.status != TripStatus.PENDING_APPROVAL:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "This trip is already approved, so its photos can't be "
+                "changed. Add a remark instead."
+            ),
+        )
+    return trip_row
+
+
+# The documents a driver uploads, as the driver's app does: Invoice and LM
+# can have several pages; the others are one photo (per trip, or per stop).
+MULTI_PAGE_DOCS = {"INVOICE_PHOTO": "Invoice", "LM_MANIFEST_PHOTO": "LM"}
+SINGLE_TRIP_DOCS = {
+    "LM_CHECKOUT_STAMPED_PHOTO": "Stamped LM (checkout)",
+    "STAMPED_INVOICE_PHOTO": "Stamped invoice (end of trip)",
+}
+SINGLE_STOP_DOCS = {"UNLOADING_PHOTO": "Unloading photo", "DELIVERY_PROOF_PHOTO": "Proof of delivery"}
+MAX_PAGES = 20
+
+
+# =========================
+# ADD DOCUMENT PAGES / A MISSING PHOTO
+#
+# Correcting a trip's documents the way the driver uploads them: more
+# Invoice or LM pages, or a photo the driver never sent (stamped LM,
+# stamped invoice, a stop's unloading / POD photo). Same rules as
+# replacing a photo (replace_trip_file).
+# =========================
+@router.post("/{trip_id}/files")
+def add_trip_files(
+    trip_id: int,
+    document_type: str = Form(...),
+    photos: list[UploadFile] = FastAPIFile(...),
+    stop_id: int | None = Form(None),
+    reason: str | None = Form(None),
+    db: Session = Depends(get_db),
+    current_admin=Depends(require_role_or_module(roles=["admin", "superadmin", "coordinator_admin", "coordinator"], module_key=["trip_management.trips", "trip_management.trip_dashboard"])),
+):
+    trip = _doc_edit_trip(db, trip_id, current_admin)
+    document_type = (document_type or "").upper()
+    if not photos:
+        raise HTTPException(status_code=400, detail="Pick at least one photo.")
+
+    if document_type in MULTI_PAGE_DOCS:
+        entity_type, entity_id = "trip", trip.id
+        existing = (
+            db.query(File)
+            .filter(File.entity_type == "trip", File.entity_id == trip.id, File.document_type == document_type)
+            .count()
+        )
+        if existing + len(photos) > MAX_PAGES:
+            raise HTTPException(status_code=400, detail=f"Up to {MAX_PAGES} pages per document.")
+        label = MULTI_PAGE_DOCS[document_type]
+    elif document_type in SINGLE_TRIP_DOCS or document_type in SINGLE_STOP_DOCS:
+        if len(photos) != 1:
+            raise HTTPException(status_code=400, detail="This document is one photo.")
+        if document_type in SINGLE_STOP_DOCS:
+            stop = (
+                db.query(TripStop).filter(TripStop.id == stop_id, TripStop.trip_id == trip.id).first()
+                if stop_id
+                else None
+            )
+            if not stop:
+                raise HTTPException(status_code=400, detail="Pick the stop this photo belongs to.")
+            entity_type, entity_id = "trip_stop", stop.id
+            label = SINGLE_STOP_DOCS[document_type]
+        else:
+            entity_type, entity_id = "trip", trip.id
+            label = SINGLE_TRIP_DOCS[document_type]
+        if (
+            db.query(File.id)
+            .filter(File.entity_type == entity_type, File.entity_id == entity_id, File.document_type == document_type)
+            .first()
+        ):
+            raise HTTPException(status_code=400, detail=f"{label} is already there -- replace it instead.")
+    else:
+        raise HTTPException(status_code=400, detail="Unknown document.")
+
+    file_service = FileService()
+    added = []
+    for photo in photos:
+        url = file_service.upload(photo, f"trips/{trip.id}/overrides/{document_type.lower()}")
+        row = File(
+            entity_type=entity_type,
+            entity_id=entity_id,
+            document_type=document_type,
+            file_url=url,
+            uploaded_by=current_admin.id,
+        )
+        db.add(row)
+        added.append(row)
+    db.add(
+        TripBypassLog(
+            trip_id=trip.id,
+            action="add-document",
+            performed_by_user_id=current_admin.id,
+            reason=(f"Added {len(added)} {label} photo(s)." + (f" {reason.strip()}" if reason and reason.strip() else ""))[:2000],
+        )
+    )
+    db.commit()
+    return {
+        "message": f"Added {len(added)} {label} {'page' if len(added) == 1 else 'pages'}."
+        if document_type in MULTI_PAGE_DOCS
+        else f"{label} uploaded.",
+        "file_ids": [r.id for r in added],
+    }
+
+
+# =========================
+# REMOVE A DOCUMENT PAGE
+#
+# An extra / wrong Invoice or LM page (e.g. the same page sent twice).
+# At least one page of each stays; single photos are replaced, not
+# removed. Logged with the removed photo's link so nothing is lost.
+# =========================
+@router.delete("/files/{file_id}")
+def remove_trip_file(
+    file_id: int,
+    db: Session = Depends(get_db),
+    current_admin=Depends(require_role_or_module(roles=["admin", "superadmin", "coordinator_admin", "coordinator"], module_key=["trip_management.trips", "trip_management.trip_dashboard"])),
+):
+    file_row = db.query(File).filter(File.id == file_id).first()
+    if not file_row or file_row.entity_type != "trip":
+        raise HTTPException(status_code=404, detail="File not found.")
+    if file_row.document_type not in MULTI_PAGE_DOCS:
+        raise HTTPException(status_code=400, detail="Only an extra Invoice or LM page can be removed. Replace this photo instead.")
+    trip = _doc_edit_trip(db, file_row.entity_id, current_admin)
+    pages = (
+        db.query(File)
+        .filter(File.entity_type == "trip", File.entity_id == trip.id, File.document_type == file_row.document_type)
+        .count()
+    )
+    label = MULTI_PAGE_DOCS[file_row.document_type]
+    if pages <= 1:
+        raise HTTPException(status_code=400, detail=f"At least one {label} page has to stay. Replace it instead.")
+    db.add(
+        TripBypassLog(
+            trip_id=trip.id,
+            action="remove-document",
+            performed_by_user_id=current_admin.id,
+            reason=f"Removed a {label} page (was {file_row.file_url})."[:2000],
+        )
+    )
+    db.delete(file_row)
+    db.commit()
+    return {"message": f"{label} page removed."}
 
 
 # =========================

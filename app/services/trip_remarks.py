@@ -60,6 +60,8 @@ BYPASS_ACTION_LABELS = {
     "edit": "Edited dispatch",
     "reorder": "Changed stop order",
     "change-store": "Changed a store on the trip",
+    "add-document": "Added document photos",
+    "remove-document": "Removed a document page",
     "cancel": "Cancelled trip",
     "manual-entry": "Manual trip entry",
     "manual-entry-approved": "Manual entry approved",
