@@ -40,6 +40,12 @@ class FuelRequest(Base):
     # Odometer reading (km) typed by the driver, next to the photo.
     # Optional so older app versions can still send requests.
     odometer_reading = Column(Integer, nullable=True)
+    # The unit fueled: the driver's assigned unit, the unit of their
+    # current trip, or one they picked because their unit is down (see
+    # _unit_options in app/api/fuel_requests.py). unit_reason says why
+    # when it isn't the assigned unit. Nullable for older rows.
+    vehicle_unit_id = Column(Integer, ForeignKey("tpc_vehicle_units.id"), nullable=True, index=True)
+    unit_reason = Column(Text, nullable=True)
 
     status = Column(String(30), nullable=False, default="pending", index=True)
 
@@ -85,5 +91,6 @@ class FuelRequest(Base):
 
     driver = relationship("User", foreign_keys=[user_id])
     employee = relationship("Employee", foreign_keys=[employee_id])
+    vehicle_unit = relationship("VehicleUnit", foreign_keys=[vehicle_unit_id])
     issued_by = relationship("User", foreign_keys=[issued_by_user_id])
     completed_by = relationship("User", foreign_keys=[completed_by_user_id])

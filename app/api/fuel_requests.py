@@ -32,7 +32,10 @@ from app.services.approval_chain import (
 )
 from app.models.user import User, UserRole
 from app.services.file_service import FileService
-from app.services.vehicle_assignment import assigned_unit_of
+from app.models.trips import Trip, TripStatus
+from app.models.vehicle_unit import VehicleUnit
+from app.services.fleet_status import unit_statuses
+from app.services.vehicle_assignment import assigned_unit_of, unit_label
 from app.utils.timezone import ph_to_utc, utc_to_ph
 from app.utils.user_display import display_name
 
@@ -95,6 +98,9 @@ def _serialize(req: FuelRequest, db: Session | None = None) -> dict:
         "city": req.city,
         "odo_photo_url": req.odo_photo_url,
         "odometer_reading": req.odometer_reading,
+        "vehicle_unit_id": req.vehicle_unit_id,
+        # Why it isn't the driver's assigned unit (None when it is).
+        "unit_reason": req.unit_reason,
         "fuel_code": req.fuel_code,
         "liters": float(req.liters) if req.liters is not None else None,
         "issued_by": display_name(req.issued_by) if req.issued_by else None,
@@ -167,31 +173,131 @@ def _decimal_in_range(value, label: str, maximum: int, places: str = "0.01") -> 
 # =====================================================================
 # DRIVER
 # =====================================================================
-@router.get("/my-unit")
-def my_fuel_unit(
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    """The driver's assigned unit (Trip Maintenance -> Assign driver). Its
-    plate is used for fuel requests; null when none is assigned (the
-    driver then types the plate)."""
-    unit = assigned_unit_of(db, current_user.id)
-    if not unit:
-        return None
+def _unit_brief(unit: VehicleUnit, status: dict | None = None) -> dict:
     return {
         "id": unit.id,
         "plate_number": unit.plate_number,
         "unit_code": unit.unit_code,
         "description": unit.description,
+        "status": status["status"] if status else None,
+        "status_label": status["status_label"] if status else None,
+        "status_reason": status["status_reason"] if status else None,
+        "assigned_driver_name": (
+            display_name(unit.assigned_driver) if unit.assigned_driver else None
+        ),
     }
+
+
+def _current_trip(db: Session, driver_user_id: int):
+    """The driver's trip in progress (else the next dispatched one)."""
+    trips = (
+        db.query(Trip)
+        .options(joinedload(Trip.vehicle_unit))
+        .filter(
+            Trip.driver_id == driver_user_id,
+            Trip.status.in_([TripStatus.ACTIVE, TripStatus.ASSIGNED]),
+            Trip.vehicle_unit_id.isnot(None),
+        )
+        .order_by(Trip.id.desc())
+        .all()
+    )
+    active = [t for t in trips if t.status == TripStatus.ACTIVE]
+    return (active or trips or [None])[0]
+
+
+def _unit_options(db: Session, user: User) -> dict:
+    """Which unit a fuel request is for:
+
+    - "trip":     the driver is on a trip in a unit other than their
+                  assigned one -> that unit (locked).
+    - "assigned": their assigned unit is fine -> it (locked).
+    - "pick":     their unit is down (breakdown / maintenance / hold /
+                  retired / in repair) or they have none -> they pick one
+                  of the available units (`choices`).
+    `reason` is saved on the request when it isn't the assigned unit.
+    """
+    assigned = assigned_unit_of(db, user.id)
+    trip = _current_trip(db, user.id)
+    assigned_status = unit_statuses(db, [assigned])[assigned.id] if assigned else None
+    assigned_down = bool(
+        assigned_status
+        and assigned_status["status"] in ("breakdown", "maintenance", "hold", "retired")
+    )
+
+    out = {
+        "mode": "pick",
+        "unit": None,
+        "reason": None,
+        "assigned_unit": _unit_brief(assigned, assigned_status) if assigned else None,
+        "trip_code": None,
+        "choices": [],
+    }
+
+    if trip is not None and (assigned is None or trip.vehicle_unit_id != assigned.id):
+        unit = trip.vehicle_unit
+        trip_ref = trip.trip_code or trip.ticket_no or f"#{trip.id}"
+        out.update(
+            mode="trip",
+            unit=_unit_brief(unit, unit_statuses(db, [unit])[unit.id]),
+            trip_code=trip_ref,
+            reason=(
+                f"On trip {trip_ref} in {unit_label(unit)}"
+                + (f" (assigned unit: {unit_label(assigned)})" if assigned else " (no assigned unit)")
+            ),
+        )
+        return out
+
+    if assigned is not None and not assigned_down:
+        out.update(mode="assigned", unit=out["assigned_unit"])
+        return out
+
+    # Pick from the units free right now (not down, not on a trip).
+    units = (
+        db.query(VehicleUnit)
+        .options(joinedload(VehicleUnit.assigned_driver).joinedload(User.employee))
+        .filter(VehicleUnit.is_active.is_(True))
+        .order_by(VehicleUnit.plate_number.asc())
+        .all()
+    )
+    statuses = unit_statuses(db, units)
+    choices = [
+        _unit_brief(u, statuses[u.id])
+        for u in units
+        if statuses[u.id]["status"] == "available" and (assigned is None or u.id != assigned.id)
+    ]
+    # Units nobody owns first -- less likely to be needed by their driver.
+    choices.sort(key=lambda c: (c["assigned_driver_name"] is not None, c["plate_number"] or ""))
+    out["choices"] = choices
+    if assigned is not None:
+        why = assigned_status["status_reason"]
+        out["reason"] = (
+            f"Assigned unit {unit_label(assigned)} is on {assigned_status['status_label']}"
+            + (f" ({why})" if why else "")
+        )
+    else:
+        out["reason"] = "No assigned unit"
+    return out
+
+
+@router.get("/unit-options")
+def fuel_unit_options(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """For the mobile Fuel form: the unit to fuel, or the units to pick
+    from when the driver's own unit is down. See _unit_options."""
+    return _unit_options(db, current_user)
 
 
 @router.post("")
 def create_fuel_request(
-    # Ignored when the driver has an assigned unit -- its plate is used.
-    plate_number: str | None = Form(None),
     city: str = Form(...),
     odo_photo: UploadFile = File(...),
+    # Only used when the driver has to pick ("pick" in /unit-options);
+    # otherwise the assigned / trip unit is used.
+    vehicle_unit_id: int | None = Form(None),
+    # Older app versions send a typed plate instead of a unit.
+    plate_number: str | None = Form(None),
     # Odometer reading in km (typed; the photo is the proof).
     odometer_reading: int | None = Form(None),
     db: Session = Depends(get_db),
@@ -200,8 +306,34 @@ def create_fuel_request(
     if not _is_driver(current_user):
         raise HTTPException(status_code=403, detail="Only drivers can request fuel.")
 
-    unit = assigned_unit_of(db, current_user.id)
-    plate_number = (unit.plate_number if unit else (plate_number or "")).strip().upper()
+    options = _unit_options(db, current_user)
+    unit_id = None
+    unit_reason = options["reason"]
+    if options["mode"] in ("assigned", "trip"):
+        unit_id = options["unit"]["id"]
+        plate_number = options["unit"]["plate_number"]
+    elif vehicle_unit_id is not None:
+        chosen = next((c for c in options["choices"] if c["id"] == vehicle_unit_id), None)
+        if chosen is None:
+            raise HTTPException(
+                status_code=400,
+                detail="That unit isn't available. Pull down to refresh and pick another.",
+            )
+        unit_id = chosen["id"]
+        plate_number = chosen["plate_number"]
+    else:
+        # Older app: typed plate. Link it to a unit when it matches one.
+        typed = (plate_number or "").strip().upper()
+        match = (
+            db.query(VehicleUnit).filter(VehicleUnit.plate_number == typed).first()
+            if typed
+            else None
+        )
+        unit_id = match.id if match else None
+        if not typed:
+            raise HTTPException(status_code=400, detail="Pick the unit you're fueling.")
+
+    plate_number = (plate_number or "").strip().upper()
     city = city.strip()
     if not plate_number:
         raise HTTPException(status_code=400, detail="Plate number is required.")
@@ -249,6 +381,8 @@ def create_fuel_request(
         user_id=current_user.id,
         employee_id=current_user.employee_id,
         plate_number=plate_number,
+        vehicle_unit_id=unit_id,
+        unit_reason=unit_reason,
         city=city,
         odo_photo_url="",
         odometer_reading=odometer_reading,
