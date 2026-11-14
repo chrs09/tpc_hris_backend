@@ -32,6 +32,7 @@ from app.services.approval_chain import (
 )
 from app.models.user import User, UserRole
 from app.services.file_service import FileService
+from app.services.vehicle_assignment import assigned_unit_of
 from app.utils.timezone import ph_to_utc, utc_to_ph
 from app.utils.user_display import display_name
 
@@ -105,6 +106,8 @@ def _serialize(req: FuelRequest, db: Session | None = None) -> dict:
         "cancel_reason": req.cancel_reason,
         "receipt_photo_url": req.receipt_photo_url,
         "receipt_submitted_at": _fmt(req.receipt_submitted_at),
+        "actual_liters": float(req.actual_liters) if req.actual_liters is not None else None,
+        "actual_price": float(req.actual_price) if req.actual_price is not None else None,
         "completed_by": display_name(req.completed_by) if req.completed_by else None,
         "completed_at": _fmt(req.completed_at),
         "note": req.note,
@@ -148,12 +151,45 @@ def _is_driver(user: User) -> bool:
     return user.role == UserRole.DRIVER or str(user.role).lower().endswith("driver")
 
 
+def _decimal_in_range(value, label: str, maximum: int, places: str = "0.01") -> Decimal:
+    try:
+        parsed = Decimal(str(value)).quantize(Decimal(places))
+    except (InvalidOperation, ValueError):
+        raise HTTPException(status_code=400, detail=f"Invalid {label.lower()}.")
+    if parsed <= 0 or parsed > maximum:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{label} must be more than 0 and at most {maximum:,}.",
+        )
+    return parsed
+
+
 # =====================================================================
 # DRIVER
 # =====================================================================
+@router.get("/my-unit")
+def my_fuel_unit(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """The driver's assigned unit (Trip Maintenance -> Assign driver). Its
+    plate is used for fuel requests; null when none is assigned (the
+    driver then types the plate)."""
+    unit = assigned_unit_of(db, current_user.id)
+    if not unit:
+        return None
+    return {
+        "id": unit.id,
+        "plate_number": unit.plate_number,
+        "unit_code": unit.unit_code,
+        "description": unit.description,
+    }
+
+
 @router.post("")
 def create_fuel_request(
-    plate_number: str = Form(...),
+    # Ignored when the driver has an assigned unit -- its plate is used.
+    plate_number: str | None = Form(None),
     city: str = Form(...),
     odo_photo: UploadFile = File(...),
     # Odometer reading in km (typed; the photo is the proof).
@@ -164,7 +200,8 @@ def create_fuel_request(
     if not _is_driver(current_user):
         raise HTTPException(status_code=403, detail="Only drivers can request fuel.")
 
-    plate_number = plate_number.strip().upper()
+    unit = assigned_unit_of(db, current_user.id)
+    plate_number = (unit.plate_number if unit else (plate_number or "")).strip().upper()
     city = city.strip()
     if not plate_number:
         raise HTTPException(status_code=400, detail="Plate number is required.")
@@ -247,6 +284,10 @@ def list_my_fuel_requests(
 def submit_fuel_receipt(
     request_id: int,
     receipt_photo: UploadFile = File(...),
+    # From the receipt: liters actually pumped and the total amount paid.
+    # Required by the app; optional here so older app versions still work.
+    actual_liters: float | None = Form(None),
+    actual_price: float | None = Form(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -261,7 +302,19 @@ def submit_fuel_receipt(
             detail="A receipt can only be sent after the fuel code is issued.",
         )
     _require_image(receipt_photo, "Receipt photo")
+    liters_value = (
+        _decimal_in_range(actual_liters, "Actual liters", 1000)
+        if actual_liters is not None
+        else None
+    )
+    price_value = (
+        _decimal_in_range(actual_price, "Actual price", 1_000_000)
+        if actual_price is not None
+        else None
+    )
 
+    req.actual_liters = liters_value
+    req.actual_price = price_value
     req.receipt_photo_url = FileService().upload(
         receipt_photo, f"fuel_requests/{req.id}/receipt"
     )

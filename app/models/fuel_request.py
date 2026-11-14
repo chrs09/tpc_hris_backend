@@ -55,6 +55,10 @@ class FuelRequest(Base):
     # After fueling
     receipt_photo_url = Column(String(500), nullable=True)
     receipt_submitted_at = Column(DateTime, nullable=True)
+    # Typed by the driver from the receipt: liters actually pumped and the
+    # total amount paid (PHP). Nullable for older rows / app versions.
+    actual_liters = Column(Numeric(10, 2), nullable=True)
+    actual_price = Column(Numeric(12, 2), nullable=True)
 
     completed_by_user_id = Column(Integer, ForeignKey("tpc_users.id"), nullable=True)
     completed_at = Column(DateTime, nullable=True)
