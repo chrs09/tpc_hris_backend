@@ -123,60 +123,69 @@ def require_role_or_module(roles: list[str], module_key: str | list[str]):
         if role_value == "superadmin":
             return current_user
 
-        # View-only grant ("Can edit: No" on the Org Chart): the module
-        # still opens, but any change is refused -- checked before the
-        # role shortcut below, so a role that would normally allow edits
-        # can't override it.
-        if (
-            request is not None
-            and request.method not in ("GET", "HEAD", "OPTIONS")
-            and current_user.employee_id
-        ):
-            from app.models.employees import Employee
-            from app.models.employee_module_access import EmployeeModuleAccess
+        # Local imports to avoid a circular import at module load time
+        # (employees/employee_module_access models import from elsewhere
+        # in app.models, which can chain back here).
+        from app.models.employees import Employee
+        from app.models.employee_module_access import EmployeeModuleAccess
+        from app.services.role_defaults import get_role_defaults
 
-            view_only = (
-                db.query(EmployeeModuleAccess.id)
-                .join(Employee, Employee.id == EmployeeModuleAccess.employee_id)
-                .filter(
-                    Employee.id == current_user.employee_id,
-                    Employee.has_custom_module_access.is_(True),
-                    EmployeeModuleAccess.module_key.in_(module_keys),
-                    EmployeeModuleAccess.can_edit.is_(False),
+        employee = (
+            db.query(Employee).filter(Employee.id == current_user.employee_id).first()
+            if current_user.employee_id
+            else None
+        )
+        custom = bool(employee and employee.has_custom_module_access)
+        # Administrator -> Role Access: the role's saved defaults, for
+        # people without custom access (None = built-in defaults only).
+        role_defaults = None if custom else get_role_defaults(db, role_value)
+
+        # View-only ("Can edit: No" on the Org Chart, or on the role's
+        # defaults): the module still opens, but any change is refused --
+        # checked before the role shortcut below, so a role that would
+        # normally allow edits can't override it.
+        if request is not None and request.method not in ("GET", "HEAD", "OPTIONS"):
+            if custom:
+                view_only = (
+                    db.query(EmployeeModuleAccess.id)
+                    .filter(
+                        EmployeeModuleAccess.employee_id == employee.id,
+                        EmployeeModuleAccess.module_key.in_(module_keys),
+                        EmployeeModuleAccess.can_edit.is_(False),
+                    )
+                    .first()
                 )
-                .first()
-            )
-            if view_only and not has_editable_grant(db, current_user, module_keys):
-                raise HTTPException(
-                    status_code=403,
-                    detail="You have view-only access to this module.",
-                )
+                if view_only and not has_editable_grant(db, current_user, module_keys):
+                    raise HTTPException(
+                        status_code=403,
+                        detail="You have view-only access to this module.",
+                    )
+            elif role_defaults:
+                editable = role_defaults["module_keys"] - role_defaults["read_only_keys"]
+                if set(module_keys) & role_defaults["read_only_keys"] and not (
+                    set(module_keys) & editable
+                ):
+                    raise HTTPException(
+                        status_code=403,
+                        detail="You have view-only access to this module.",
+                    )
 
         if role_value in roles:
             return current_user
 
-        if current_user.employee_id:
-            # Local imports to avoid a circular import at module load time
-            # (employees/employee_module_access models import from
-            # elsewhere in app.models, which can chain back here).
-            from app.models.employees import Employee
-            from app.models.employee_module_access import EmployeeModuleAccess
-
-            employee = (
-                db.query(Employee).filter(Employee.id == current_user.employee_id).first()
-            )
-
-            if employee and employee.has_custom_module_access:
-                granted = (
-                    db.query(EmployeeModuleAccess)
-                    .filter(
-                        EmployeeModuleAccess.employee_id == employee.id,
-                        EmployeeModuleAccess.module_key.in_(module_keys),
-                    )
-                    .first()
+        if custom:
+            granted = (
+                db.query(EmployeeModuleAccess)
+                .filter(
+                    EmployeeModuleAccess.employee_id == employee.id,
+                    EmployeeModuleAccess.module_key.in_(module_keys),
                 )
-                if granted:
-                    return current_user
+                .first()
+            )
+            if granted:
+                return current_user
+        elif role_defaults and set(module_keys) & role_defaults["module_keys"]:
+            return current_user
 
         raise HTTPException(
             status_code=403,

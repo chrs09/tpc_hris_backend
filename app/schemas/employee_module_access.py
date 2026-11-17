@@ -10,3 +10,10 @@ class ModuleAccessSet(BaseModel):
     # Payroll: the payroll groups they may work on ([] = all). Omit to
     # keep what they had.
     payroll_groups: list[str] | None = None
+
+
+class RoleDefaultsSet(BaseModel):
+    """Administrator -> Role Access: a role's default modules."""
+
+    module_keys: list[str]
+    read_only_keys: list[str] = []

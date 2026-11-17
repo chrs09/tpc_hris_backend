@@ -89,6 +89,7 @@ from .overtime_approver import OvertimeApprover as OvertimeApprover
 from .overtime_request import OvertimeRequest as OvertimeRequest
 from .department_head import DepartmentHead as DepartmentHead
 from .employee_module_access import EmployeeModuleAccess as EmployeeModuleAccess
+from .role_module_default import RoleModuleDefault as RoleModuleDefault
 from .mobile_page_access import MobilePageAccess as MobilePageAccess
 from .cash_advance_deduction_option import (
     CashAdvanceDeductionOption as CashAdvanceDeductionOption,

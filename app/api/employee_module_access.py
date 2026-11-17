@@ -6,11 +6,18 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.dependencies import require_superadmin, get_current_user
-from app.models.user import User
+from app.models.user import User, UserRole
 from app.models.employees import Employee
 from app.models.employee_module_access import EmployeeModuleAccess
-from app.schemas.employee_module_access import ModuleAccessSet
+from app.models.role_module_default import RoleModuleDefault
+from app.schemas.employee_module_access import ModuleAccessSet, RoleDefaultsSet
 from app.services.payroll_scope import PAYROLL_MODULE, load_groups
+from app.services.role_defaults import (
+    PER_PERSON_KEYS,
+    get_role_defaults,
+    role_value,
+    serialize_row,
+)
 
 router = APIRouter(prefix="/employee-module-access", tags=["Employee Module Access"])
 
@@ -322,6 +329,92 @@ def reset_employee_module_access(
     return {"employee_id": employee_id, "module_keys": [], "has_custom_access": False}
 
 
+# =====================================================================
+# ROLE DEFAULTS (Administrator -> Role Access)
+# =====================================================================
+# Roles whose defaults can be set (superadmin always has everything).
+EDITABLE_ROLES = [r.value for r in UserRole if r != UserRole.SUPERADMIN]
+
+
+def _role_counts(db: Session) -> dict:
+    """{role: {"following": n, "custom": n}} -- active people with a login,
+    by whether they follow the role's defaults or have their own."""
+    rows = (
+        db.query(User.role, Employee.has_custom_module_access)
+        .join(Employee, Employee.id == User.employee_id)
+        .filter(Employee.is_active == 1)
+        .all()
+    )
+    counts: dict[str, dict[str, int]] = {}
+    for role, custom in rows:
+        bucket = counts.setdefault(role_value(role), {"following": 0, "custom": 0})
+        bucket["custom" if custom else "following"] += 1
+    return counts
+
+
+@router.get("/role-defaults")
+def list_role_defaults(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_superadmin),
+):
+    """Every configured role's default modules (roles not listed keep the
+    built-in defaults), plus how many people follow each role."""
+    rows = db.query(RoleModuleDefault).all()
+    return {
+        "roles": {row.role: serialize_row(row) for row in rows},
+        "counts": _role_counts(db),
+        "editable_roles": EDITABLE_ROLES,
+        "per_person_keys": sorted(PER_PERSON_KEYS),
+    }
+
+
+@router.put("/role-defaults/{role}")
+def set_role_defaults(
+    role: str,
+    payload: RoleDefaultsSet,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_superadmin),
+):
+    """Save a role's default modules. Applies right away to everyone with
+    the role who has no custom access, and to anyone added later."""
+    if role not in EDITABLE_ROLES:
+        raise HTTPException(status_code=400, detail="That role's access can't be changed.")
+    invalid = [k for k in payload.module_keys if k not in ALL_MODULE_KEYS]
+    if invalid:
+        raise HTTPException(
+            status_code=400, detail=f"Unknown module key(s): {', '.join(invalid)}"
+        )
+    # Per-person actions (payroll steps, approving trip charges) are left
+    # out -- they only ever come from a person's own grant.
+    keys = sorted(set(payload.module_keys) - PER_PERSON_KEYS)
+    read_only = sorted(set(payload.read_only_keys) & set(keys))
+
+    row = db.get(RoleModuleDefault, role)
+    if row is None:
+        row = RoleModuleDefault(role=role)
+        db.add(row)
+    row.module_keys = json.dumps(keys)
+    row.read_only_keys = json.dumps(read_only)
+    row.updated_by_user_id = current_user.id
+    db.commit()
+    db.refresh(row)
+    return serialize_row(row)
+
+
+@router.delete("/role-defaults/{role}")
+def reset_role_defaults(
+    role: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_superadmin),
+):
+    """Back to the built-in defaults for that role."""
+    row = db.get(RoleModuleDefault, role)
+    if row is not None:
+        db.delete(row)
+        db.commit()
+    return {"role": role, "configured": False}
+
+
 @router.get("/mine")
 def get_my_module_access(
     db: Session = Depends(get_db),
@@ -343,8 +436,21 @@ def get_my_module_access(
         if current_user.employee_id
         else None
     )
+    # No custom access: the role's saved defaults (Role Access), if any.
+    # has_custom_access stays False -- it still means "their own grants"
+    # (older app builds rely on that); uses_role_defaults says to use
+    # module_keys as the role's set.
+    if not employee or not employee.has_custom_module_access:
+        defaults = get_role_defaults(db, current_user.role)
+        if defaults is not None:
+            return {
+                "module_keys": sorted(defaults["module_keys"]),
+                "read_only_keys": sorted(defaults["read_only_keys"]),
+                "has_custom_access": False,
+                "uses_role_defaults": True,
+            }
     if not employee:
-        return {"module_keys": [], "has_custom_access": False}
+        return {"module_keys": [], "has_custom_access": False, "uses_role_defaults": False}
 
     rows = (
         db.query(EmployeeModuleAccess)
@@ -355,4 +461,5 @@ def get_my_module_access(
         "module_keys": [r.module_key for r in rows],
         "read_only_keys": [r.module_key for r in rows if not r.can_edit],
         "has_custom_access": employee.has_custom_module_access,
+        "uses_role_defaults": False,
     }
