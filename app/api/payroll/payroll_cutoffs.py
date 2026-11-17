@@ -12,7 +12,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.dependencies import require_role_or_module
+from app.core.dependencies import get_current_user, require_role_or_module
 from app.models.employees import Employee
 from app.models.payroll_cutoff_rule import PayrollCutoffRule
 from app.models.user import User
@@ -63,6 +63,38 @@ def _payout_day(value, label):
             status_code=400, detail=f"{label} must be 1-31, or 0 for month end."
         )
     return value
+
+
+@router.get("/trip-periods")
+def trip_periods(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Pay periods for the trip filters (Trip Approvals, a driver's
+    Trips), with paydays -- the same cutoffs the Payroll page uses.
+
+    mine:   the logged-in person's own group (drivers / helpers), or None
+    groups: every group with a cutoff rule, for the admin page
+    Only cutoff days and paydays -- nothing sensitive, so any login."""
+    from app.services.payroll_cutoffs import employee_rule, recent_periods
+    from app.services.trip_payroll_service import now_ph
+
+    today = now_ph().date()
+    mine = None
+    employee = db.get(Employee, current_user.employee_id) if current_user.employee_id else None
+    if employee is not None:
+        rule = employee_rule(db, employee)
+        mine = {
+            "group": rule.department if rule else (employee.department or None),
+            "periods": recent_periods(rule, today),
+        }
+    rules = db.query(PayrollCutoffRule).order_by(PayrollCutoffRule.department).all()
+    return {
+        "mine": mine,
+        "groups": [
+            {"group": r.department, "periods": recent_periods(r, today)} for r in rules
+        ],
+    }
 
 
 @router.get("")

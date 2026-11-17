@@ -54,21 +54,75 @@ def cutoff_containing(rule: PayrollCutoffRule | None, day: date) -> tuple[date, 
     return start, end
 
 
-def employee_cutoff(db: Session, employee, day: date) -> tuple[date, date]:
-    """The cutoff `day` falls in for this employee: their payroll group's
-    rule, else their department's."""
+def employee_rule(db: Session, employee) -> PayrollCutoffRule | None:
+    """This employee's cutoff rule: their payroll group's, else their
+    department's (None = no rule set)."""
     from app.services.payroll_groups import payroll_key
 
     department = getattr(employee, "department", None)
-    rule = None
-    if department:
-        names = [payroll_key(db, department, getattr(employee, "payroll_type", None)), department]
-        for name in names:
-            rule = (
-                db.query(PayrollCutoffRule)
-                .filter(PayrollCutoffRule.department == name)
-                .first()
-            )
-            if rule:
-                break
-    return cutoff_containing(rule, day)
+    if not department:
+        return None
+    names = [payroll_key(db, department, getattr(employee, "payroll_type", None)), department]
+    for name in names:
+        rule = (
+            db.query(PayrollCutoffRule)
+            .filter(PayrollCutoffRule.department == name)
+            .first()
+        )
+        if rule:
+            return rule
+    return None
+
+
+def employee_cutoff(db: Session, employee, day: date) -> tuple[date, date]:
+    """The cutoff `day` falls in for this employee: their payroll group's
+    rule, else their department's."""
+    return cutoff_containing(employee_rule(db, employee), day)
+
+
+def _payout_on(year: int, month: int, day: int | None) -> date:
+    """Day of a month, clamped; 0 / None = the last day (same as the web)."""
+    if not day:
+        return _month_end(year, month)
+    return _safe_day(year, month, day)
+
+
+def payout_date(rule: PayrollCutoffRule | None, start: date, end: date) -> date | None:
+    """Payday of the cutoff start..end -- same maths as the web's
+    cutoffRules.js. None when there's no rule (no payday set)."""
+    if rule is None:
+        return None
+    if rule.schedule_type == "weekly":
+        return end + timedelta(days=rule.payout_offset_days or 0)
+    if rule.schedule_type == "monthly":
+        return _payout_on(start.year, start.month, rule.first_payout_day)
+    s1 = rule.first_start_day or 1
+    if start.day == s1:
+        # First cutoff of the month: paid that month.
+        return _payout_on(start.year, start.month, rule.first_payout_day)
+    # Second cutoff: paid the month after it starts.
+    year, month = _add_months(start.year, start.month, 1)
+    return _payout_on(year, month, rule.second_payout_day)
+
+
+def recent_periods(rule: PayrollCutoffRule | None, today: date, count: int = 24) -> list[dict]:
+    """Newest first, starting with the cutoff containing `today`:
+    [{"from", "to", "payout", "label"}] -- dates as "YYYY-MM-DD"."""
+    periods = []
+    cursor = today
+    for _ in range(count):
+        start, end = cutoff_containing(rule, cursor)
+        payout = payout_date(rule, start, end)
+        label = f"{start.strftime('%b %d')} - {end.strftime('%b %d, %Y')}"
+        if payout:
+            label += f" · Payday {payout.strftime('%b %d')}"
+        periods.append(
+            {
+                "from": start.isoformat(),
+                "to": end.isoformat(),
+                "payout": payout.isoformat() if payout else None,
+                "label": label,
+            }
+        )
+        cursor = start - timedelta(days=1)
+    return periods

@@ -206,18 +206,19 @@ def _current_trip(db: Session, driver_user_id: int):
 
 
 def _unit_options(db: Session, user: User) -> dict:
-    """Which unit a fuel request is for:
+    """Which unit a fuel request is for, same idea as Trip Dispatch:
 
-    - "trip":     the driver is on a trip in a unit other than their
-                  assigned one -> that unit (locked).
-    - "assigned": their assigned unit is fine -> it (locked).
-    - "pick":     their unit is down (breakdown / maintenance / hold /
-                  retired / in repair) or they have none -> they pick one
-                  of the available units (`choices`).
+    - "assigned": their assigned unit (Trip Maintenance -> Assign driver),
+                  when it's fine -> it (locked). Always first.
+    - "trip":     their assigned unit is down (under repair, breakdown,
+                  maintenance, hold, retired) or they have none, and Trip
+                  Dispatch put them on a trip in another unit -> that
+                  unit (locked).
+    - "pick":     down / no assigned unit and no dispatched trip -> they
+                  pick one of the available units (`choices`).
     `reason` is saved on the request when it isn't the assigned unit.
     """
     assigned = assigned_unit_of(db, user.id)
-    trip = _current_trip(db, user.id)
     assigned_status = unit_statuses(db, [assigned])[assigned.id] if assigned else None
     assigned_down = bool(
         assigned_status
@@ -233,6 +234,23 @@ def _unit_options(db: Session, user: User) -> dict:
         "choices": [],
     }
 
+    if assigned is not None and not assigned_down:
+        out.update(mode="assigned", unit=out["assigned_unit"])
+        return out
+
+    # Why it isn't their assigned unit (also used for "pick" below).
+    if assigned is not None:
+        why = assigned_status["status_reason"]
+        not_assigned_reason = (
+            f"Assigned unit {unit_label(assigned)} is on {assigned_status['status_label']}"
+            + (f" ({why})" if why else "")
+        )
+    else:
+        not_assigned_reason = "No assigned unit"
+
+    # The unit Trip Dispatch gave them (trip in progress, else the next
+    # dispatched one).
+    trip = _current_trip(db, user.id)
     if trip is not None and (assigned is None or trip.vehicle_unit_id != assigned.id):
         unit = trip.vehicle_unit
         trip_ref = trip.trip_code or trip.ticket_no or f"#{trip.id}"
@@ -240,15 +258,8 @@ def _unit_options(db: Session, user: User) -> dict:
             mode="trip",
             unit=_unit_brief(unit, unit_statuses(db, [unit])[unit.id]),
             trip_code=trip_ref,
-            reason=(
-                f"On trip {trip_ref} in {unit_label(unit)}"
-                + (f" (assigned unit: {unit_label(assigned)})" if assigned else " (no assigned unit)")
-            ),
+            reason=f"{not_assigned_reason}; using {unit_label(unit)} from trip {trip_ref}",
         )
-        return out
-
-    if assigned is not None and not assigned_down:
-        out.update(mode="assigned", unit=out["assigned_unit"])
         return out
 
     # Pick from the units free right now (not down, not on a trip).
@@ -268,14 +279,7 @@ def _unit_options(db: Session, user: User) -> dict:
     # Units nobody owns first -- less likely to be needed by their driver.
     choices.sort(key=lambda c: (c["assigned_driver_name"] is not None, c["plate_number"] or ""))
     out["choices"] = choices
-    if assigned is not None:
-        why = assigned_status["status_reason"]
-        out["reason"] = (
-            f"Assigned unit {unit_label(assigned)} is on {assigned_status['status_label']}"
-            + (f" ({why})" if why else "")
-        )
-    else:
-        out["reason"] = "No assigned unit"
+    out["reason"] = not_assigned_reason
     return out
 
 
