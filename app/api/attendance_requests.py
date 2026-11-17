@@ -389,12 +389,43 @@ def _times(day: date, time_in: str | None, time_out: str | None, record) -> tupl
     if start is None and end is None:
         raise HTTPException(status_code=400, detail="Enter the time in, the time out, or both.")
     reference = start or (record.check_in_time if record else None)
+    next_morning = False
     if end is not None and reference is not None and end <= reference:
         end += timedelta(days=1)
+        next_morning = True
     now = datetime.utcnow()
-    if (start and start > now) or (end and end > now):
-        raise HTTPException(status_code=400, detail="A time can't be in the future.")
+    # Say which time and why -- "a time can't be in the future" alone left
+    # people retrying the same thing (e.g. filling Time out on the same
+    # morning they only meant to fix the time in).
+    if start and start > now:
+        raise HTTPException(
+            status_code=400,
+            detail=f"The time in ({_ph_clock(start)}) hasn't happened yet.",
+        )
+    if end and end > now:
+        if next_morning:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"The time out ({_ph_clock(end)}) is earlier than the time in "
+                    f"({_ph_clock(reference)}), so it counts as the next morning -- "
+                    "which hasn't happened yet. To fix your time in, put it under "
+                    "Time in instead."
+                ),
+            )
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"The time out ({_ph_clock(end)}) hasn't happened yet. Leave Time out "
+                "blank -- time out as usual, or file it after."
+            ),
+        )
     return start, end
+
+
+def _ph_clock(value: datetime) -> str:
+    """Naive UTC -> "7:13 AM" PH."""
+    return UTC.localize(value).astimezone(PH_TZ).strftime("%I:%M %p").lstrip("0")
 
 
 def _correction_payload(db: Session, c: TimeCorrectionRequest, user: User | None = None, sees_all=False) -> dict:
