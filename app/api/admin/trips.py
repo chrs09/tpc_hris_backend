@@ -58,6 +58,7 @@ from app.api.driver.trips import (
     MAX_SHIPMENT_NUMBERS,
 )
 from app.models.vehicle_unit import VehicleUnit
+from app.services.trip_date_filter import filter_trip_dates
 from app.models.truck_type import TruckType
 from app.models.TripRate import TripRateProfile
 from app.services.vehicle_assignment import check_unit_for_trip, trip_unit_flags
@@ -306,9 +307,12 @@ def get_available_drivers(
 # =========================
 @router.get("/pending")
 def get_pending_trips(
+    cutoff: str | None = Query(None),
+    date_from: str | None = Query(None),
+    date_to: str | None = Query(None),
     db: Session = Depends(get_db), current_admin=Depends(require_role_or_module(roles=["admin", "superadmin", "coordinator_admin"], module_key="trip_management.trips"))
 ):
-    trips = (
+    query = (
         db.query(Trip)
         .options(joinedload(Trip.driver))
         .filter(
@@ -320,6 +324,9 @@ def get_pending_trips(
             ),
             Trip.is_archived.is_(False),
         )
+    )
+    trips = (
+        filter_trip_dates(query, cutoff, date_from, date_to)
         .order_by(Trip.start_time.desc())
         .all()
     )
@@ -2611,16 +2618,22 @@ def add_trip_remark(
 
 @router.get("/completed")
 def get_completed_trips(
+    cutoff: str | None = Query(None),
+    date_from: str | None = Query(None),
+    date_to: str | None = Query(None),
     db: Session = Depends(get_db),
     current_admin=Depends(require_role_or_module(roles=["admin", "superadmin", "coordinator_admin"], module_key="trip_management.trips")),
 ):
-    trips = (
+    query = (
         db.query(Trip)
         .options(joinedload(Trip.driver))
         .filter(
             Trip.status == TripStatus.COMPLETED,
             Trip.is_archived.is_(False),
         )
+    )
+    trips = (
+        filter_trip_dates(query, cutoff, date_from, date_to)
         .order_by(Trip.end_time.desc())
         .all()
     )

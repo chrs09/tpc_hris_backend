@@ -323,7 +323,14 @@ async def create_manual_entry(
         )
 
     # No overlap with the same driver's other trips -- two trips at once
-    # for one driver is almost always a typing mistake.
+    # for one driver is almost always a typing mistake. Exemptions:
+    # - the other trip is still in progress in the app: always allowed
+    #   (noted on the entry);
+    # - the other trip is finished but really was still open then (e.g.
+    #   deliveries done Nov 14, checked in at the hub Nov 16, special trip
+    #   on Nov 15): allow_overlap + overlap_reason lets it through.
+    # Either way the note goes into the entry's reason, which the
+    # approving superadmin and Trip Document see.
     other_trips = (
         db.query(Trip)
         .filter(
@@ -333,17 +340,47 @@ async def create_manual_entry(
         )
         .all()
     )
-    for other in other_trips:
-        other_end = other.end_time or datetime.utcnow()
-        if other.start_time < end_time and start_time < other_end:
+    overlapping = [
+        other
+        for other in other_trips
+        if other.start_time < end_time and start_time < (other.end_time or datetime.utcnow())
+    ]
+    # A trip the driver still has open in the app (not checked in yet)
+    # never blocks a manual entry / special trip -- the driver may well
+    # have done this one while that trip stays open. Noted on the entry.
+    in_progress = [o for o in overlapping if o.end_time is None or o.status == TripStatus.ACTIVE]
+    overlaps = [o for o in overlapping if o not in in_progress]
+    if in_progress:
+        reason = (
+            f"{reason} | Driver had trip "
+            + ", ".join(
+                f"{o.trip_code or o.id} (started {_fmt(o.start_time)})" for o in in_progress
+            )
+            + " in progress in the app"
+        )[:1000]
+    if overlaps:
+        allow_overlap = str(form.get("allow_overlap") or "").lower() in ("true", "1", "yes")
+        overlap_reason = (form.get("overlap_reason") or "").strip()
+        described = "; ".join(
+            f"{other.trip_code or other.id} ({_fmt(other.start_time)} to "
+            f"{_fmt(other.end_time) or 'still in progress'})"
+            for other in overlaps
+        )
+        if not allow_overlap:
+            # 409 so the form knows to offer the exemption.
             raise HTTPException(
-                status_code=400,
+                status_code=409,
                 detail=(
-                    f"This overlaps the driver's trip {other.trip_code or other.id} "
-                    f"({_fmt(other.start_time)} to "
-                    f"{_fmt(other.end_time) or 'still in progress'})."
+                    f"This overlaps the driver's trip {described}. If both trips "
+                    "really happened (e.g. the driver checked in late on that trip), "
+                    "tick Allow overlap and say why."
                 ),
             )
+        if len(overlap_reason) < 5:
+            raise HTTPException(
+                status_code=400, detail="Say why this trip overlaps the driver's other trip."
+            )
+        reason = f"{reason} | Overlaps {described}: {overlap_reason}"[:1000]
 
     # ---- shipment numbers (a special trip gets an ST- code instead)
     is_special = str(form.get("is_special") or "").lower() in ("true", "1", "yes")

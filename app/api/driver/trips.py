@@ -2054,6 +2054,10 @@ def driver_trip_summary(
 @router.get("/my-trips")
 def get_my_trips(
     cutoff: str | None = Query(None),
+    # Or a PH date range ("YYYY-MM-DD", either end optional) -- web
+    # driver Trips page's Custom dates (app/services/trip_date_filter.py).
+    date_from: str | None = Query(None),
+    date_to: str | None = Query(None),
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
@@ -2079,6 +2083,10 @@ def get_my_trips(
             Trip.start_time >= start_utc,
             Trip.start_time <= end_utc,
         )
+    elif date_from or date_to:
+        from app.services.trip_date_filter import filter_trip_dates
+
+        query = filter_trip_dates(query, None, date_from, date_to)
 
     trips = query.order_by(Trip.start_time.desc()).all()
 
