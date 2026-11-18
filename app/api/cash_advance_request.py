@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from math import ceil
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
@@ -1089,6 +1089,8 @@ def list_deduction_history(
             "source": (
                 "adjustment"
                 if log.entry_type == "adjustment"
+                else "reversal"
+                if log.entry_type == "reversal"
                 else "payroll" if cutoff else "manual"
             ),
             "cutoff_period": cutoff,
@@ -1269,6 +1271,84 @@ def adjust_cash_advance(
     return _serialize(request, db)
 
 
+REVERSAL_MARK = "[reverses #{}]"
+
+
+@router.post("/{request_id}/transactions/{log_id}/reverse")
+def reverse_deduction(
+    request_id: int,
+    log_id: int,
+    reason: str = Body(..., embed=True),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(
+        require_role_or_module(roles=[], module_key="finance.cash_advance")
+    ),
+):
+    """Takes back one recorded deduction that was never actually taken
+    from pay -- e.g. payroll posted the default per-pay amount while the
+    payroll feature wasn't really used yet. Adds a "reversal" entry for
+    the opposite amount, so the balance goes back up and both entries stay
+    in the history; what's owed (approved / adjusted amount) doesn't change.
+    A payroll entry's reversal keeps its cutoff, so regenerating that
+    cutoff replaces both together."""
+    request = (
+        db.query(CashAdvanceRequest)
+        .filter(CashAdvanceRequest.id == request_id)
+        .with_for_update()
+        .first()
+    )
+    if not request:
+        raise HTTPException(status_code=404, detail="Cash advance request not found")
+    log = (
+        db.query(CashAdvanceDeductionLog)
+        .filter(
+            CashAdvanceDeductionLog.id == log_id,
+            CashAdvanceDeductionLog.cash_advance_request_id == request_id,
+        )
+        .first()
+    )
+    if not log:
+        raise HTTPException(status_code=404, detail="Deduction not found.")
+    if (log.entry_type or "deduction") != "deduction" or float(log.amount) <= 0:
+        raise HTTPException(status_code=400, detail="Only a deduction can be reversed.")
+    mark = REVERSAL_MARK.format(log.id)
+    already = (
+        db.query(CashAdvanceDeductionLog.id)
+        .filter(
+            CashAdvanceDeductionLog.cash_advance_request_id == request_id,
+            CashAdvanceDeductionLog.entry_type == "reversal",
+            CashAdvanceDeductionLog.note.like(f"{mark}%"),
+        )
+        .first()
+    )
+    if already:
+        raise HTTPException(status_code=400, detail="This deduction was already reversed.")
+    reason = (reason or "").strip()
+    if not reason:
+        raise HTTPException(status_code=400, detail="Give the reason for reversing it.")
+
+    amount = float(log.amount)
+    db.add(
+        CashAdvanceDeductionLog(
+            cash_advance_request_id=request.id,
+            amount=-log.amount,
+            note=f"{mark} {reason}"[:2000],
+            recorded_by_user_id=current_user.id,
+            entry_type="reversal",
+            payroll_cutoff_period=log.payroll_cutoff_period,
+        )
+    )
+    request.approval_log = append_log(
+        request.approval_log,
+        current_user,
+        "reversed",
+        f"Deduction of ₱{amount:,.2f} added back: {reason}",
+    )
+    db.commit()
+    db.refresh(request)
+    return _serialize(request, db)
+
+
 @router.get("/{request_id}/transactions")
 def get_deduction_transactions(
     request_id: int,
@@ -1296,12 +1376,22 @@ def get_deduction_transactions(
         .order_by(CashAdvanceDeductionLog.recorded_at.desc())
         .all()
     )
+    # Deductions already taken back (reverse_deduction above).
+    reversed_ids = set()
+    for log in logs:
+        if log.entry_type == "reversal" and (log.note or "").startswith("[reverses #"):
+            try:
+                reversed_ids.add(int(log.note.split("#", 1)[1].split("]", 1)[0]))
+            except (IndexError, ValueError):
+                pass
     return [
         {
             "id": log.id,
             "amount": float(log.amount),
             "entry_type": log.entry_type,
             "note": log.note,
+            "payroll_cutoff_period": log.payroll_cutoff_period,
+            "reversed": log.id in reversed_ids,
             "recorded_by_name": (
                 log.recorded_by.username if log.recorded_by else None
             ),
