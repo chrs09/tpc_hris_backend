@@ -1036,13 +1036,13 @@ def list_deduction_history(
 
     # Deductions already taken back (Reverse), so the row says so and
     # can't be reversed twice.
-    reversed_ids = {
-        rid
-        for log in logs
-        if log.entry_type == "reversal"
-        for rid in [_reversed_log_id(log.note)]
-        if rid is not None
-    }
+    reversal_of = {}
+    for log in logs:
+        if log.entry_type == "reversal":
+            rid = _reversed_log_id(log.note)
+            if rid is not None:
+                reversal_of[rid] = log
+    reversed_ids = set(reversal_of)
 
     lo = ph_to_utc(datetime.combine(start, datetime.min.time())) if start else None
     hi = ph_to_utc(datetime.combine(end + timedelta(days=1), datetime.min.time())) if end else None
@@ -1123,6 +1123,22 @@ def list_deduction_history(
             "reference_no": req.reference_no,
             "entry_type": log.entry_type or "deduction",
             "reversed": log.id in reversed_ids,
+            # Shown on the reversed deduction itself (the "Added back" rows
+            # are hidden unless "Show reversals" is on).
+            "reversal": (
+                {
+                    "id": reversal_of[log.id].id,
+                    "recorded_at": _utc(reversal_of[log.id].recorded_at),
+                    "recorded_by_name": (
+                        display_name(reversal_of[log.id].recorded_by)
+                        if reversal_of[log.id].recorded_by
+                        else None
+                    ),
+                    "reason": (reversal_of[log.id].note or "").split("]", 1)[-1].strip(),
+                }
+                if log.id in reversal_of
+                else None
+            ),
             "balance_after": balance_after[log.id],
         })
     return rows

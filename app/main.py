@@ -93,6 +93,12 @@ app = FastAPI(
     version="1.0.0",
 )
 
+# Naive UTC timestamps go out with a "Z", so the web and mobile apps show
+# them in PH time (UTC+8) -- see app/core/utc_json.py.
+from app.core.utc_json import UtcJsonMiddleware  # noqa: E402
+
+app.add_middleware(UtcJsonMiddleware)
+
 
 # Any HTTP error response (4xx/5xx) triggers a Slack alert to
 # #production-errors -- every status code, not just a curated set. Set
