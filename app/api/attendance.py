@@ -417,8 +417,16 @@ def _missed_time_utc(record, hhmm: str) -> datetime:
     return out_utc.replace(tzinfo=None)
 
 
-def file_missed_time_out(db: Session, record, hhmm: str, reason: str, user: User | None):
-    reason = (reason or "").strip()
+MISSED_OUT_REFERENCE = "MISSED_TIME_OUT_REFERENCE"
+REFERENCE_NOTE = "Reference attached."
+
+
+def file_missed_time_out(
+    db: Session, record, hhmm: str, reason: str, user: User | None, has_reference: bool = False
+):
+    """has_reference: a reference file comes with it (kiosk) -- then the
+    reason can be left out."""
+    reason = (reason or "").strip() or (REFERENCE_NOTE if has_reference else "")
     if not reason:
         raise HTTPException(status_code=400, detail="Say why you didn't time out.")
     if record.check_out_time is not None or record.missed_out_filed_at is not None:
@@ -2520,6 +2528,52 @@ def kiosk_file_missed_time_out(
     }
 
 
+# Kiosk: the time they left plus a reference file (a photo or PDF -- e.g.
+# a screenshot of a message, a gate log) instead of typing a reason.
+REFERENCE_MAX_BYTES = 15 * 1024 * 1024
+REFERENCE_TYPES = ("image/", "application/pdf")
+
+
+@router.post("/kiosk/missed-time-out/reference")
+def kiosk_file_missed_time_out_with_reference(
+    employee_id: int = Form(...),
+    attendance_id: int = Form(...),
+    time_out: str = Form(...),
+    reference: UploadFile = File(...),
+    reason: str | None = Form(None),
+    db: Session = Depends(get_db),
+):
+    record = db.query(AttendanceRecord).filter(AttendanceRecord.id == attendance_id).first()
+    if not record or record.employee_id != employee_id:
+        raise HTTPException(status_code=404, detail="Attendance record not found.")
+    content_type = (reference.content_type or "").lower()
+    if not content_type.startswith(REFERENCE_TYPES):
+        raise HTTPException(status_code=400, detail="The reference has to be a photo or a PDF.")
+    reference.file.seek(0, 2)
+    size = reference.file.tell()
+    reference.file.seek(0)
+    if size > REFERENCE_MAX_BYTES:
+        raise HTTPException(status_code=400, detail="The reference file is too big (15 MB max).")
+    if size == 0:
+        raise HTTPException(status_code=400, detail="The reference file is empty.")
+    owner = db.query(User).filter(User.employee_id == employee_id).first()
+    file_missed_time_out(db, record, time_out, reason, owner, has_reference=True)
+    db.add(
+        FileModel(
+            entity_type="attendance",
+            entity_id=record.id,
+            document_type=MISSED_OUT_REFERENCE,
+            file_url=FileService().upload(reference, f"attendance/{record.id}/missed-time-out"),
+            uploaded_by=owner.id if owner else None,
+        )
+    )
+    db.commit()
+    return {
+        "message": "Sent to the head for approval.",
+        "missed_time_out": missed_payload(find_missed_time_out(db, employee_id)),
+    }
+
+
 def _my_part(db: Session, record, side: str, user: User) -> dict:
     """For the Approvals list: whose turn it is, and whether I already
     approved it (then it just waits for the next head -- no buttons,
@@ -2634,6 +2688,7 @@ def get_attendance_for_my_approval(
                                     if record.missed_out_requested_at
                                     else None,
                                     "reason": record.missed_out_reason,
+                                    "reference_url": photos.get((record.id, MISSED_OUT_REFERENCE)),
                                     "filed": True,
                                 }
                             }

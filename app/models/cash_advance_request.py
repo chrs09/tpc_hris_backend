@@ -11,7 +11,9 @@ from sqlalchemy import (
     String,
     Text,
 )
+from sqlalchemy import event
 from sqlalchemy.orm import relationship
+from sqlalchemy.orm.attributes import set_committed_value
 
 from app.core.database import Base
 
@@ -132,6 +134,10 @@ class CashAdvanceRequest(Base):
 
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
+    # "CA-2026-0014" (filed year + id): quoted when tracking an advance.
+    # Set right after insert (see _set_reference_no below).
+    reference_no = Column(String(20), nullable=True, unique=True, index=True)
+
     employee = relationship("Employee", foreign_keys=[employee_id])
     requester = relationship("User", foreign_keys=[user_id])
     requested_by = relationship("User", foreign_keys=[requested_by_user_id])
@@ -149,3 +155,22 @@ class CashAdvanceRequest(Base):
         back_populates="cash_advance_request",
         cascade="all, delete-orphan",
     )
+
+
+def make_reference_no(request_id: int, created_at) -> str:
+    year = created_at.year if created_at else datetime.utcnow().year
+    return f"CA-{year}-{request_id:04d}"
+
+
+@event.listens_for(CashAdvanceRequest, "after_insert")
+def _set_reference_no(mapper, connection, target):
+    """Every new cash advance gets its reference as soon as it has an id."""
+    if target.reference_no:
+        return
+    ref = make_reference_no(target.id, target.created_at)
+    connection.execute(
+        CashAdvanceRequest.__table__.update()
+        .where(CashAdvanceRequest.__table__.c.id == target.id)
+        .values(reference_no=ref)
+    )
+    set_committed_value(target, "reference_no", ref)

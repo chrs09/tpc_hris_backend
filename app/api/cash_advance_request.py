@@ -138,6 +138,7 @@ def _serialize(req: CashAdvanceRequest, db: Session) -> dict:
 
     return {
         "id": req.id,
+        "reference_no": req.reference_no,
         **_exception_fields(req),
         "employee_id": req.employee_id,
         "employee_name": (
@@ -1033,6 +1034,16 @@ def list_deduction_history(
         paid_so_far[req.id] = paid_so_far.get(req.id, 0) + float(log.amount)
         balance_after[log.id] = round(max(payable - paid_so_far[req.id], 0), 2)
 
+    # Deductions already taken back (Reverse), so the row says so and
+    # can't be reversed twice.
+    reversed_ids = {
+        rid
+        for log in logs
+        if log.entry_type == "reversal"
+        for rid in [_reversed_log_id(log.note)]
+        if rid is not None
+    }
+
     lo = ph_to_utc(datetime.combine(start, datetime.min.time())) if start else None
     hi = ph_to_utc(datetime.combine(end + timedelta(days=1), datetime.min.time())) if end else None
     shown = [
@@ -1109,6 +1120,9 @@ def list_deduction_history(
                 req.approved_amount if req.approved_amount is not None else req.amount
             ),
             "request_reason": req.reason,
+            "reference_no": req.reference_no,
+            "entry_type": log.entry_type or "deduction",
+            "reversed": log.id in reversed_ids,
             "balance_after": balance_after[log.id],
         })
     return rows
@@ -1272,6 +1286,16 @@ def adjust_cash_advance(
 
 
 REVERSAL_MARK = "[reverses #{}]"
+
+
+def _reversed_log_id(note: str | None) -> int | None:
+    """The deduction a reversal entry takes back (from its note's mark)."""
+    if not note or not note.startswith("[reverses #"):
+        return None
+    try:
+        return int(note.split("#", 1)[1].split("]", 1)[0])
+    except ValueError:
+        return None
 
 
 @router.post("/{request_id}/transactions/{log_id}/reverse")
