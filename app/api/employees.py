@@ -161,6 +161,24 @@ def get_employees(
         else []
     )
 
+    # Which government contributions payroll deducts (HRIS -> Government
+    # Contributions).
+    gov_flags = {
+        g.employee_id: {
+            "sss": bool(g.has_sss),
+            "philhealth": bool(g.has_philhealth),
+            "pagibig": bool(g.has_pagibig),
+            "tax": bool(g.has_tax),
+        }
+        for g in (
+            db.query(EmployeeGovernmentDetails)
+            .filter(EmployeeGovernmentDetails.employee_id.in_(employee_ids))
+            .all()
+            if employee_ids
+            else []
+        )
+    }
+
     files_map = {}
     for file in files:
         files_map.setdefault(file.entity_id, []).append(
@@ -191,6 +209,9 @@ def get_employees(
             ),
             "employment_type": emp.employment_type,
             "payroll_type": emp.payroll_type,
+            "contributions": gov_flags.get(
+                emp.id, {"sss": False, "philhealth": False, "pagibig": False, "tax": False}
+            ),
             "schedule_template_id": emp.schedule_template_id,
             "allow_schedule_change": bool(emp.allow_schedule_change),
             "schedule_template": (

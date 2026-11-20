@@ -129,7 +129,14 @@ def ensure_payroll_editable(db: Session, department, cutoff_period: str | None):
         )
         .all()
     )
-    run = next((r for r in runs if r.status not in ("DRAFT", "GENERATED", "FOR_REVIEW")), None)
+    run = next(
+        (
+            r
+            for r in runs
+            if r.status not in ("DRAFT", "GENERATED", "FOR_REVIEW", "CONTRIBUTIONS", "HEAD_REVIEW")
+        ),
+        None,
+    )
     if run:
         raise HTTPException(
             status_code=409,
@@ -165,10 +172,14 @@ def ensure_trip_unlocked(db: Session, trip, what: str = "this trip"):
 PAYROLL_PREPARE = "payroll.payroll_prepare"
 PAYROLL_APPROVE = "payroll.payroll_approve"
 PAYROLL_RELEASE = "payroll.payroll_release"
+# After For Review: edits SSS / PhilHealth / Pag-IBIG / tax only, then
+# sends the run to the head (Approve & Return) to approve.
+PAYROLL_CONTRIBUTIONS = "payroll.payroll_contributions"
 
 PAYROLL_STEP_LABELS = {
     PAYROLL_PREPARE: "Prepare & Submit",
     PAYROLL_APPROVE: "Approve & Return",
+    PAYROLL_CONTRIBUTIONS: "Government Contributions",
     PAYROLL_RELEASE: "Lock & Mark Paid",
 }
 

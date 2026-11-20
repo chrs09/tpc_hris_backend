@@ -49,14 +49,24 @@ MODULE_GROUPS = {
         # Attendance locations + perimeters, each employee's assigned
         # locations and minimum hours of duty (app/api/attendance_locations.py).
         "attendance_locations",
+        # Every employee's SSS / PhilHealth / Pag-IBIG / TIN and which
+        # contributions payroll deducts (app/api/gov_contributions.py).
+        "government_contributions",
     ],
     "payroll": [
         {
             "key": "payroll",
             # Payroll steps (app/api/payroll/payroll_runs.py) -- who
-            # prepares, who approves, who locks/pays. Role never grants
-            # these; only ticking them here does (superadmin always can).
-            "children": ["payroll_prepare", "payroll_approve", "payroll_release"],
+            # prepares, who approves, who locks/pays, and who edits the
+            # government contributions after For Review. Role never
+            # grants these; only ticking them here does (superadmin
+            # always can).
+            "children": [
+                "payroll_prepare",
+                "payroll_approve",
+                "payroll_contributions",
+                "payroll_release",
+            ],
         },
         "payroll_cutoffs",
         "contribution_tables",

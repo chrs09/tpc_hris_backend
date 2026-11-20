@@ -105,6 +105,9 @@ def _save_deduction(db: Session, payload: dict, user: User) -> PayrollDeduction:
 
         existing.pagibig_deduction = payload["pagibig_deduction"]
 
+        if "withholding_tax" in payload:
+            existing.withholding_tax = payload["withholding_tax"]
+
         existing.tardiness_deduction = payload.get("tardiness_deduction", 0)
 
         existing.undertime_deduction = payload.get("undertime_deduction", 0)
@@ -135,6 +138,7 @@ def _save_deduction(db: Session, payload: dict, user: User) -> PayrollDeduction:
         sss_deduction=payload["sss_deduction"],
         philhealth_deduction=payload["philhealth_deduction"],
         pagibig_deduction=payload["pagibig_deduction"],
+        withholding_tax=payload.get("withholding_tax"),
         tardiness_deduction=payload.get("tardiness_deduction", 0),
         undertime_deduction=payload.get("undertime_deduction", 0),
         absent_deduction=payload.get("absent_deduction", 0),

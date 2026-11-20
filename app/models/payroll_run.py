@@ -7,7 +7,12 @@ from app.core.database import Base
 class PayrollRun(Base):
     """The status of one department's payroll for one cutoff:
 
-        DRAFT -> GENERATED -> FOR_REVIEW -> APPROVED -> LOCKED -> PAID
+        DRAFT -> GENERATED -> FOR_REVIEW -> CONTRIBUTIONS -> HEAD_REVIEW
+              -> APPROVED -> LOCKED -> PAID
+
+    CONTRIBUTIONS: someone with Payroll -> Government Contributions edits
+    SSS / PhilHealth / Pag-IBIG / tax only, then sends it to the head
+    (HEAD_REVIEW), who approves.
 
     Generating can be repeated until APPROVED (the per-employee rows in
     payroll_deductions are upserted, never duplicated). Once LOCKED, the
@@ -38,6 +43,12 @@ class PayrollRun(Base):
     generated_by = Column(Integer, nullable=True)
     submitted_at = Column(DateTime, nullable=True)
     submitted_by = Column(Integer, nullable=True)
+    # For Review -> Contributions (forwarded) and Contributions -> Head
+    # Review (government contributions done).
+    reviewed_at = Column(DateTime, nullable=True)
+    reviewed_by = Column(Integer, nullable=True)
+    contributions_at = Column(DateTime, nullable=True)
+    contributions_by = Column(Integer, nullable=True)
     approved_at = Column(DateTime, nullable=True)
     approved_by = Column(Integer, nullable=True)
     locked_at = Column(DateTime, nullable=True)

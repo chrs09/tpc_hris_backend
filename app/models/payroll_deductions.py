@@ -38,6 +38,8 @@ class PayrollDeduction(Base):
     sss_deduction = Column(Numeric(12, 2), nullable=False, default=0)
     philhealth_deduction = Column(Numeric(12, 2), nullable=False, default=0)
     pagibig_deduction = Column(Numeric(12, 2), nullable=False, default=0)
+    # Null = not saved (payroll computes it); set from the Contributions step.
+    withholding_tax = Column(Numeric(12, 2), nullable=True)
     tardiness_deduction = Column(Numeric(12, 2), nullable=False, default=0)
     undertime_deduction = Column(Numeric(12, 2), nullable=False, default=0)
     absent_deduction = Column(Numeric(12, 2), nullable=False, default=0)

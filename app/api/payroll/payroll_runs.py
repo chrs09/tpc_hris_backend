@@ -32,6 +32,7 @@ from app.models.payroll_run import PayrollRun
 from app.models.payslip_release import PayslipRelease
 from app.services.payroll_lock import (
     PAYROLL_APPROVE,
+    PAYROLL_CONTRIBUTIONS,
     PAYROLL_PREPARE,
     PAYROLL_RELEASE,
     can_payroll,
@@ -53,7 +54,26 @@ _require_payroll = require_role_or_module(roles=["admin"], module_key="payroll.p
 # For Review the snapshot is what gets approved -- anything later (e.g. a
 # document after cutoff) goes in the next pay run. Return sends it back.
 EDITABLE_STATUSES = ("DRAFT", "GENERATED")
-STATUS_FLOW = ("DRAFT", "GENERATED", "FOR_REVIEW", "APPROVED", "LOCKED", "PAID")
+STATUS_FLOW = (
+    "DRAFT",
+    "GENERATED",
+    "FOR_REVIEW",
+    # Payroll -> Government Contributions edits SSS / PhilHealth /
+    # Pag-IBIG / tax only, then sends it to the head.
+    "CONTRIBUTIONS",
+    "HEAD_REVIEW",
+    "APPROVED",
+    "LOCKED",
+    "PAID",
+)
+# Contributions edits (SSS, PhilHealth, Pag-IBIG, tax): snapshot row key
+# -> payroll_deductions column.
+GOV_FIELDS = {
+    "sssDeduction": "sss_deduction",
+    "philhealthDeduction": "philhealth_deduction",
+    "pagibigDeduction": "pagibig_deduction",
+    "withholdingTax": "withholding_tax",
+}
 
 
 def _role(user: User) -> str:
@@ -116,13 +136,14 @@ def _serialize(db: Session, run: PayrollRun | None, user: User, department: str,
     can_prepare = can_payroll(db, user, PAYROLL_PREPARE)
     can_approve = can_payroll(db, user, PAYROLL_APPROVE)
     can_release = can_payroll(db, user, PAYROLL_RELEASE)
+    can_contrib = can_payroll(db, user, PAYROLL_CONTRIBUTIONS)
     is_superadmin = _role(user) == "superadmin"
     status = run.status if run else "DRAFT"
     names = _names(
         db,
         [
             run.generated_by, run.submitted_by, run.approved_by, run.locked_by, run.paid_by,
-            run.snapshot_by,
+            run.snapshot_by, run.reviewed_by, run.contributions_by,
         ]
         if run
         else [],
@@ -145,6 +166,8 @@ def _serialize(db: Session, run: PayrollRun | None, user: User, department: str,
         "total_net": float(run.total_net or 0) if run else 0,
         "generated": stamp("generated"),
         "submitted": stamp("submitted"),
+        "reviewed": stamp("reviewed"),
+        "contributions": stamp("contributions"),
         "approved": stamp("approved"),
         "locked": stamp("locked"),
         "paid": stamp("paid"),
@@ -161,8 +184,17 @@ def _serialize(db: Session, run: PayrollRun | None, user: User, department: str,
         # Generate + edit figures (deductions, OT) -- also gates the inputs.
         "can_generate": can_prepare and status in EDITABLE_STATUSES,
         "can_submit": can_prepare and status == "GENERATED",
-        "can_approve": can_approve and status == "FOR_REVIEW",
-        "can_return": can_approve and status in ("FOR_REVIEW", "APPROVED"),
+        # For Review -> Contributions (the reviewer forwards it).
+        "can_forward": can_approve and status == "FOR_REVIEW",
+        # Contributions: edit SSS / PhilHealth / Pag-IBIG / tax only, then
+        # send it to the head.
+        "can_edit_contributions": can_contrib and status == "CONTRIBUTIONS",
+        "can_submit_contributions": can_contrib and status == "CONTRIBUTIONS",
+        "can_approve": can_approve and status == "HEAD_REVIEW",
+        # Head sends it back to Contributions (not all the way back).
+        "can_return_contributions": can_approve and status == "HEAD_REVIEW",
+        "can_return": can_approve
+        and status in ("FOR_REVIEW", "CONTRIBUTIONS", "HEAD_REVIEW", "APPROVED"),
         "can_lock": can_release and status == "APPROVED",
         "can_mark_paid": can_release and status == "LOCKED",
         "can_unlock": is_superadmin and status == "LOCKED",
@@ -170,6 +202,7 @@ def _serialize(db: Session, run: PayrollRun | None, user: User, department: str,
         "my_steps": {
             "prepare": can_prepare,
             "approve": can_approve,
+            "contributions": can_contrib,
             "release": can_release,
         },
     }
@@ -483,12 +516,129 @@ class TransitionIn(BaseModel):
 # action -> (allowed from, new status, who, timestamp prefix, note required)
 TRANSITIONS = {
     "submit": (("GENERATED",), "FOR_REVIEW", PAYROLL_PREPARE, "submitted", False),
-    "approve": (("FOR_REVIEW",), "APPROVED", PAYROLL_APPROVE, "approved", False),
-    "return": (("FOR_REVIEW", "APPROVED"), "GENERATED", PAYROLL_APPROVE, None, True),
+    "forward": (("FOR_REVIEW",), "CONTRIBUTIONS", PAYROLL_APPROVE, "reviewed", False),
+    "submit_contributions": (
+        ("CONTRIBUTIONS",), "HEAD_REVIEW", PAYROLL_CONTRIBUTIONS, "contributions", False,
+    ),
+    "return_contributions": (("HEAD_REVIEW",), "CONTRIBUTIONS", PAYROLL_APPROVE, None, True),
+    "approve": (("HEAD_REVIEW",), "APPROVED", PAYROLL_APPROVE, "approved", False),
+    "return": (
+        ("FOR_REVIEW", "CONTRIBUTIONS", "HEAD_REVIEW", "APPROVED"),
+        "GENERATED",
+        PAYROLL_APPROVE,
+        None,
+        True,
+    ),
     "lock": (("APPROVED",), "LOCKED", PAYROLL_RELEASE, "locked", False),
     "mark_paid": (("LOCKED",), "PAID", PAYROLL_RELEASE, "paid", False),
     "unlock": (("LOCKED",), "APPROVED", "superadmin", None, True),
 }
+
+
+class ContributionLineIn(BaseModel):
+    employee_id: int
+    segment: str = ""
+    sssDeduction: float | None = None
+    philhealthDeduction: float | None = None
+    pagibigDeduction: float | None = None
+    withholdingTax: float | None = None
+
+
+class ContributionsIn(BaseModel):
+    department: str
+    cutoff_period: str
+    lines: list[ContributionLineIn]
+
+
+@router.post("/contributions")
+def save_contributions(
+    payload: ContributionsIn,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Contributions step: change SSS / PhilHealth / Pag-IBIG / tax on the
+    run's snapshot (everything else stays as generated). Net pay and total
+    deductions move by the difference; the saved payroll_deductions row
+    follows, so a later regenerate keeps the amounts."""
+    from app.models.payroll_deductions import PayrollDeduction
+
+    ensure_can_payroll(db, current_user, PAYROLL_CONTRIBUTIONS)
+    ensure_payroll_allowed(db, current_user, payload.department)
+    run = (
+        db.query(PayrollRun)
+        .filter(
+            PayrollRun.department == payload.department,
+            PayrollRun.cutoff_period == payload.cutoff_period,
+        )
+        .first()
+    )
+    if not run or run.status != "CONTRIBUTIONS":
+        raise HTTPException(
+            status_code=409,
+            detail="Government contributions can only be changed at the Contributions step.",
+        )
+    if not run.snapshot:
+        raise HTTPException(
+            status_code=409,
+            detail="This pay run has no snapshot -- return it and generate it again first.",
+        )
+    data = json.loads(run.snapshot)
+    rows = data.get("rows") or []
+
+    def key(row):
+        emp = row.get("employee") or {}
+        return (emp.get("id"), (emp.get("_segment") or {}).get("key") or "")
+
+    by_key = {key(r): r for r in rows}
+    changed = []
+    for line in payload.lines:
+        row = by_key.get((line.employee_id, line.segment or ""))
+        if row is None:
+            continue
+        old = sum(float(row.get(f) or 0) for f in GOV_FIELDS)
+        for field in GOV_FIELDS:
+            value = getattr(line, field)
+            if value is not None:
+                if value < 0:
+                    raise HTTPException(status_code=400, detail="Amounts can't be negative.")
+                row[field] = round(value, 2)
+        delta = round(sum(float(row.get(f) or 0) for f in GOV_FIELDS) - old, 2)
+        if not delta and not any(getattr(line, f) is not None for f in GOV_FIELDS):
+            continue
+        row["netPay"] = round(float(row.get("netPay") or 0) - delta, 2)
+        row["totalDeductions"] = round(float(row.get("totalDeductions") or 0) + delta, 2)
+        row["contributionsEdited"] = True
+        changed.append(row)
+
+        saved = (
+            db.query(PayrollDeduction)
+            .filter(
+                PayrollDeduction.employee_id == line.employee_id,
+                PayrollDeduction.cutoff_period == payload.cutoff_period,
+                PayrollDeduction.department == payload.department,
+                PayrollDeduction.segment == (line.segment or ""),
+            )
+            .first()
+        )
+        if saved is not None:
+            for field, column in GOV_FIELDS.items():
+                setattr(saved, column, row.get(field) or 0)
+            saved.net_pay = row["netPay"]
+
+    run.snapshot = json.dumps(data, default=str)
+    run.total_net = round(sum(float(r.get("netPay") or 0) for r in rows), 2)
+    if changed:
+        names = ", ".join(
+            f"{(r.get('employee') or {}).get('first_name', '')} {(r.get('employee') or {}).get('last_name', '')}".strip()
+            for r in changed[:5]
+        )
+        more = f" and {len(changed) - 5} more" if len(changed) > 5 else ""
+        _log(db, run, "contributions_edited", current_user, f"{names}{more}"[:500])
+    db.commit()
+    return {
+        "run": _serialize(db, run, current_user, payload.department, payload.cutoff_period),
+        "changed": len(changed),
+    }
 
 
 @router.post("/transition")
@@ -524,10 +674,15 @@ def transition_payroll_run(
     if stamp:
         setattr(run, f"{stamp}_at", datetime.utcnow())
         setattr(run, f"{stamp}_by", current_user.id)
+    if payload.action == "return_contributions":
+        run.return_note = note
+        run.contributions_at = run.contributions_by = None
     if payload.action in ("return", "unlock"):
         run.return_note = note
         if payload.action == "return":
             run.submitted_at = run.submitted_by = None
+            run.reviewed_at = run.reviewed_by = None
+            run.contributions_at = run.contributions_by = None
             run.approved_at = run.approved_by = None
         else:
             run.locked_at = run.locked_by = None
