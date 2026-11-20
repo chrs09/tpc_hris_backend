@@ -24,6 +24,8 @@ from app.services.incentives import (
     clean_settings,
     compute_program,
     load_settings,
+    long_distance_store_check,
+    long_distance_trip_check,
     parse_applies_to,
 )
 
@@ -259,3 +261,34 @@ def program_results(
     """What each driver / helper earns under the program -- so far while
     the period is still running (`is_final` false)."""
     return compute_program(db, _get(db, program_id))
+
+
+def _long_distance_program(db: Session, program_id: int) -> IncentiveProgram:
+    program = _get(db, program_id)
+    if program.rule_type != "long_distance":
+        raise HTTPException(status_code=400, detail="Only for a Long Distance program.")
+    return program
+
+
+@router.get("/{program_id}/trip-check")
+def program_trip_check(
+    program_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(_require_view),
+):
+    """Long Distance: every completed trip in the period with its level,
+    including the ones that earn nothing and why."""
+    program = _long_distance_program(db, program_id)
+    return long_distance_trip_check(db, program, load_settings(program))
+
+
+@router.get("/{program_id}/store-check")
+def program_store_check(
+    program_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(_require_view),
+):
+    """Long Distance: every store's route city, location and trips this
+    period -- what to fix so trips get their level."""
+    program = _long_distance_program(db, program_id)
+    return long_distance_store_check(db, program, load_settings(program))

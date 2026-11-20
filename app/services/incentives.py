@@ -15,10 +15,13 @@
 #                          level comes from the route list (start hub +
 #                          destination city, e.g. Consolacion -> Sogod =
 #                          1, Cebu Plant -> Carcar = 1; the city is found
-#                          in the store's address), else from the
-#                          straight-line km from the trip's origin / the
-#                          default hub. The trip's farthest (highest
-#                          level) destination counts.
+#                          in the store's name, address or area; a start
+#                          yard not on the list uses the default hub's
+#                          rows), else from the straight-line km from the
+#                          trip's origin / the default hub. A store at
+#                          0,0 has no location (no km). The trip's
+#                          farthest (highest level) stop counts -- each
+#                          stop measured from the hub, never added up.
 #   complete_attendance -- every workday present (approved leave and
 #                          holidays don't break it); bonus % of the
 #                          base, weekday holidays worked x2, Saturdays
@@ -72,6 +75,9 @@ RULE_TYPES = {
             "repeat_last": True,
             "first_trip_before": "06:00",
             "exclude_categories": [],
+            "hubs": [],
+            "origin_store_id": None,
+            "origin": None,
         },
     },
     "long_distance": {
@@ -186,6 +192,13 @@ def _clean_type(rule_type: str, settings: dict) -> dict:
             "exclude_categories": [
                 str(c).strip() for c in (s.get("exclude_categories") or []) if str(c).strip()
             ],
+            # Only these hubs' drivers / helpers (by department); empty = all.
+            "hubs": [h for h in HUB_DEPARTMENTS if h in (s.get("hubs") or [])],
+            # Only trips starting from this hub (store id); None = any.
+            "origin_store_id": (
+                None if s.get("origin_store_id") in (None, "") else int(s["origin_store_id"])
+            ),
+            "origin": str(s.get("origin") or "").strip()[:100] or None,
         }
 
     if rule_type == "long_distance":
@@ -385,11 +398,22 @@ def _trip_tiers(db, program, s):
     return rows
 
 
+# Daily cash "hubs": which departments each hub's drivers / helpers are in
+# (same pairs as trip helper matching, app/api/driver/trips.py).
+HUB_DEPARTMENTS = {
+    "cdc": {"label": "Coca-Cola hub", "driver": "CdcDriver", "helper": "CdcHelper"},
+    "cpdc": {"label": "Consolacion hub", "driver": "CpdcDriver", "helper": "CpdcHelper"},
+}
+
+
 def _daily_cash(db, program, s):
     trips = _completed_trips(db, program.period_start, program.period_end)
     trips = [
         t for t in trips
         if _ph_start(t).weekday() in s["days"] and not _is_excluded(t, s["exclude_categories"])
+        # Origin picked: only trips starting from that hub (they're also
+        # the only ones numbered 1st / 2nd... for the day).
+        and (not s.get("origin_store_id") or t.origin_store_id == s["origin_store_id"])
     ]
     people, by_person = _trip_counts(db, program, s, trips)
     amounts = s["trip_amounts"]
@@ -403,8 +427,15 @@ def _daily_cash(db, program, s):
             return amounts[n - 1]
         return amounts[-1] if s["repeat_last"] else 0
 
+    # Only the picked hubs' people (their department); none picked = all.
+    allowed = {
+        HUB_DEPARTMENTS[h][role] for h in s.get("hubs") or [] for role in ("driver", "helper")
+    }
+
     rows = []
     for (key, group), person_trips in by_person.items():
+        if allowed and people.row(key, group)["department"] not in allowed:
+            continue
         per_day = defaultdict(list)
         for t in {t.id: t for t in person_trips}.values():
             per_day[_ph_start(t).date()].append(t)
@@ -467,82 +498,160 @@ def _default_hub(db) -> Store | None:
     return None
 
 
-def _long_distance(db, program, s):
-    trips = _completed_trips(db, program.period_start, program.period_end)
-    store_ids = set()
-    for t in trips:
-        store_ids.update(st.store_id for st in t.stops if st.store_id)
-        if t.destination_store_id:
-            store_ids.add(t.destination_store_id)
-        if t.origin_store_id:
-            store_ids.add(t.origin_store_id)
-    stores = {st.id: st for st in db.query(Store).filter(Store.id.in_(store_ids)).all()} if store_ids else {}
-    hub = _default_hub(db)
-    step, free = s["step_km"], s["free_km"]
+# Why a stop / trip earns no long-distance level (Preview -> Trip check).
+# In this order: a trip with several zero stops shows the first one here,
+# so something fixable comes before "too near".
+LD_REASONS = {
+    "gps_off": "City not on the route list, and GPS distance is off",
+    "store_no_location": "Store has no location (0,0) and its city isn't on the route list",
+    "origin_no_location": "Start hub has no location (0,0)",
+    "no_origin": "No start hub (trip has no origin and no default hub is set)",
+    "within_free_km": "Within the free distance",
+    "hub": "Stop is a hub",
+    "no_stops": "No stores on the trip",
+}
 
-    def cap(level):
+
+def has_location(store) -> bool:
+    """False for a store saved at 0,0 (how "no location" ends up stored).
+    Measuring from / to 0,0 would put it ~13,700 km away (top level)."""
+    if store is None or store.latitude is None or store.longitude is None:
+        return False
+    return not (abs(store.latitude) < 0.0001 and abs(store.longitude) < 0.0001)
+
+
+def store_text(store) -> str:
+    """Name + address + area as whole words, for finding a route city
+    ("Promo SH Carcar City" -> carcar). Hyphens joined too, so "Car-Car"
+    also reads "carcar"."""
+    raw = f"{store.name or ''} {store.address or ''} {store.area or ''}"
+    return _words(raw) + _words(raw.replace("-", ""))
+
+
+class LongDistance:
+    """Levels for one long-distance program: per store (route list first,
+    then the straight-line km from the trip's start hub) and per trip (its
+    farthest stop). Shared by the program, Preview's Trip check and the
+    Store check."""
+
+    def __init__(self, db: Session, s: dict):
+        self.db = db
+        self.s = s
+        self.hub = _default_hub(db)
+        # Route list rows: (start hub store id or None = any hub, city,
+        # its spellings, level).
+        self.routes = [
+            (r["origin_store_id"], city, _city_variants(city), r["level"])
+            for r in s["routes"]
+            for city in r["cities"]
+        ]
+        self.route_hubs = {oid for oid, *_ in self.routes if oid}
+
+    def cap(self, level):
         level = max(level, 0)
-        return min(level, s["max_steps"]) if s["max_steps"] else level
+        return min(level, self.s["max_steps"]) if self.s["max_steps"] else level
 
-    # Route list rows: (origin store id or None = any hub, city, its
-    # spellings, level).
-    routes = [
-        (r["origin_store_id"], city, _city_variants(city), r["level"])
-        for r in s["routes"]
-        for city in r["cities"]
-    ]
-
-    def store_level(store, origin):
-        """(level, km or None, source, city) for one destination. The city
-        is looked up in the store's address (then its area); the trip's
-        own hub's rows win over any-hub rows."""
-        raw = f"{store.address or ''} {store.area or ''}"
-        # Also with hyphens joined, so "Car-Car" matches "Carcar".
-        text = _words(raw) + _words(raw.replace("-", ""))
-        origin_id = origin.id if origin else None
+    def route_match(self, store, origin_id):
+        """(level, city) from the route list, or None. The trip's own
+        hub's rows win over any-hub rows. A start point that isn't on the
+        route list (another yard) uses the default hub's rows."""
+        text = store_text(store)
+        if origin_id not in self.route_hubs and self.hub is not None:
+            origin_id = self.hub.id
         for wanted in ((origin_id,) if origin_id else ()) + (None,):
             hits = [
                 (level, city)
-                for oid, city, variants, level in routes
+                for oid, city, variants, level in self.routes
                 if oid == wanted and any(v in text for v in variants)
             ]
             if hits:
                 level, city = max(hits)
-                return cap(level), None, "route", city
-        if s["use_gps_distance"] and origin is not None and not store.is_hub:
+                return self.cap(level), city
+        return None
+
+    def store_level(self, store, origin) -> dict:
+        """{level, km, source ("route" / "gps" / None), city, reason}."""
+        out = {"level": 0, "km": None, "source": None, "city": None, "reason": None}
+        hit = self.route_match(store, origin.id if origin else None)
+        if hit:
+            out.update(level=hit[0], source="route", city=hit[1])
+            return out
+        if store.is_hub:
+            out["reason"] = "hub"
+        elif not self.s["use_gps_distance"]:
+            out["reason"] = "gps_off"
+        elif origin is None:
+            out["reason"] = "no_origin"
+        elif not has_location(origin):
+            out["reason"] = "origin_no_location"
+        elif not has_location(store):
+            out["reason"] = "store_no_location"
+        else:
             km = _km(origin.latitude, origin.longitude, store.latitude, store.longitude)
+            free, step = self.s["free_km"], self.s["step_km"]
             # The first `free` km earn nothing; each started `step` after
             # it is a level (31-60 km = 1 with 30 free and 30 km steps).
-            return cap(math.ceil((km - free) / step) if km > free else 0), km, "gps", None
-        return None, None, None, None
+            level = self.cap(math.ceil((km - free) / step) if km > free else 0)
+            out.update(level=level, km=km, source="gps")
+            if not level:
+                out["reason"] = "within_free_km"
+        return out
 
-    people, by_person = _trip_counts(db, program, s, trips)
-    trip_info = {}
-    for t in trips:
-        origin = stores.get(t.origin_store_id) or hub
-        ids = {st.store_id for st in t.stops if st.store_id}
-        if t.destination_store_id:
-            ids.add(t.destination_store_id)
-        best = None
+    def load_stores(self, trips):
+        ids = set()
+        for t in trips:
+            ids.update(st.store_id for st in t.stops if st.store_id)
+            if t.destination_store_id:
+                ids.add(t.destination_store_id)
+            if t.origin_store_id:
+                ids.add(t.origin_store_id)
+        return {st.id: st for st in self.db.query(Store).filter(Store.id.in_(ids)).all()} if ids else {}
+
+    def trip_info(self, t, stores) -> dict:
+        origin = stores.get(t.origin_store_id) or self.hub
+        ids = [st.store_id for st in sorted(t.stops, key=lambda x: x.id) if st.store_id]
+        if t.destination_store_id and t.destination_store_id not in ids:
+            ids.append(t.destination_store_id)
+        stops, best = [], None
         for sid in ids:
             store = stores.get(sid)
             if store is None:
                 continue
-            level, km, source, city = store_level(store, origin)
-            if level is not None and (best is None or level > best[0]):
-                best = (level, km, source, store, city)
-        trip_info[t.id] = {
+            info = self.store_level(store, origin)
+            stops.append({"store_id": store.id, "name": store.name} | info)
+            if info["level"] and (best is None or info["level"] > best["level"]):
+                best = stops[-1]
+        reason = None
+        if not best:
+            reasons = [x["reason"] for x in stops if x["reason"]]
+            reason = "no_stops" if not stops else (
+                # The most telling one: a fixable setting before "too near".
+                next((r for r in LD_REASONS if r in reasons), None)
+            )
+        return {
             "trip_id": t.id,
             "ticket_no": t.ticket_no,
             "date": _ph_start(t).date().isoformat(),
             "origin": origin.name if origin else None,
-            "farthest_store": best[3].name if best else None,
-            "city": best[4] if best else None,
-            "level": best[0] if best else 0,
-            "km": round(best[1], 1) if best and best[1] is not None else None,
-            "level_source": best[2] if best else None,
+            "farthest_store": best["name"] if best else None,
+            "city": best["city"] if best else None,
+            "level": best["level"] if best else 0,
+            "km": round(best["km"], 1) if best and best["km"] is not None else None,
+            "level_source": best["source"] if best else None,
+            "reason": reason,
+            "stops": [
+                x | {"km": round(x["km"], 1) if x["km"] is not None else None} for x in stops
+            ],
         }
 
+
+def _long_distance(db, program, s):
+    trips = _completed_trips(db, program.period_start, program.period_end)
+    ld = LongDistance(db, s)
+    stores = ld.load_stores(trips)
+    trip_info = {t.id: ld.trip_info(t, stores) for t in trips}
+
+    people, by_person = _trip_counts(db, program, s, trips)
     rows = []
     for (key, group), person_trips in by_person.items():
         lines = []
@@ -551,7 +660,8 @@ def _long_distance(db, program, s):
             if not info["level"]:
                 continue
             per = s["driver_per_step"] if group == "driver" else s["helper_per_step"]
-            lines.append(info | {"amount": info["level"] * per})
+            line = {k: v for k, v in info.items() if k not in ("stops", "reason")}
+            lines.append(line | {"amount": info["level"] * per})
         if not lines:
             continue
         lines.sort(key=lambda line: line["date"])
@@ -562,6 +672,133 @@ def _long_distance(db, program, s):
             "amount": sum(line["amount"] for line in lines),
         })
     return rows
+
+
+def long_distance_trip_check(db: Session, program, s: dict) -> dict:
+    """Every trip in the program's period with its level -- including the
+    ones that earn nothing and why -- plus the trips not completed yet."""
+    start, end = program.period_start, program.period_end
+    trips = _completed_trips(db, start, end)
+    ld = LongDistance(db, s)
+    stores = ld.load_stores(trips)
+    groups = parse_applies_to(program.applies_to)
+    people = _People(db, groups)
+    people.load(
+        user_ids=[t.driver_id for t in trips],
+        employee_ids=[h.helper_id for t in trips for h in t.trip_helpers],
+    )
+    rows = []
+    for t in sorted(trips, key=lambda x: (x.start_time, x.id)):
+        info = ld.trip_info(t, stores)
+        key = people.driver_key(t.driver_id)
+        driver = people.row(key, "driver")
+        info["driver"] = driver["name"]
+        info["driver_linked"] = driver["employee_id"] is not None
+        info["helpers"] = [people.row(h.helper_id, "helper")["name"] for h in t.trip_helpers]
+        info["driver_amount"] = info["level"] * s["driver_per_step"] if "drivers" in groups else 0
+        info["helper_amount"] = info["level"] * s["helper_per_step"] if "helpers" in groups else 0
+        rows.append(info)
+
+    # Trips in the period still on their way to Completed (they don't
+    # count yet).
+    lo = ph_to_utc(datetime.combine(start, time.min))
+    hi = ph_to_utc(datetime.combine(end + timedelta(days=1), time.min))
+    from sqlalchemy import func as _func
+
+    waiting = dict(
+        db.query(Trip.status, _func.count(Trip.id))
+        .filter(
+            Trip.is_archived.is_(False),
+            Trip.start_time >= lo,
+            Trip.start_time < hi,
+            Trip.status.notin_([TripStatus.COMPLETED, TripStatus.CANCELLED]),
+        )
+        .group_by(Trip.status)
+        .all()
+    )
+    return {
+        "period_start": start.isoformat(),
+        "period_end": end.isoformat(),
+        "applies_to": groups,
+        "use_gps_distance": bool(s["use_gps_distance"]),
+        "route_count": len(s["routes"]),
+        "free_km": s["free_km"],
+        "default_hub": ld.hub.name if ld.hub else None,
+        "trips": rows,
+        "waiting": {
+            (k.value if hasattr(k, "value") else str(k)): v for k, v in waiting.items()
+        },
+        "reasons": LD_REASONS,
+    }
+
+
+def long_distance_store_check(db: Session, program, s: dict) -> dict:
+    """Every store with what long distance can do with it: its route city
+    (and level from the default hub), whether it has a location, and how
+    many trips in the program's period visit it."""
+    from sqlalchemy import func as _func
+
+    from app.models.trip_stops import TripStop
+
+    ld = LongDistance(db, s)
+    lo = ph_to_utc(datetime.combine(program.period_start, time.min))
+    hi = ph_to_utc(datetime.combine(program.period_end + timedelta(days=1), time.min))
+    in_period = (
+        Trip.is_archived.is_(False),
+        Trip.status != TripStatus.CANCELLED,
+        Trip.start_time >= lo,
+        Trip.start_time < hi,
+    )
+    visits = defaultdict(set)
+    for store_id, trip_id in (
+        db.query(TripStop.store_id, TripStop.trip_id)
+        .join(Trip, Trip.id == TripStop.trip_id)
+        .filter(TripStop.store_id.isnot(None), *in_period)
+    ):
+        visits[store_id].add(trip_id)
+    for store_id, trip_id in db.query(Trip.destination_store_id, Trip.id).filter(
+        Trip.destination_store_id.isnot(None), *in_period
+    ):
+        visits[store_id].add(trip_id)
+
+    hub = ld.hub
+    rows = []
+    for store in db.query(Store).order_by(Store.name).all():
+        located = has_location(store)
+        if store.is_hub:
+            status = "ok" if located else "hub_no_location"
+            city = level = km = None
+        else:
+            hit = ld.route_match(store, hub.id if hub else None)
+            city, level = (hit[1], hit[0]) if hit else (None, None)
+            km = None
+            if located and hub is not None and has_location(hub):
+                km = round(_km(hub.latitude, hub.longitude, store.latitude, store.longitude), 1)
+            if hit:
+                status = "ok" if located else "route_no_location"
+            elif located:
+                status = "gps_only"
+            else:
+                status = "no_city_no_location"
+        rows.append({
+            "id": store.id,
+            "name": store.name,
+            "address": store.address,
+            "area": store.area,
+            "is_hub": bool(store.is_hub),
+            "has_location": located,
+            "city": city,
+            "level": level,
+            "km_from_hub": km,
+            "trips": len(visits.get(store.id, ())),
+            "status": status,
+        })
+    return {
+        "default_hub": hub.name if hub else None,
+        "default_hub_has_location": has_location(hub) if hub else False,
+        "use_gps_distance": bool(s["use_gps_distance"]),
+        "stores": rows,
+    }
 
 
 def _complete_attendance(db, program, s):
