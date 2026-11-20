@@ -299,6 +299,9 @@ class PrecheckIn(BaseModel):
     start: date
     end: date
     employee_ids: list[int] = []
+    # Trip-based (paid per trip, e.g. drivers): their time outs and face
+    # review don't change their pay, so they're left out of those checks.
+    trip_based_ids: list[int] = []
 
 
 @router.post("/precheck")
@@ -338,14 +341,16 @@ def pay_run_precheck(
         .all()
     )
     today = datetime.utcnow().date()
+    trip_based = set(payload.trip_based_ids or [])
+    hourly = [r for r in records if r.employee_id not in trip_based]
     missing_out = [
         entry(r.employee_id, r.attendance_date, "Timed in, no time out")
-        for r in records
+        for r in hourly
         if r.check_in_time and not r.check_out_time and r.attendance_date < today
     ]
     review = [
         entry(r.employee_id, r.attendance_date, side_label)
-        for r in records
+        for r in hourly
         for side, side_label in (("time_in", "Time in"), ("time_out", "Time out"))
         if getattr(r, f"{side}_face_review_status") in REVIEW_PENDING_STATUSES
     ]
@@ -744,6 +749,92 @@ def my_payslip(
 # =========================================================
 PAID_TRIP_STATUSES = {"COMPLETED", "APPROVED"}
 
+# Trip documents (photos) the Trip Document step checks, in order.
+TRIP_DOCUMENTS = (
+    ("INVOICE_PHOTO", "Invoice"),
+    ("LM_MANIFEST_PHOTO", "LM"),
+    ("LM_CHECKOUT_STAMPED_PHOTO", "Stamped LM (checkout)"),
+    ("STAMPED_INVOICE_PHOTO", "Stamped Invoice"),
+)
+# Status -> (step, Org Chart approval kind, who it falls to when nobody
+# on the chart has that step ticked).
+TRIP_STEPS = {
+    "ASSIGNED": ("Not started", None, "Driver"),
+    "ACTIVE": ("In progress", None, "Driver"),
+    "PENDING_MANUAL_APPROVAL": ("Manual entry", None, "Superadmin"),
+    "PENDING_APPROVAL": ("Trip Approvals", "trip_coordinator", "Coordinator admin"),
+    "PENDING_OFFICE_REVIEW": ("Trip Document", "trip_office", "Office"),
+    "PENDING_FINANCE_REVIEW": ("Finance Trips", "trip_finance", "Finance"),
+}
+
+
+def _trip_followups(db: Session, trips: list) -> dict:
+    """{trip_id: {"step", "responsible", "missing_docs"}} for the trips not
+    completed yet: the Org Chart approver at the trip's current step (by
+    its driver, same as "For me" on those pages), or the coordinator a
+    returned trip was handed to; plus the missing photos while it's in
+    Trip Document."""
+    from app.models.files import File
+    from app.models.org_unit import OrgUnit
+    from app.models.trip_finance_review import TripFinanceReview
+    from app.services.approval_chain import effective_step, resolve_chain
+
+    open_trips = [
+        t for t in trips if getattr(t.status, "value", t.status) in TRIP_STEPS
+    ]
+    if not open_trips:
+        return {}
+    ids = [t.id for t in open_trips]
+    reviews = {
+        r.trip_id: r
+        for r in db.query(TripFinanceReview).filter(TripFinanceReview.trip_id.in_(ids))
+    }
+    docs: dict = {}
+    for trip_id, doc_type in db.query(File.entity_id, File.document_type).filter(
+        File.entity_type == "trip", File.entity_id.in_(ids)
+    ):
+        docs.setdefault(trip_id, set()).add(doc_type)
+
+    units = db.query(OrgUnit).all()
+    approver_cache: dict = {}
+    user_ids: set = set()
+    picked: dict = {}
+    for trip in open_trips:
+        status = getattr(trip.status, "value", trip.status)
+        step, kind, fallback = TRIP_STEPS[status]
+        review = reviews.get(trip.id)
+        who_id = None
+        if status in ("ASSIGNED", "ACTIVE"):
+            who_id = trip.driver_id
+        elif review is not None and review.resolver_user_id and not review.resolved_at:
+            who_id = review.resolver_user_id  # handed to a coordinator to fix
+        elif kind:
+            key = (trip.driver_id, kind)
+            if key not in approver_cache:
+                driver = trip.driver
+                chain = resolve_chain(db, driver.employee, driver, kind, units) if driver else []
+                approver_cache[key] = chain[effective_step(db, chain, 0)[0]] if chain else None
+            who_id = approver_cache[key]
+        if who_id:
+            user_ids.add(who_id)
+        picked[trip.id] = (step, who_id, fallback, status)
+
+    names = _names(db, user_ids)
+    out = {}
+    for trip_id, (step, who_id, fallback, status) in picked.items():
+        have = docs.get(trip_id, set())
+        out[trip_id] = {
+            "step": step,
+            "responsible": names.get(who_id) or fallback,
+            "responsible_is_person": bool(who_id and names.get(who_id)),
+            "missing_docs": (
+                [label for doc_type, label in TRIP_DOCUMENTS if doc_type not in have]
+                if status == "PENDING_OFFICE_REVIEW"
+                else []
+            ),
+        }
+    return out
+
 
 @router.get("/trip-check")
 def get_trip_check(
@@ -809,6 +900,7 @@ def get_trip_check(
         )
     }
     rules = load_rules(db)
+    followup = _trip_followups(db, trips)
 
     rows = []
     for trip, employee_id, role in people:
@@ -830,6 +922,9 @@ def get_trip_check(
                 "first_trip_rate": rates[f"{role}_first_trip_rate"],
                 "has_attendance": has_attendance,
                 "counted": status in PAID_TRIP_STATUSES and has_attendance,
+                # Not completed yet: who it's waiting on, and (Trip
+                # Document) which photos are still missing.
+                **followup.get(trip.id, {}),
             }
         )
     # Route rides (assigned on these trips, or manual in the period).
