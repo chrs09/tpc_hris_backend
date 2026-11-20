@@ -44,7 +44,7 @@ router = APIRouter(prefix="/incentive-runs", tags=["Incentive Runs"])
 
 _require_view = require_role_or_module(
     roles=["admin", "payroll_admin"],
-    module_key=["payroll.incentive_policies", "payroll.payroll"],
+    module_key=["payroll.incentive_runs", "payroll.incentive_policies", "payroll.payroll"],
 )
 
 STATUSES = ("DRAFT", "GENERATED", "FOR_REVIEW", "APPROVED", "RELEASED", "CANCELLED")

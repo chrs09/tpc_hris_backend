@@ -62,6 +62,10 @@ MODULE_GROUPS = {
         "contribution_tables",
         # Incentive Policies page (sample UI for now).
         "incentive_policies",
+        # Incentive Runs page: paying incentives out apart from payroll
+        # (app/api/payroll/incentive_runs.py). The steps on a run still
+        # follow the Payroll ticks (Prepare / Approve / Release).
+        "incentive_runs",
     ],
     "trip_management": [
         # Assigned/Active trip monitoring, with each active trip's live

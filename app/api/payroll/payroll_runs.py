@@ -19,7 +19,7 @@ role never grants these. Superadmin can always.
 """
 
 import json
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
@@ -49,7 +49,10 @@ router = APIRouter(prefix="/payroll-runs", tags=["Payroll Runs"])
 
 _require_payroll = require_role_or_module(roles=["admin"], module_key="payroll.payroll")
 
-EDITABLE_STATUSES = ("DRAFT", "GENERATED", "FOR_REVIEW")
+# Generate (and editing figures) only before it's submitted: once it's
+# For Review the snapshot is what gets approved -- anything later (e.g. a
+# document after cutoff) goes in the next pay run. Return sends it back.
+EDITABLE_STATUSES = ("DRAFT", "GENERATED")
 STATUS_FLOW = ("DRAFT", "GENERATED", "FOR_REVIEW", "APPROVED", "LOCKED", "PAID")
 
 
@@ -119,6 +122,7 @@ def _serialize(db: Session, run: PayrollRun | None, user: User, department: str,
         db,
         [
             run.generated_by, run.submitted_by, run.approved_by, run.locked_by, run.paid_by,
+            run.snapshot_by,
         ]
         if run
         else [],
@@ -146,6 +150,13 @@ def _serialize(db: Session, run: PayrollRun | None, user: User, department: str,
         "paid": stamp("paid"),
         "return_note": run.return_note if run else None,
         "log": json.loads(run.log or "[]") if run else [],
+        # Pay run: created on Pay Runs; the snapshot from Generate.
+        "exists": run is not None,
+        "has_snapshot": bool(run and run.snapshot),
+        "snapshot_at": run.snapshot_at.isoformat() if run and run.snapshot_at else None,
+        "snapshot_by": names.get(run.snapshot_by) if run else None,
+        "precheck": json.loads(run.precheck) if run and run.precheck else None,
+        "pay_date": run.pay_date.isoformat() if run and run.pay_date else None,
         # What this viewer may do next.
         # Generate + edit figures (deductions, OT) -- also gates the inputs.
         "can_generate": can_prepare and status in EDITABLE_STATUSES,
@@ -180,6 +191,207 @@ def get_payroll_run(
     return _serialize(db, run, current_user, department, cutoff_period)
 
 
+# =========================================================
+# PAY RUNS -- one per payroll group + cutoff, created up front on the Pay
+# Runs page (period + group), then opened to pre-check, generate (the
+# snapshot) and move through approval.
+# =========================================================
+@router.get("/all")
+def list_all_pay_runs(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(_require_payroll),
+):
+    """Every pay run, newest cutoff first (no snapshot)."""
+    runs = db.query(PayrollRun).order_by(PayrollRun.period_end.desc(), PayrollRun.department).all()
+    allowed = allowed_payroll_groups(db, current_user)
+    if allowed is not None:
+        runs = [run for run in runs if run.department in allowed]
+    names = _names(db, [r.generated_by for r in runs])
+    return [
+        {
+            "department": run.department,
+            "cutoff_period": run.cutoff_period,
+            "period_start": run.period_start.isoformat(),
+            "period_end": run.period_end.isoformat(),
+            "status": run.status,
+            "pay_date": run.pay_date.isoformat() if run.pay_date else None,
+            "employee_count": run.employee_count or 0,
+            "total_gross": float(run.total_gross or 0),
+            "total_net": float(run.total_net or 0),
+            "generated_at": run.generated_at.isoformat() if run.generated_at else None,
+            "generated_by": names.get(run.generated_by),
+            "has_snapshot": bool(run.snapshot),
+            "created_at": run.created_at.isoformat() if run.created_at else None,
+        }
+        for run in runs
+    ]
+
+
+class CreateRunIn(BaseModel):
+    department: str
+    cutoff_period: str
+    pay_date: date | None = None
+
+
+def _not_sunday(day: date | None) -> date | None:
+    """Paydays are Monday to Saturday: a Sunday moves to the Saturday before."""
+    if day and day.weekday() == 6:
+        return day - timedelta(days=1)
+    return day
+
+
+@router.post("/create")
+def create_pay_run(
+    payload: CreateRunIn,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """New pay run (Draft) for a payroll group + cutoff. One per pair --
+    an existing one is reported, not duplicated."""
+    ensure_can_payroll(db, current_user, PAYROLL_PREPARE)
+    ensure_payroll_allowed(db, current_user, payload.department)
+    exists = (
+        db.query(PayrollRun.id)
+        .filter(
+            PayrollRun.department == payload.department,
+            PayrollRun.cutoff_period == payload.cutoff_period,
+        )
+        .first()
+    )
+    if exists:
+        raise HTTPException(
+            status_code=409,
+            detail="A pay run for this payroll group and cutoff is already created.",
+        )
+    run = _get_or_new(db, payload.department, payload.cutoff_period)
+    run.pay_date = _not_sunday(payload.pay_date)
+    _log(db, run, "created", current_user)
+    db.commit()
+    return _serialize(db, run, current_user, payload.department, payload.cutoff_period)
+
+
+@router.get("/snapshot")
+def get_pay_run_snapshot(
+    department: str = Query(...),
+    cutoff_period: str = Query(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(_require_payroll),
+):
+    """The rows saved at Generate ({rows, period, ...}), or null."""
+    ensure_payroll_allowed(db, current_user, department)
+    run = (
+        db.query(PayrollRun)
+        .filter(PayrollRun.department == department, PayrollRun.cutoff_period == cutoff_period)
+        .first()
+    )
+    if not run or not run.snapshot:
+        return None
+    data = json.loads(run.snapshot)
+    ids = allowed_employee_ids(db, current_user)
+    if ids is not None and isinstance(data.get("rows"), list):
+        data["rows"] = [
+            r for r in data["rows"] if (r.get("employee") or {}).get("id") in ids
+        ]
+    return data
+
+
+class PrecheckIn(BaseModel):
+    start: date
+    end: date
+    employee_ids: list[int] = []
+
+
+@router.post("/precheck")
+def pay_run_precheck(
+    payload: PrecheckIn,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(_require_payroll),
+):
+    """What's still open for these employees in start..end before
+    generating: missing time outs, attendance waiting for review, pending
+    time corrections, overtime and leave not decided yet. (Days with no
+    attendance and trips not cleared are worked out on the page.)"""
+    from app.api.attendance import REVIEW_PENDING_STATUSES
+    from app.models.attendance import AttendanceRecord
+    from app.models.leave_request import LeaveRequest
+    from app.models.overtime_request import OvertimeRequest
+    from app.models.time_correction import TimeCorrectionRequest
+
+    ids = set(payload.employee_ids or [])
+    if not ids:
+        return {"items": []}
+    names = {
+        e.id: f"{e.first_name} {e.last_name}"
+        for e in db.query(Employee).filter(Employee.id.in_(ids))
+    }
+
+    def entry(employee_id, day, detail=None):
+        return {"employee_id": employee_id, "name": names.get(employee_id), "date": str(day), "detail": detail}
+
+    records = (
+        db.query(AttendanceRecord)
+        .filter(
+            AttendanceRecord.employee_id.in_(ids),
+            AttendanceRecord.attendance_date >= payload.start,
+            AttendanceRecord.attendance_date <= payload.end,
+        )
+        .all()
+    )
+    today = datetime.utcnow().date()
+    missing_out = [
+        entry(r.employee_id, r.attendance_date, "Timed in, no time out")
+        for r in records
+        if r.check_in_time and not r.check_out_time and r.attendance_date < today
+    ]
+    review = [
+        entry(r.employee_id, r.attendance_date, side_label)
+        for r in records
+        for side, side_label in (("time_in", "Time in"), ("time_out", "Time out"))
+        if getattr(r, f"{side}_face_review_status") in REVIEW_PENDING_STATUSES
+    ]
+    corrections = [
+        entry(t.employee_id, t.attendance_date, (t.reason or "")[:80])
+        for t in db.query(TimeCorrectionRequest).filter(
+            TimeCorrectionRequest.employee_id.in_(ids),
+            TimeCorrectionRequest.status == "pending",
+            TimeCorrectionRequest.attendance_date >= payload.start,
+            TimeCorrectionRequest.attendance_date <= payload.end,
+        )
+    ]
+    overtime = [
+        entry(o.employee_id, o.ot_date, None)
+        for o in db.query(OvertimeRequest).filter(
+            OvertimeRequest.employee_id.in_(ids),
+            OvertimeRequest.status == "pending",
+            OvertimeRequest.ot_date >= payload.start,
+            OvertimeRequest.ot_date <= payload.end,
+        )
+    ]
+    leave = [
+        entry(lr.employee_id, lr.start_date, f"{lr.start_date} to {lr.end_date}")
+        for lr in db.query(LeaveRequest).filter(
+            LeaveRequest.employee_id.in_(ids),
+            LeaveRequest.status == "pending",
+            LeaveRequest.start_date <= payload.end,
+            LeaveRequest.end_date >= payload.start,
+        )
+    ]
+
+    def item(key, label, rows, fix):
+        rows = sorted(rows, key=lambda r: (r["date"], r["name"] or ""))
+        return {"key": key, "label": label, "count": len(rows), "entries": rows[:100], "fix": fix}
+
+    return {
+        "items": [
+            item("missing_time_out", "Missing time outs", missing_out, "/dashboard/attendance"),
+            item("attendance_review", "Attendance waiting for review", review, "/dashboard/approvals?tab=attendance"),
+            item("time_corrections", "Pending time corrections", corrections, "/dashboard/approvals?tab=attendance"),
+            item("overtime", "Overtime not decided yet", overtime, "/dashboard/approvals?tab=overtime"),
+            item("leave", "Leave not decided yet", leave, "/dashboard/approvals?tab=leave"),
+        ]
+    }
+
+
 @router.get("/list")
 def list_payroll_runs(
     department: str = Query(...),
@@ -198,6 +410,11 @@ class GenerateIn(BaseModel):
     employee_count: int = 0
     total_gross: float = 0
     total_net: float = 0
+    # Every employee's computed row as of now (PayrollList.jsx) -- saved
+    # as the pay run snapshot. Older clients don't send it.
+    snapshot: dict | None = None
+    # Pre-check items still open, and the preparer's note for going ahead.
+    precheck: dict | None = None
 
 
 @router.post("/generate")
@@ -221,7 +438,32 @@ def mark_generated(
     run.total_net = payload.total_net
     run.generated_at = datetime.utcnow()
     run.generated_by = current_user.id
-    _log(db, run, "regenerated" if regenerated else "generated", current_user)
+    if payload.snapshot is not None:
+        run.snapshot = json.dumps(payload.snapshot, default=str)
+        run.snapshot_at = run.generated_at
+        run.snapshot_by = current_user.id
+    open_items = [i for i in (payload.precheck or {}).get("items", []) if i.get("count")]
+    run.precheck = json.dumps(
+        {
+            "items": open_items,
+            "note": ((payload.precheck or {}).get("note") or "").strip()[:500] or None,
+            "by": display_name(db.get(User, current_user.id)),
+            "at": run.generated_at.isoformat(),
+        }
+    )
+    _log(
+        db,
+        run,
+        "regenerated" if regenerated else "generated",
+        current_user,
+        (
+            "Generated with open pre-check items: "
+            + ", ".join(f"{i.get('label')} ({i.get('count')})" for i in open_items)
+            + (f". Note: {payload.precheck.get('note')}" if (payload.precheck or {}).get("note") else "")
+        )[:500]
+        if open_items
+        else None,
+    )
     db.commit()
     return _serialize(db, run, current_user, payload.department, payload.cutoff_period)
 

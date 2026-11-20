@@ -1,4 +1,5 @@
 from sqlalchemy import Column, Date, DateTime, Integer, Numeric, String, Text, UniqueConstraint, func
+from sqlalchemy.dialects.mysql import MEDIUMTEXT
 
 from app.core.database import Base
 
@@ -24,6 +25,10 @@ class PayrollRun(Base):
     period_end = Column(Date, nullable=False, index=True)
 
     status = Column(String(20), nullable=False, default="DRAFT")
+    # Payday, set on New Pay Run (prefilled from the group's cutoff rule;
+    # never a Sunday -- moved to the Saturday before). Null on older runs:
+    # the page falls back to the rule's payday.
+    pay_date = Column(Date, nullable=True)
 
     employee_count = Column(Integer, nullable=False, default=0)
     total_gross = Column(Numeric(14, 2), nullable=False, default=0)
@@ -39,6 +44,17 @@ class PayrollRun(Base):
     locked_by = Column(Integer, nullable=True)
     paid_at = Column(DateTime, nullable=True)
     paid_by = Column(Integer, nullable=True)
+
+    # Pay run snapshot: every employee's computed payroll row (with the
+    # day-by-day breakdown) as of Generate, JSON. The pay run page shows
+    # this instead of recalculating, so figures don't move afterwards;
+    # only Generate again (Draft / Generated) replaces it.
+    snapshot = Column(Text().with_variant(MEDIUMTEXT(), "mysql"), nullable=True)
+    snapshot_at = Column(DateTime, nullable=True)
+    snapshot_by = Column(Integer, nullable=True)
+    # Pre-check at Generate, JSON: {"items": [{key, label, count}], "note",
+    # "by", "at"} -- what was still open and who generated anyway.
+    precheck = Column(Text, nullable=True)
 
     # Latest "returned for correction" / "unlocked" reason.
     return_note = Column(String(500), nullable=True)
