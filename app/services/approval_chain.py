@@ -47,6 +47,10 @@ APPROVAL_KINDS = (
     "trip_coordinator",
     "trip_office",
     "trip_finance",
+    # Not an approval: the unit's head may file fuel requests for yard
+    # units with no assigned driver (e.g. Motorpool head). Their request
+    # then goes to the nearest head above with "fuel_request" ticked.
+    "yard_fuel",
 )
 
 

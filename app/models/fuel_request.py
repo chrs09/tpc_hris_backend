@@ -46,6 +46,10 @@ class FuelRequest(Base):
     # when it isn't the assigned unit. Nullable for older rows.
     vehicle_unit_id = Column(Integer, ForeignKey("tpc_vehicle_units.id"), nullable=True, index=True)
     unit_reason = Column(Text, nullable=True)
+    # Filed for a yard unit with no assigned driver by a head with "Fuel
+    # for yard units" ticked on the Org Chart (e.g. Motorpool head) --
+    # not their own unit. One open request per such unit.
+    for_yard = Column(Boolean, nullable=False, default=False, server_default="0")
 
     status = Column(String(30), nullable=False, default="pending", index=True)
 

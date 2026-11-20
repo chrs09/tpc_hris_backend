@@ -19,7 +19,9 @@ from app.core.database import get_db
 from app.core.dependencies import get_current_user, require_role_or_module
 from app.models.employees import Employee
 from app.models.fuel_request import FuelRequest
+from app.models.org_unit import OrgUnit
 from app.services.approval_chain import (
+    unit_approves,
     acting_index,
     append_log,
     describe_chain,
@@ -101,6 +103,8 @@ def _serialize(req: FuelRequest, db: Session | None = None) -> dict:
         "vehicle_unit_id": req.vehicle_unit_id,
         # Why it isn't the driver's assigned unit (None when it is).
         "unit_reason": req.unit_reason,
+        # Filed by a yard head for a unit with no driver.
+        "for_yard": bool(req.for_yard),
         "fuel_code": req.fuel_code,
         "liters": float(req.liters) if req.liters is not None else None,
         "issued_by": display_name(req.issued_by) if req.issued_by else None,
@@ -283,14 +287,63 @@ def _unit_options(db: Session, user: User) -> dict:
     return out
 
 
+# =========================
+# YARD UNITS (no assigned driver)
+#
+# A head with "Fuel for yard units" ticked on their Org Chart unit (e.g.
+# Motorpool head) files fuel for trucks in the yard that have no driver.
+# Their request goes to the nearest head above them with "Fuel Request"
+# ticked (as for any head's own request), then the fuel code as usual.
+# =========================
+YARD_NOTE = "Yard unit (no assigned driver)"
+
+
+def _can_file_yard(db: Session, user: User) -> bool:
+    return any(
+        "yard_fuel" in unit_approves(unit)
+        for unit in db.query(OrgUnit).filter(OrgUnit.head_user_id == user.id)
+    )
+
+
+def _yard_choices(db: Session) -> list:
+    """Active units with no assigned driver (any status but retired),
+    without a fuel request already in progress."""
+    busy = {
+        unit_id
+        for (unit_id,) in db.query(FuelRequest.vehicle_unit_id).filter(
+            FuelRequest.vehicle_unit_id.isnot(None),
+            FuelRequest.status.in_(OPEN_STATUSES),
+        )
+    }
+    units = (
+        db.query(VehicleUnit)
+        .filter(VehicleUnit.is_active.is_(True), VehicleUnit.assigned_driver_id.is_(None))
+        .order_by(VehicleUnit.plate_number.asc())
+        .all()
+    )
+    statuses = unit_statuses(db, units)
+    return [
+        _unit_brief(u, statuses[u.id])
+        for u in units
+        if u.id not in busy and statuses[u.id]["status"] != "retired"
+    ]
+
+
 @router.get("/unit-options")
 def fuel_unit_options(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """For the mobile Fuel form: the unit to fuel, or the units to pick
-    from when the driver's own unit is down. See _unit_options."""
-    return _unit_options(db, current_user)
+    from when the driver's own unit is down. See _unit_options. A yard
+    head also gets `yard`: the yard units they can file for."""
+    out = _unit_options(db, current_user)
+    out["yard"] = (
+        {"allowed": True, "choices": _yard_choices(db)}
+        if _can_file_yard(db, current_user)
+        else {"allowed": False, "choices": []}
+    )
+    return out
 
 
 @router.post("")
@@ -304,16 +357,34 @@ def create_fuel_request(
     plate_number: str | None = Form(None),
     # Odometer reading in km (typed; the photo is the proof).
     odometer_reading: int | None = Form(None),
+    # A yard head filing for a unit with no driver (vehicle_unit_id).
+    for_yard: bool = Form(False),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    if not _is_driver(current_user):
+    if for_yard:
+        if not _can_file_yard(db, current_user):
+            raise HTTPException(
+                status_code=403,
+                detail="You can't request fuel for yard units. Ask an admin to tick "
+                "\"Fuel for yard units\" on your Org Chart unit.",
+            )
+    elif not _is_driver(current_user):
         raise HTTPException(status_code=403, detail="Only drivers can request fuel.")
 
-    options = _unit_options(db, current_user)
+    options = _unit_options(db, current_user) if not for_yard else {"mode": "yard", "reason": YARD_NOTE}
     unit_id = None
     unit_reason = options["reason"]
-    if options["mode"] in ("assigned", "trip"):
+    if for_yard:
+        chosen = next((c for c in _yard_choices(db) if c["id"] == vehicle_unit_id), None)
+        if chosen is None:
+            raise HTTPException(
+                status_code=400,
+                detail="Pick a yard unit -- one with no assigned driver and no fuel request in progress.",
+            )
+        unit_id = chosen["id"]
+        plate_number = chosen["plate_number"]
+    elif options["mode"] in ("assigned", "trip"):
         unit_id = options["unit"]["id"]
         plate_number = options["unit"]["plate_number"]
     elif vehicle_unit_id is not None:
@@ -347,13 +418,18 @@ def create_fuel_request(
     if odometer_reading is not None and not 0 <= odometer_reading <= 9_999_999:
         raise HTTPException(status_code=400, detail="Enter a valid odometer reading.")
 
+    # One open request for their own unit; yard ones count per unit
+    # (checked in _yard_choices), so a yard head can fuel several trucks.
     open_request = (
         db.query(FuelRequest)
         .filter(
             FuelRequest.user_id == current_user.id,
             FuelRequest.status.in_(OPEN_STATUSES),
+            FuelRequest.for_yard.is_(False),
         )
         .first()
+        if not for_yard
+        else None
     )
     if open_request and _code_expired(open_request):
         raise HTTPException(
@@ -387,6 +463,7 @@ def create_fuel_request(
         plate_number=plate_number,
         vehicle_unit_id=unit_id,
         unit_reason=unit_reason,
+        for_yard=bool(for_yard),
         city=city,
         odo_photo_url="",
         odometer_reading=odometer_reading,
