@@ -29,7 +29,7 @@ from app.services.cash_advance_payroll import (
     apply_payroll_deduction,
     payroll_suggestions,
 )
-from app.services import trip_charge_payroll
+from app.services import loan_payroll, trip_charge_payroll
 
 router = APIRouter(
     prefix="/payroll-deductions",
@@ -94,6 +94,17 @@ def _save_deduction(db: Session, payload: dict, user: User) -> PayrollDeduction:
         )
         payload["trip_charge_deduction"] = charge["applied"]
 
+    # SSS / Pag-IBIG loans (Finance -> Loan Amortization): posted to the
+    # loan, capped at what's left. No loan on file = kept as typed.
+    for field, loan_type in (("sss_loan", "SSS"), ("pagibig_loan", "PAGIBIG")):
+        if field in payload and payload[field] is not None:
+            posted = loan_payroll.apply_loan_deduction(
+                db, payload["employee_id"], loan_type, payload["cutoff_period"],
+                payload.get(field) or 0, user_id,
+            )
+            if posted is not None:
+                payload[field] = posted["applied"]
+
     if existing:
         existing.department = payload["department"]
 
@@ -111,6 +122,8 @@ def _save_deduction(db: Session, payload: dict, user: User) -> PayrollDeduction:
         # Deductions step amounts (kept so a regenerate starts from them).
         if "sss_loan" in payload:
             existing.sss_loan = payload["sss_loan"]
+        if "pagibig_loan" in payload:
+            existing.pagibig_loan = payload["pagibig_loan"]
         if "other_deduction" in payload:
             existing.other_deduction = payload["other_deduction"]
         if "other_deduction_note" in payload:
@@ -148,6 +161,7 @@ def _save_deduction(db: Session, payload: dict, user: User) -> PayrollDeduction:
         pagibig_deduction=payload["pagibig_deduction"],
         withholding_tax=payload.get("withholding_tax"),
         sss_loan=payload.get("sss_loan"),
+        pagibig_loan=payload.get("pagibig_loan"),
         other_deduction=payload.get("other_deduction"),
         other_deduction_note=(payload.get("other_deduction_note") or "")[:200] or None,
         tardiness_deduction=payload.get("tardiness_deduction", 0),
@@ -235,6 +249,26 @@ def get_trip_charges_for_cutoff(
     if allowed is not None:
         ids = [i for i in ids if i in allowed]
     suggestions = trip_charge_payroll.payroll_suggestions(db, ids, cutoff_period)
+    return {str(emp): data for emp, data in suggestions.items()}
+
+
+@router.get("/loans")
+def get_loans_for_cutoff(
+    cutoff_period: str,
+    employee_ids: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(_require_payroll),
+):
+    """SSS / Pag-IBIG loan amortization to deduct this cutoff, per employee:
+    {"<id>": {"SSS": {suggested, posted, balance_before}, "PAGIBIG": {...}}}."""
+    try:
+        ids = [int(x) for x in employee_ids.split(",") if x.strip()]
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid employee ids.")
+    allowed = allowed_employee_ids(db, current_user)
+    if allowed is not None:
+        ids = [i for i in ids if i in allowed]
+    suggestions = loan_payroll.payroll_suggestions(db, ids, cutoff_period)
     return {str(emp): data for emp, data in suggestions.items()}
 
 

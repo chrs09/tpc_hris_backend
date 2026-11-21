@@ -558,6 +558,7 @@ class DeductionLineIn(BaseModel):
     employee_id: int
     segment: str = ""
     sssLoan: float | None = None
+    pagibigLoan: float | None = None
     cashAdvance: float | None = None
     tripCharge: float | None = None
     personalDeduction: float | None = None
@@ -602,12 +603,12 @@ def save_deductions(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Deductions step: set cash advance, trip charges, SSS loan and other
+    """Deductions step: set cash advance, trip charges, SSS / Pag-IBIG loans and other
     deductions on the snapshot. Cash advance / trip charges post to the
     balances (capped at what's owed). Net pay moves by the difference and
     can't go below zero. Clears the confirmation."""
     from app.models.payroll_deductions import PayrollDeduction
-    from app.services import trip_charge_payroll
+    from app.services import loan_payroll, trip_charge_payroll
     from app.services.cash_advance_payroll import apply_payroll_deduction
 
     ensure_can_payroll(db, current_user, PAYROLL_PREPARE)
@@ -617,7 +618,7 @@ def save_deductions(
     rows = data.get("rows") or []
     by_key = {_row_key(r): r for r in rows}
 
-    fields = ("sssLoan", "cashAdvance", "tripCharge", "personalDeduction")
+    fields = ("sssLoan", "pagibigLoan", "cashAdvance", "tripCharge", "personalDeduction")
     changed = []
     for line in payload.lines:
         row = by_key.get((line.employee_id, line.segment or ""))
@@ -651,6 +652,20 @@ def save_deductions(
             row["tripChargeBalanceAfter"] = round(charge["balance_after"], 2)
         elif "tripCharge" in new:
             new.pop("tripCharge")
+        # SSS / Pag-IBIG loans (Loan Amortization): last part, capped at
+        # what's left; no loan on file = kept as typed.
+        for field, loan_type in (("sssLoan", "SSS"), ("pagibigLoan", "PAGIBIG")):
+            if field not in new:
+                continue
+            if not last_part:
+                new.pop(field)
+                continue
+            posted = loan_payroll.apply_loan_deduction(
+                db, line.employee_id, loan_type, payload.cutoff_period, new[field], current_user.id
+            )
+            if posted is not None:
+                new[field] = round(posted["applied"], 2)
+                row[f"{field}BalanceAfter"] = round(posted["balance_after"], 2)
 
         old_total = sum(float(row.get(f) or 0) for f in fields)
         new_total = sum(float(new.get(f, row.get(f)) or 0) for f in fields)
@@ -694,6 +709,7 @@ def save_deductions(
             )
             db.add(saved)
         saved.sss_loan = row.get("sssLoan") or 0
+        saved.pagibig_loan = row.get("pagibigLoan") or 0
         saved.other_deduction = row.get("personalDeduction") or 0
         saved.other_deduction_note = row.get("personalDeductionNote")
         if last_part:
@@ -736,7 +752,7 @@ def confirm_deductions(
     total = sum(
         float(r.get(f) or 0)
         for r in rows
-        for f in ("sssLoan", "cashAdvance", "tripCharge", "personalDeduction")
+        for f in ("sssLoan", "pagibigLoan", "cashAdvance", "tripCharge", "personalDeduction")
     )
     _log(db, run, "deductions_confirmed", current_user, f"Deductions ₱{total:,.2f}")
     db.commit()

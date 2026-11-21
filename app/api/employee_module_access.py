@@ -135,7 +135,7 @@ MODULE_GROUPS = {
     ],
     # trip_expenses: drivers' trip budgets / expense reports -- release,
     # review and settle (app/api/trip_expenses.py).
-    "finance": ["finance_trips", "finance_expenses", "cash_advance", "bank_master", "trip_expenses"],
+    "finance": ["finance_trips", "finance_expenses", "cash_advance", "bank_master", "trip_expenses", "loan_amortization"],
     "administrator": [
         "users",
         "hierarchy",

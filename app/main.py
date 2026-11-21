@@ -40,6 +40,7 @@ from app.api.payroll import payroll_groups
 from app.api import trip_expenses
 from app.api import schedule_changes
 from app.api import gov_contributions
+from app.api import loan_amortization
 from app.api import hr_dashboard
 from app.api import schedule_template as schedule_template_router
 from app.api import attendance_locations as attendance_locations_router
@@ -320,6 +321,7 @@ app.include_router(hr_dashboard.router, prefix="/api")
 app.include_router(incentive_programs.router, prefix="/api")
 app.include_router(incentive_runs.router, prefix="/api")
 app.include_router(gov_contributions.router, prefix="/api")
+app.include_router(loan_amortization.router, prefix="/api")
 app.include_router(payroll_runs.router, prefix="/api")
 app.include_router(schedule_template_router.router, prefix="/api")
 app.include_router(attendance_locations_router.router, prefix="/api")
