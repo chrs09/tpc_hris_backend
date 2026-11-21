@@ -108,6 +108,14 @@ def _save_deduction(db: Session, payload: dict, user: User) -> PayrollDeduction:
         if "withholding_tax" in payload:
             existing.withholding_tax = payload["withholding_tax"]
 
+        # Deductions step amounts (kept so a regenerate starts from them).
+        if "sss_loan" in payload:
+            existing.sss_loan = payload["sss_loan"]
+        if "other_deduction" in payload:
+            existing.other_deduction = payload["other_deduction"]
+        if "other_deduction_note" in payload:
+            existing.other_deduction_note = (payload["other_deduction_note"] or "")[:200] or None
+
         existing.tardiness_deduction = payload.get("tardiness_deduction", 0)
 
         existing.undertime_deduction = payload.get("undertime_deduction", 0)
@@ -139,6 +147,9 @@ def _save_deduction(db: Session, payload: dict, user: User) -> PayrollDeduction:
         philhealth_deduction=payload["philhealth_deduction"],
         pagibig_deduction=payload["pagibig_deduction"],
         withholding_tax=payload.get("withholding_tax"),
+        sss_loan=payload.get("sss_loan"),
+        other_deduction=payload.get("other_deduction"),
+        other_deduction_note=(payload.get("other_deduction_note") or "")[:200] or None,
         tardiness_deduction=payload.get("tardiness_deduction", 0),
         undertime_deduction=payload.get("undertime_deduction", 0),
         absent_deduction=payload.get("absent_deduction", 0),

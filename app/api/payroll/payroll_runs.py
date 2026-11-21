@@ -144,6 +144,7 @@ def _serialize(db: Session, run: PayrollRun | None, user: User, department: str,
         [
             run.generated_by, run.submitted_by, run.approved_by, run.locked_by, run.paid_by,
             run.snapshot_by, run.reviewed_by, run.contributions_by,
+            run.deductions_confirmed_by,
         ]
         if run
         else [],
@@ -166,6 +167,7 @@ def _serialize(db: Session, run: PayrollRun | None, user: User, department: str,
         "total_net": float(run.total_net or 0) if run else 0,
         "generated": stamp("generated"),
         "submitted": stamp("submitted"),
+        "deductions_confirmed": stamp("deductions_confirmed"),
         "reviewed": stamp("reviewed"),
         "contributions": stamp("contributions"),
         "approved": stamp("approved"),
@@ -183,7 +185,17 @@ def _serialize(db: Session, run: PayrollRun | None, user: User, department: str,
         # What this viewer may do next.
         # Generate + edit figures (deductions, OT) -- also gates the inputs.
         "can_generate": can_prepare and status in EDITABLE_STATUSES,
-        "can_submit": can_prepare and status == "GENERATED",
+        # Deductions step (at Generated, on the snapshot): CA, trip
+        # charges, SSS loan, other. Submit needs them confirmed.
+        "can_edit_deductions": can_prepare and status == "GENERATED" and bool(run and run.snapshot),
+        "can_confirm_deductions": can_prepare
+        and status == "GENERATED"
+        and bool(run and run.snapshot)
+        and not (run and run.deductions_confirmed_at),
+        "deductions_needed": bool(run and run.snapshot) and not (run and run.deductions_confirmed_at),
+        "can_submit": can_prepare
+        and status == "GENERATED"
+        and not (run and run.snapshot and not run.deductions_confirmed_at),
         # For Review -> Contributions (the reviewer forwards it).
         "can_forward": can_approve and status == "FOR_REVIEW",
         # Contributions: edit SSS / PhilHealth / Pag-IBIG / tax only, then
@@ -476,6 +488,8 @@ def mark_generated(
     run.total_net = payload.total_net
     run.generated_at = datetime.utcnow()
     run.generated_by = current_user.id
+    # New figures: the deductions need confirming again.
+    run.deductions_confirmed_at = run.deductions_confirmed_by = None
     if payload.snapshot is not None:
         run.snapshot = json.dumps(payload.snapshot, default=str)
         run.snapshot_at = run.generated_at
@@ -533,6 +547,200 @@ TRANSITIONS = {
     "mark_paid": (("LOCKED",), "PAID", PAYROLL_RELEASE, "paid", False),
     "unlock": (("LOCKED",), "APPROVED", "superadmin", None, True),
 }
+
+
+# =========================================================
+# DEDUCTIONS STEP (at Generated): cash advance, trip charges, SSS loan
+# and other deductions, set on the snapshot after Generate, then
+# confirmed. Government contributions are the Contributions step.
+# =========================================================
+class DeductionLineIn(BaseModel):
+    employee_id: int
+    segment: str = ""
+    sssLoan: float | None = None
+    cashAdvance: float | None = None
+    tripCharge: float | None = None
+    personalDeduction: float | None = None
+    personalDeductionNote: str | None = None
+
+
+class DeductionsIn(BaseModel):
+    department: str
+    cutoff_period: str
+    lines: list[DeductionLineIn]
+
+
+def _snapshot_run(db: Session, department: str, cutoff_period: str) -> PayrollRun:
+    run = (
+        db.query(PayrollRun)
+        .filter(PayrollRun.department == department, PayrollRun.cutoff_period == cutoff_period)
+        .first()
+    )
+    if not run or run.status != "GENERATED":
+        raise HTTPException(
+            status_code=409,
+            detail="Deductions can only be changed while the payroll is Generated.",
+        )
+    if not run.snapshot:
+        raise HTTPException(status_code=409, detail="Generate the payroll first.")
+    return run
+
+
+def _row_key(row):
+    emp = row.get("employee") or {}
+    return (emp.get("id"), (emp.get("_segment") or {}).get("key") or "")
+
+
+def _row_name(row):
+    emp = row.get("employee") or {}
+    return f"{emp.get('first_name', '')} {emp.get('last_name', '')}".strip()
+
+
+@router.post("/deductions")
+def save_deductions(
+    payload: DeductionsIn,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Deductions step: set cash advance, trip charges, SSS loan and other
+    deductions on the snapshot. Cash advance / trip charges post to the
+    balances (capped at what's owed). Net pay moves by the difference and
+    can't go below zero. Clears the confirmation."""
+    from app.models.payroll_deductions import PayrollDeduction
+    from app.services import trip_charge_payroll
+    from app.services.cash_advance_payroll import apply_payroll_deduction
+
+    ensure_can_payroll(db, current_user, PAYROLL_PREPARE)
+    ensure_payroll_allowed(db, current_user, payload.department)
+    run = _snapshot_run(db, payload.department, payload.cutoff_period)
+    data = json.loads(run.snapshot)
+    rows = data.get("rows") or []
+    by_key = {_row_key(r): r for r in rows}
+
+    fields = ("sssLoan", "cashAdvance", "tripCharge", "personalDeduction")
+    changed = []
+    for line in payload.lines:
+        row = by_key.get((line.employee_id, line.segment or ""))
+        if row is None:
+            continue
+        seg = (row.get("employee") or {}).get("_segment") or {}
+        last_part = not seg or seg.get("is_last", True)
+        new = {}
+        for field in fields:
+            value = getattr(line, field)
+            if value is None:
+                continue
+            if value < 0:
+                raise HTTPException(status_code=400, detail="Amounts can't be negative.")
+            new[field] = round(value, 2)
+
+        # Cash advance / trip charges are posted once per cutoff (last part).
+        if "cashAdvance" in new and last_part:
+            ca = apply_payroll_deduction(
+                db, line.employee_id, payload.cutoff_period, new["cashAdvance"], current_user.id
+            )
+            new["cashAdvance"] = round(ca["applied"], 2)
+            row["cashAdvanceBalanceAfter"] = round(ca["balance_after"], 2)
+        elif "cashAdvance" in new:
+            new.pop("cashAdvance")
+        if "tripCharge" in new and last_part:
+            charge = trip_charge_payroll.apply_payroll_deduction(
+                db, line.employee_id, payload.cutoff_period, new["tripCharge"], current_user.id
+            )
+            new["tripCharge"] = round(charge["applied"], 2)
+            row["tripChargeBalanceAfter"] = round(charge["balance_after"], 2)
+        elif "tripCharge" in new:
+            new.pop("tripCharge")
+
+        old_total = sum(float(row.get(f) or 0) for f in fields)
+        new_total = sum(float(new.get(f, row.get(f)) or 0) for f in fields)
+        delta = round(new_total - old_total, 2)
+        net_after = round(float(row.get("netPay") or 0) - delta, 2)
+        if net_after < 0:
+            db.rollback()
+            raise HTTPException(
+                status_code=400,
+                detail=f"{_row_name(row)}: these deductions would make net pay negative (₱{net_after:,.2f}).",
+            )
+        row.update(new)
+        if line.personalDeductionNote is not None:
+            row["personalDeductionNote"] = line.personalDeductionNote.strip()[:200] or None
+        row["netPay"] = net_after
+        row["totalDeductions"] = round(float(row.get("totalDeductions") or 0) + delta, 2)
+        row["deductionsEdited"] = True
+        changed.append(row)
+
+        saved = (
+            db.query(PayrollDeduction)
+            .filter(
+                PayrollDeduction.employee_id == line.employee_id,
+                PayrollDeduction.cutoff_period == payload.cutoff_period,
+                PayrollDeduction.department == payload.department,
+                PayrollDeduction.segment == (line.segment or ""),
+            )
+            .first()
+        )
+        if saved is None:
+            saved = PayrollDeduction(
+                cutoff_period=payload.cutoff_period,
+                employee_id=line.employee_id,
+                department=payload.department,
+                segment=line.segment or "",
+                gross_pay=row.get("grossPay") or 0,
+                sss_deduction=row.get("sssDeduction") or 0,
+                philhealth_deduction=row.get("philhealthDeduction") or 0,
+                pagibig_deduction=row.get("pagibigDeduction") or 0,
+                net_pay=0,
+            )
+            db.add(saved)
+        saved.sss_loan = row.get("sssLoan") or 0
+        saved.other_deduction = row.get("personalDeduction") or 0
+        saved.other_deduction_note = row.get("personalDeductionNote")
+        if last_part:
+            saved.cash_advance_deduction = row.get("cashAdvance") or 0
+            saved.trip_charge_deduction = row.get("tripCharge") or 0
+        saved.net_pay = row["netPay"]
+
+    run.snapshot = json.dumps(data, default=str)
+    run.total_net = round(sum(float(r.get("netPay") or 0) for r in rows), 2)
+    if changed:
+        run.deductions_confirmed_at = run.deductions_confirmed_by = None
+        names = ", ".join(_row_name(r) for r in changed[:5])
+        more = f" and {len(changed) - 5} more" if len(changed) > 5 else ""
+        _log(db, run, "deductions_edited", current_user, f"{names}{more}"[:500])
+    db.commit()
+    return {
+        "run": _serialize(db, run, current_user, payload.department, payload.cutoff_period),
+        "changed": len(changed),
+    }
+
+
+class RunKeyIn(BaseModel):
+    department: str
+    cutoff_period: str
+
+
+@router.post("/deductions/confirm")
+def confirm_deductions(
+    payload: RunKeyIn,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Deductions checked: Submit for Review becomes possible."""
+    ensure_can_payroll(db, current_user, PAYROLL_PREPARE)
+    ensure_payroll_allowed(db, current_user, payload.department)
+    run = _snapshot_run(db, payload.department, payload.cutoff_period)
+    run.deductions_confirmed_at = datetime.utcnow()
+    run.deductions_confirmed_by = current_user.id
+    rows = json.loads(run.snapshot).get("rows") or []
+    total = sum(
+        float(r.get(f) or 0)
+        for r in rows
+        for f in ("sssLoan", "cashAdvance", "tripCharge", "personalDeduction")
+    )
+    _log(db, run, "deductions_confirmed", current_user, f"Deductions ₱{total:,.2f}")
+    db.commit()
+    return _serialize(db, run, current_user, payload.department, payload.cutoff_period)
 
 
 class ContributionLineIn(BaseModel):
@@ -668,6 +876,11 @@ def transition_payroll_run(
         raise HTTPException(
             status_code=409,
             detail=f"Payroll is {run.status.replace('_', ' ').lower()}; it can't be moved that way.",
+        )
+    if payload.action == "submit" and run.snapshot and not run.deductions_confirmed_at:
+        raise HTTPException(
+            status_code=409,
+            detail="Confirm the deductions first (Deductions panel), then submit for review.",
         )
 
     run.status = new_status

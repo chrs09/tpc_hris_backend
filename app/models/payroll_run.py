@@ -45,6 +45,10 @@ class PayrollRun(Base):
     submitted_by = Column(Integer, nullable=True)
     # For Review -> Contributions (forwarded) and Contributions -> Head
     # Review (government contributions done).
+    # Deductions step (at Generated): confirmed before Submit for Review;
+    # Generate again or a deductions change clears it.
+    deductions_confirmed_at = Column(DateTime, nullable=True)
+    deductions_confirmed_by = Column(Integer, nullable=True)
     reviewed_at = Column(DateTime, nullable=True)
     reviewed_by = Column(Integer, nullable=True)
     contributions_at = Column(DateTime, nullable=True)
