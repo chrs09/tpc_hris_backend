@@ -17,12 +17,14 @@ Dashboard groups: Available, Assigned/In transit, Motorpool (breakdown,
 maintenance), Not available (hold, retired).
 """
 
+import calendar
 from collections import defaultdict
 from datetime import date, datetime, time, timedelta
 
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
+from app.models.app_setting import AppSetting
 from app.models.trips import Trip, TripStatus
 from app.models.vehicle_maintenance import VehicleMaintenance
 from app.models.vehicle_unit import VehicleStatusLog, VehicleUnit
@@ -182,6 +184,75 @@ def set_status(db: Session, unit: VehicleUnit, status: str, reason: str | None,
     unit.is_active = status != "retired"
 
 
+# Utilization Settings (Fleet Management): the base days a truck is
+# expected to work in a month -- the report's denominator. A partial month
+# counts the full base ("full") or its share of the month ("prorate").
+BASE_DAYS_KEY = "fleet_utilization_base_days"
+PARTIAL_MONTH_KEY = "fleet_utilization_partial_month"
+DEFAULT_BASE_DAYS = 26
+PARTIAL_MONTH_MODES = ("full", "prorate")
+
+
+def utilization_settings(db: Session) -> dict:
+    rows = {
+        r.key: r.value
+        for r in db.query(AppSetting).filter(AppSetting.key.in_([BASE_DAYS_KEY, PARTIAL_MONTH_KEY]))
+    }
+    try:
+        base = float(rows.get(BASE_DAYS_KEY) or DEFAULT_BASE_DAYS)
+    except ValueError:
+        base = DEFAULT_BASE_DAYS
+    mode = rows.get(PARTIAL_MONTH_KEY)
+    return {
+        "base_days": base if 0 < base <= 31 else DEFAULT_BASE_DAYS,
+        "partial_month": mode if mode in PARTIAL_MONTH_MODES else "full",
+    }
+
+
+def save_utilization_settings(db: Session, base_days: float, partial_month: str) -> dict:
+    if not 0 < base_days <= 31:
+        raise HTTPException(status_code=400, detail="Base days must be between 1 and 31.")
+    if partial_month not in PARTIAL_MONTH_MODES:
+        raise HTTPException(status_code=400, detail="Pick how a partial month counts.")
+    values = {
+        BASE_DAYS_KEY: (f"{base_days:g}", "Truck Utilization: base days a truck should work in a month."),
+        PARTIAL_MONTH_KEY: (partial_month, "Truck Utilization: a partial month counts the full base or its share."),
+    }
+    for key, (value, description) in values.items():
+        row = db.query(AppSetting).filter(AppSetting.key == key).first()
+        if row is None:
+            db.add(AppSetting(key=key, value=value, description=description))
+        else:
+            row.value = value
+    return {"base_days": base_days, "partial_month": partial_month}
+
+
+def _months(start: date, end: date):
+    """(first day, last day, days in month) for each month start..end touches."""
+    y, m = start.year, start.month
+    while (y, m) <= (end.year, end.month):
+        dim = calendar.monthrange(y, m)[1]
+        yield max(start, date(y, m, 1)), min(end, date(y, m, dim)), dim
+        y, m = (y + 1, 1) if m == 12 else (y, m + 1)
+
+
+def base_days_for(start: date, end: date, settings: dict, excluded: set | None = None) -> float:
+    """The denominator for start..end: base days per month, for each month
+    the period touches. `excluded` days (retired) don't count."""
+    total = 0.0
+    excluded = excluded or set()
+    for first, last, dim in _months(start, end):
+        span = (last - first).days + 1
+        counted = span - sum(1 for d in excluded if first <= d <= last)
+        if counted <= 0:
+            continue
+        if settings["partial_month"] == "prorate":
+            total += settings["base_days"] * counted / dim
+        else:
+            total += settings["base_days"] * counted / span
+    return round(total, 2)
+
+
 def _days(start: date, end: date):
     d = start
     while d <= end:
@@ -192,7 +263,8 @@ def _days(start: date, end: date):
 def utilization(db: Session, start: date, end: date) -> dict:
     """Per truck for start..end (PH dates): trips, days used, hours on
     trips, downtime days (breakdown / maintenance / hold / open repairs)
-    and utilization = days used / days in service."""
+    and utilization = days used / base days (Utilization Settings)."""
+    settings = utilization_settings(db)
     utc_from = ph_to_utc(datetime.combine(start, time.min))
     utc_to = ph_to_utc(datetime.combine(end + timedelta(days=1), time.min))
     period_days = (end - start).days + 1
@@ -249,7 +321,7 @@ def utilization(db: Session, start: date, end: date) -> dict:
         if len(retired) >= period_days and not trip_count[unit.id]:
             continue  # out of service the whole period
         down = (down_days[unit.id] - used_days[unit.id]) - retired
-        in_service = max(period_days - len(retired) - len(down), 0)
+        base = base_days_for(start, end, settings, retired)
         used = len(used_days[unit.id])
         rows.append({
             "vehicle_unit_id": unit.id,
@@ -263,21 +335,22 @@ def utilization(db: Session, start: date, end: date) -> dict:
             "days_used": used,
             "hours_on_trips": round(hours[unit.id], 1),
             "downtime_days": len(down),
-            "idle_days": max(in_service - used, 0),
-            "days_in_service": in_service,
-            "utilization": round(used / in_service * 100, 1) if in_service else 0.0,
+            "idle_days": round(max(base - used - len(down), 0), 1),
+            "base_days": base,
+            "utilization": round(used / base * 100, 1) if base else 0.0,
         })
     rows.sort(key=lambda r: (-r["utilization"], r["unit_code"] or ""))
 
     def summarize(items):
-        service = sum(r["days_in_service"] for r in items)
+        service = sum(r["base_days"] for r in items)
         used = sum(r["days_used"] for r in items)
         return {
             "trucks": len(items),
             "trips": sum(r["trips"] for r in items),
             "days_used": used,
             "downtime_days": sum(r["downtime_days"] for r in items),
-            "idle_days": sum(r["idle_days"] for r in items),
+            "idle_days": round(sum(r["idle_days"] for r in items), 1),
+            "base_days": round(service, 2),
             "utilization": round(used / service * 100, 1) if service else 0.0,
         }
 
@@ -288,6 +361,8 @@ def utilization(db: Session, start: date, end: date) -> dict:
         "date_from": start.isoformat(),
         "date_to": end.isoformat(),
         "period_days": period_days,
+        "settings": settings,
+        "base_days": base_days_for(start, end, settings),
         "summary": summarize(rows),
         "by_truck_type": [
             {"truck_type": name, **summarize(items)} for name, items in sorted(by_type.items())

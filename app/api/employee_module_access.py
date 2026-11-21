@@ -130,6 +130,8 @@ MODULE_GROUPS = {
         "vehicle_list",
         "vehicle_maintenance",
         "truck_types",
+        # Truck Utilization's base days (app/services/fleet_status.py).
+        "utilization_settings",
         # Driver fuel requests (app/api/fuel_requests.py).
         "fuel_requests",
     ],

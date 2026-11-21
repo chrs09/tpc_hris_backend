@@ -180,6 +180,46 @@ def get_truck_utilization(
     return fleet_status.utilization(db, start, end)
 
 
+_UTIL_SETTINGS_MODULE = "fleet_management.utilization_settings"
+
+
+@router.get("/utilization-settings")
+def get_utilization_settings(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(
+        require_role_or_module(
+            roles=["superadmin", "coordinator_admin"],
+            module_key=["fleet_management.vehicle_list", _UTIL_SETTINGS_MODULE],
+        )
+    ),
+):
+    """Fleet Management -> Utilization Settings: the report's base days."""
+    return fleet_status.utilization_settings(db)
+
+
+class UtilizationSettingsPayload(BaseModel):
+    base_days: float
+    partial_month: str = "full"
+
+
+@router.put("/utilization-settings")
+def save_utilization_settings(
+    payload: UtilizationSettingsPayload,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(
+        require_role_or_module(roles=["superadmin"], module_key=_UTIL_SETTINGS_MODULE)
+    ),
+):
+    from app.core.dependencies import has_editable_grant
+
+    role = current_user.role.value if hasattr(current_user.role, "value") else current_user.role
+    if role != "superadmin" and not has_editable_grant(db, current_user, [_UTIL_SETTINGS_MODULE]):
+        raise HTTPException(status_code=403, detail="You can view these settings but not change them.")
+    saved = fleet_status.save_utilization_settings(db, payload.base_days, payload.partial_month)
+    db.commit()
+    return saved
+
+
 @router.get("/vehicle-units/drivers")
 def get_unit_drivers(
     db: Session = Depends(get_db),
