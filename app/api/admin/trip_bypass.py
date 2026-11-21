@@ -287,18 +287,28 @@ def bypass_checkout(
     reason: str = Form(...),
     performed_at: str | None = Form(None),
     odometer_reading: int = Form(0),
-    invoice_photo: UploadFile | None = File(None),
-    lm_photo: UploadFile | None = File(None),
+    invoice_photo: list[UploadFile] | None = File(None),
+    lm_photo: list[UploadFile] | None = File(None),
     lm_checkout_stamped_photo: UploadFile | None = File(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(_require_bypass_access),
 ):
     """Destination store(s) are already set on the trip from dispatch
     (Trip.planned_store_ids) -- this bypass step only needs the odometer
-    reading and the same three photos the real Checkout step collects."""
+    reading and the same photos the real Checkout step collects: one or
+    more Invoice pages, one or more LM pages, and the stamped LM. All
+    required, same as the driver's app."""
     trip = _get_trip(db, trip_id)
     if trip.status != TripStatus.ASSIGNED:
         raise HTTPException(status_code=400, detail="Trip is not in ASSIGNED status.")
+
+    invoice_pages = [p for p in (invoice_photo or []) if p is not None and p.filename]
+    lm_pages = [p for p in (lm_photo or []) if p is not None and p.filename]
+    if not invoice_pages or not lm_pages or lm_checkout_stamped_photo is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Invoice, LM and the stamped LM photos are required.",
+        )
 
     # No floor here on purpose: recording a trip from an earlier day means
     # dispatching it today, so its dispatch time is always later than the
@@ -309,9 +319,9 @@ def bypass_checkout(
 
     file_service = FileService()
 
-    if invoice_photo is not None:
+    for page in invoice_pages:
         invoice_url = file_service.upload_trip_checkout_invoice(
-            invoice_photo, trip.id,
+            page, trip.id,
             geofence_label=_geofence_label(destination_store),
             lat=destination_store.latitude if destination_store else None,
             long=destination_store.longitude if destination_store else None,
@@ -321,9 +331,9 @@ def bypass_checkout(
             file_url=invoice_url, uploaded_by=current_user.id,
         ))
 
-    if lm_photo is not None:
+    for page in lm_pages:
         lm_url = file_service.upload_trip_checkout_lm(
-            lm_photo, trip.id,
+            page, trip.id,
             geofence_label=_geofence_label(destination_store),
             lat=destination_store.latitude if destination_store else None,
             long=destination_store.longitude if destination_store else None,
@@ -333,18 +343,17 @@ def bypass_checkout(
             file_url=lm_url, uploaded_by=current_user.id,
         ))
 
-    if lm_checkout_stamped_photo is not None:
-        lm_stamped_url = file_service.upload_trip_checkout_lm_stamped(
-            lm_checkout_stamped_photo, trip.id,
-            geofence_label=_geofence_label(destination_store),
-            lat=destination_store.latitude if destination_store else None,
-            long=destination_store.longitude if destination_store else None,
-        )
-        db.add(FileModel(
-            entity_type="trip", entity_id=trip.id,
-            document_type="LM_CHECKOUT_STAMPED_PHOTO",
-            file_url=lm_stamped_url, uploaded_by=current_user.id,
-        ))
+    lm_stamped_url = file_service.upload_trip_checkout_lm_stamped(
+        lm_checkout_stamped_photo, trip.id,
+        geofence_label=_geofence_label(destination_store),
+        lat=destination_store.latitude if destination_store else None,
+        long=destination_store.longitude if destination_store else None,
+    )
+    db.add(FileModel(
+        entity_type="trip", entity_id=trip.id,
+        document_type="LM_CHECKOUT_STAMPED_PHOTO",
+        file_url=lm_stamped_url, uploaded_by=current_user.id,
+    ))
 
     trip.odometer_reading = odometer_reading
     trip.status = TripStatus.ACTIVE
@@ -483,6 +492,8 @@ def bypass_start_unloading(
         raise HTTPException(status_code=404, detail="Stop not found.")
     if stop.status != StopStatus.CHECKED_IN:
         raise HTTPException(status_code=400, detail="The driver must be marked as arrived at the store first.")
+    if photo is None:
+        raise HTTPException(status_code=400, detail="The unloading photo is required.")
 
     trip = _get_trip(db, trip_id)
 
@@ -532,6 +543,8 @@ def bypass_check_out(
         raise HTTPException(status_code=404, detail="Stop not found.")
     if stop.status != StopStatus.UNLOADING:
         raise HTTPException(status_code=400, detail="Start Unloading must be done before Delivered.")
+    if proof_photo is None:
+        raise HTTPException(status_code=400, detail="The proof of delivery photo is required.")
 
     delivered_at = _resolve_time(
         performed_at, stop.check_in_time, "when the driver arrived at this stop"
@@ -675,6 +688,8 @@ def bypass_checkin(
         raise HTTPException(
             status_code=400, detail="Current stop must be delivered first."
         )
+    if photo is None:
+        raise HTTPException(status_code=400, detail="The stamped invoice photo is required.")
 
     completion_time = _resolve_time(
         performed_at, _latest_event_time(db, trip), "the trip's previous step"
