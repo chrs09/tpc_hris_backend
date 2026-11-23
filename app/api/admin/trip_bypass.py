@@ -492,8 +492,6 @@ def bypass_start_unloading(
         raise HTTPException(status_code=404, detail="Stop not found.")
     if stop.status != StopStatus.CHECKED_IN:
         raise HTTPException(status_code=400, detail="The driver must be marked as arrived at the store first.")
-    if photo is None:
-        raise HTTPException(status_code=400, detail="The unloading photo is required.")
 
     trip = _get_trip(db, trip_id)
 
@@ -543,8 +541,6 @@ def bypass_check_out(
         raise HTTPException(status_code=404, detail="Stop not found.")
     if stop.status != StopStatus.UNLOADING:
         raise HTTPException(status_code=400, detail="Start Unloading must be done before Delivered.")
-    if proof_photo is None:
-        raise HTTPException(status_code=400, detail="The proof of delivery photo is required.")
 
     delivered_at = _resolve_time(
         performed_at, stop.check_in_time, "when the driver arrived at this stop"
