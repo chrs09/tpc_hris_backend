@@ -28,6 +28,14 @@ class Supplier(Base):
     email = Column(String(150), nullable=True)
     address = Column(String(255), nullable=True)
 
+    # Finance: who they are for expenses. Type and category are required
+    # on the Suppliers page; VAT registered must be answered for a
+    # company, and a VAT-registered supplier needs a TIN.
+    supplier_type = Column(String(20), nullable=True)  # INDIVIDUAL | COMPANY
+    category = Column(String(60), nullable=True)  # Fuel, Repairs, Tires, ...
+    tin = Column(String(20), nullable=True)
+    vat_registered = Column(Boolean, nullable=True)
+
     # The supplier's map location (a Store row with is_supplier) -- having
     # one makes it a customer / delivery point and a trip start point too.
     store_id = Column(Integer, ForeignKey("tpc_stores.id"), nullable=True)

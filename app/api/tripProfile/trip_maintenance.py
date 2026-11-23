@@ -1377,6 +1377,67 @@ def delete_customer(
 #
 # Same simple contact-card CRUD shape as Customers above.
 # =========================================================
+SUPPLIER_TYPES = ("INDIVIDUAL", "COMPANY")
+# Expense types a supplier is for (Finance). "Others" lets the user type one.
+SUPPLIER_CATEGORIES = (
+    "Fuel", "Repairs", "Tires", "Parts", "Freight", "Supplies",
+    "Utilities", "Services", "Others",
+)
+
+
+def _parse_bool(value):
+    if value is None or value == "":
+        return None
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _clean_tin(value):
+    """Digits only, shown as 000-000-000[-000]. None when blank."""
+    digits = re.sub(r"\D", "", value or "")
+    if not digits:
+        return None
+    if len(digits) not in (9, 12):
+        raise HTTPException(status_code=400, detail="TIN must be 9 or 12 digits (e.g. 123-456-789-000).")
+    return "-".join(digits[i:i + 3] for i in range(0, len(digits), 3))
+
+
+def _check_supplier_finance(supplier_type, category, tin, vat_registered):
+    """Type and category required; a company must say if it's VAT
+    registered; VAT registered needs a TIN."""
+    if supplier_type not in SUPPLIER_TYPES:
+        raise HTTPException(status_code=400, detail="Pick the supplier type: Individual or Company.")
+    if not (category or "").strip():
+        raise HTTPException(status_code=400, detail="Pick the supplier category (expense type).")
+    if supplier_type == "COMPANY" and vat_registered is None:
+        raise HTTPException(status_code=400, detail="Say whether this company is VAT registered.")
+    if vat_registered and not tin:
+        raise HTTPException(status_code=400, detail="A VAT-registered supplier needs a TIN.")
+
+
+def _supplier_row(supplier, locations):
+    return {
+        "id": supplier.id,
+        "name": supplier.name,
+        "contact_person": supplier.contact_person,
+        "phone": supplier.phone,
+        "email": supplier.email,
+        "address": supplier.address,
+        "supplier_type": supplier.supplier_type,
+        "category": supplier.category,
+        "tin": supplier.tin,
+        "vat_registered": supplier.vat_registered,
+        "is_active": supplier.is_active,
+        # Its map location makes it a customer / trip start point too.
+        "store_id": supplier.store_id,
+        "location_name": locations.get(supplier.store_id),
+    }
+
+
+@router.get("/suppliers/options")
+def get_supplier_options(current_user: User = Depends(get_current_user)):
+    return api_response({"types": list(SUPPLIER_TYPES), "categories": list(SUPPLIER_CATEGORIES)})
+
+
 @router.get("/suppliers")
 def get_suppliers(
     db: Session = Depends(get_db),
@@ -1390,23 +1451,7 @@ def get_suppliers(
         )
     }
 
-    response = [
-        {
-            "id": supplier.id,
-            "name": supplier.name,
-            "contact_person": supplier.contact_person,
-            "phone": supplier.phone,
-            "email": supplier.email,
-            "address": supplier.address,
-            "is_active": supplier.is_active,
-            # Its map location makes it a customer / trip start point too.
-            "store_id": supplier.store_id,
-            "location_name": locations.get(supplier.store_id),
-        }
-        for supplier in suppliers
-    ]
-
-    return api_response(response)
+    return api_response([_supplier_row(supplier, locations) for supplier in suppliers])
 
 
 @router.get("/suppliers/active")
@@ -1422,7 +1467,15 @@ def get_active_suppliers(
     )
 
     response = [
-        {"id": supplier.id, "name": supplier.name} for supplier in suppliers
+        {
+            "id": supplier.id,
+            "name": supplier.name,
+            "supplier_type": supplier.supplier_type,
+            "category": supplier.category,
+            "tin": supplier.tin,
+            "vat_registered": supplier.vat_registered,
+        }
+        for supplier in suppliers
     ]
 
     return api_response(response)
@@ -1435,15 +1488,27 @@ def create_supplier(
     phone: str = Form(None),
     email: str = Form(None),
     address: str = Form(None),
+    supplier_type: str = Form(None),
+    category: str = Form(None),
+    tin: str = Form(None),
+    vat_registered: str = Form(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    supplier_type = (supplier_type or "").strip().upper() or None
+    vat = _parse_bool(vat_registered)
+    tin_value = _clean_tin(tin)
+    _check_supplier_finance(supplier_type, category, tin_value, vat)
     supplier = Supplier(
         name=name,
         contact_person=contact_person,
         phone=phone,
         email=email,
         address=address,
+        supplier_type=supplier_type,
+        category=category.strip()[:60],
+        tin=tin_value,
+        vat_registered=bool(vat),
         created_by=current_user.id,
     )
 
@@ -1465,6 +1530,10 @@ def update_supplier(
     email: str = Form(None),
     address: str = Form(None),
     is_active: bool = Form(None),
+    supplier_type: str = Form(None),
+    category: str = Form(None),
+    tin: str = Form(None),
+    vat_registered: str = Form(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -1472,6 +1541,19 @@ def update_supplier(
 
     if not supplier:
         raise HTTPException(status_code=404, detail="Supplier not found")
+
+    # Finance fields: checked together whenever any of them is sent
+    # (a status-only change leaves them alone).
+    if any(v is not None for v in (supplier_type, category, tin, vat_registered)):
+        new_type = (supplier_type or "").strip().upper() or None if supplier_type is not None else supplier.supplier_type
+        new_category = category.strip()[:60] if category is not None else supplier.category
+        new_tin = _clean_tin(tin) if tin is not None else supplier.tin
+        new_vat = _parse_bool(vat_registered) if vat_registered is not None else supplier.vat_registered
+        _check_supplier_finance(new_type, new_category, new_tin, new_vat)
+        supplier.supplier_type = new_type
+        supplier.category = new_category
+        supplier.tin = new_tin
+        supplier.vat_registered = bool(new_vat)
 
     if name is not None:
         supplier.name = name
