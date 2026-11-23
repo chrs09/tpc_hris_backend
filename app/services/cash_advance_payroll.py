@@ -7,6 +7,11 @@ generated (see `apply_payroll_deduction`), as CashAdvanceDeductionLog
 entries tagged with that cutoff -- so a request's balance is still just
 approved amount minus its logs, and regenerating the same cutoff
 replaces that cutoff's entries instead of deducting twice.
+
+Two or more advances: they're paid in order -- opening (beginning)
+balances first, then the oldest approved. When the cutoff's deduction is
+less than their scheduled amounts together, it all goes to the first one
+(up to what it owes) before the next gets anything.
 """
 
 from collections import defaultdict
@@ -26,8 +31,25 @@ def _money(value) -> Decimal:
     return Decimal(str(value or 0)).quantize(CENT, rounding=ROUND_HALF_UP)
 
 
+def is_opening_balance(req: CashAdvanceRequest) -> bool:
+    """Carried over from before this system (Outstanding Balances -> opening
+    balance): the oldest debt, whenever it was entered."""
+    return (
+        req.deduction_option_id is None
+        and not req.terms_accepted
+        and req.approved_by_user_id is not None
+        and req.approved_by_user_id == req.requested_by_user_id
+    )
+
+
+def _payment_order(req: CashAdvanceRequest):
+    """Opening balances first, then the oldest approved."""
+    return (0 if is_opening_balance(req) else 1, req.approved_at or req.created_at, req.id)
+
+
 def _approved_requests(db: Session, employee_ids: list[int]) -> dict[int, list]:
-    """Approved requests per employee, oldest first (paid down first).
+    """Approved requests per employee in the order they're paid down:
+    opening (beginning) balances first, then oldest approved first.
     Matches on the request's employee, or -- for a request filed before
     employee_id was recorded -- on the filer's linked employee."""
     if not employee_ids:
@@ -60,6 +82,8 @@ def _approved_requests(db: Session, employee_ids: list[int]) -> dict[int, list]:
         emp = req.employee_id or user_employee.get(req.user_id)
         if emp in employee_ids:
             by_employee[emp].append(req)
+    for reqs in by_employee.values():
+        reqs.sort(key=_payment_order)
     return by_employee
 
 
@@ -145,12 +169,25 @@ def apply_payroll_deduction(
     take = defaultdict(Decimal)
     left = to_apply
 
-    # First each advance's own per-pay amount (its agreed schedule), then
-    # anything extra HR entered goes to the oldest advance first.
-    for req in reqs:
-        share = min(_money(req.deduction_per_pay_amount), remaining[req.id], left)
-        take[req.id] += share
-        left -= share
+    scheduled = sum(
+        (min(_money(req.deduction_per_pay_amount), remaining[req.id]) for req in reqs),
+        Decimal("0"),
+    )
+    if to_apply < scheduled:
+        # Short of the schedule (pay too low, or HR entered less): the
+        # whole amount goes to the opening balance / oldest advance first,
+        # up to what it still owes, before the next one gets anything.
+        for req in reqs:
+            share = min(remaining[req.id], left)
+            take[req.id] += share
+            left -= share
+    else:
+        # Each advance's own per-pay amount (its agreed schedule)...
+        for req in reqs:
+            share = min(_money(req.deduction_per_pay_amount), remaining[req.id], left)
+            take[req.id] += share
+            left -= share
+    # ...then anything extra goes to the oldest advance first.
     for req in reqs:
         extra = min(remaining[req.id] - take[req.id], left)
         take[req.id] += extra
