@@ -116,3 +116,4 @@ from .attendance_alert import AttendanceAlert as AttendanceAlert
 from .time_correction import TimeCorrectionRequest as TimeCorrectionRequest
 from .vehicle_unit import VehicleStatusLog as VehicleStatusLog
 from .trip_correction import TripCorrection as TripCorrection
+from .cash_advance_correction import CashAdvanceCorrection as CashAdvanceCorrection

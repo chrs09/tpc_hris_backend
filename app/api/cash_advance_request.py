@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from math import ceil
 
-from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
@@ -60,7 +60,6 @@ def _receipt_url(db: Session, request_id: int) -> str | None:
     )
     return row[0] if row else None
 from app.schemas.cash_advance_request import (
-    CashAdvanceAdjustment,
     CashAdvanceExceptionRequest,
     CashAdvanceRequestCreate,
     CashAdvanceReviewAction,
@@ -1086,6 +1085,7 @@ def list_deduction_history(
         key = (run.department, f"{run.period_start.isoformat()}_{run.period_end.isoformat()}")
         run_status[key] = run.status
 
+    pending_reversals = pending_reversal_log_ids(db)
     rows = []
     for log in reversed(shown):
         req = log.cash_advance_request
@@ -1123,6 +1123,7 @@ def list_deduction_history(
             "reference_no": req.reference_no,
             "entry_type": log.entry_type or "deduction",
             "reversed": log.id in reversed_ids,
+            "reversal_pending": log.id in pending_reversals,
             # Shown on the reversed deduction itself (the "Added back" rows
             # are hidden unless "Show reversals" is on).
             "reversal": (
@@ -1238,39 +1239,28 @@ def record_deduction(
     return _serialize(request, db)
 
 
-@router.post("/{request_id}/adjust")
-def adjust_cash_advance(
-    request_id: int,
-    payload: CashAdvanceAdjustment,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(
-        require_role_or_module(roles=[], module_key="finance.cash_advance")
-    ),
-):
+# =========================
+# ADJUSTMENT / REVERSAL -- filed and approved on Finance -> CA Corrections
+# (app/api/cash_advance_corrections.py). These check and apply; only an
+# approved correction changes the balance.
+# =========================
+
+
+def check_adjustment(db: Session, request: CashAdvanceRequest, change: float, reason: str):
     """Corrects what's owed with a recorded reason -- e.g. ₱1,000 approved
-    but only ₱700 actually released: change -300. Kept as an entry beside
-    the deductions, so the approved amount and history stay as they were."""
-    request = (
-        db.query(CashAdvanceRequest)
-        .filter(CashAdvanceRequest.id == request_id)
-        .with_for_update()
-        .first()
-    )
-    if not request:
-        raise HTTPException(status_code=404, detail="Cash advance request not found")
+    but only ₱700 actually released: change -300. Raises if it can't go
+    through; returns (change, reason) cleaned."""
     if request.status != "approved":
         raise HTTPException(
             status_code=400, detail="Only approved cash advances can be adjusted."
         )
     _ensure_terms_settled(request)
-
-    change = round(payload.change, 2)
-    reason = (payload.reason or "").strip()
+    change = round(float(change or 0), 2)
+    reason = (reason or "").strip()
     if not change:
         raise HTTPException(status_code=400, detail="Enter a different amount.")
     if not reason:
         raise HTTPException(status_code=400, detail="Give the reason for the adjustment.")
-
     payable = float(
         request.approved_amount if request.approved_amount is not None else request.amount
     )
@@ -1283,22 +1273,26 @@ def adjust_cash_advance(
                 f"₱{abs(change):,.2f}. The rest has already been deducted."
             ),
         )
+    return change, reason
 
-    db.add(
-        CashAdvanceDeductionLog(
-            cash_advance_request_id=request.id,
-            amount=-change,
-            note=reason[:2000],
-            recorded_by_user_id=current_user.id,
-            entry_type="adjustment",
-        )
+
+def apply_adjustment(db: Session, request: CashAdvanceRequest, change: float, reason: str, user: User):
+    """Kept as an entry beside the deductions, so the approved amount and
+    history stay as they were. Doesn't commit. Returns the new log."""
+    change, reason = check_adjustment(db, request, change, reason)
+    log = CashAdvanceDeductionLog(
+        cash_advance_request_id=request.id,
+        amount=-change,
+        note=reason[:2000],
+        recorded_by_user_id=user.id,
+        entry_type="adjustment",
     )
+    db.add(log)
     request.approval_log = append_log(
-        request.approval_log, current_user, "adjusted", f"{change:+,.2f}: {reason}"
+        request.approval_log, user, "adjusted", f"{change:+,.2f}: {reason}"
     )
-    db.commit()
-    db.refresh(request)
-    return _serialize(request, db)
+    db.flush()
+    return log
 
 
 REVERSAL_MARK = "[reverses #{}]"
@@ -1314,36 +1308,16 @@ def _reversed_log_id(note: str | None) -> int | None:
         return None
 
 
-@router.post("/{request_id}/transactions/{log_id}/reverse")
-def reverse_deduction(
-    request_id: int,
-    log_id: int,
-    reason: str = Body(..., embed=True),
-    db: Session = Depends(get_db),
-    current_user: User = Depends(
-        require_role_or_module(roles=[], module_key="finance.cash_advance")
-    ),
-):
+def check_reversal(db: Session, request: CashAdvanceRequest, log_id: int, reason: str):
     """Takes back one recorded deduction that was never actually taken
     from pay -- e.g. payroll posted the default per-pay amount while the
-    payroll feature wasn't really used yet. Adds a "reversal" entry for
-    the opposite amount, so the balance goes back up and both entries stay
-    in the history; what's owed (approved / adjusted amount) doesn't change.
-    A payroll entry's reversal keeps its cutoff, so regenerating that
-    cutoff replaces both together."""
-    request = (
-        db.query(CashAdvanceRequest)
-        .filter(CashAdvanceRequest.id == request_id)
-        .with_for_update()
-        .first()
-    )
-    if not request:
-        raise HTTPException(status_code=404, detail="Cash advance request not found")
+    payroll feature wasn't really used yet. Raises if it can't; returns
+    (log, reason)."""
     log = (
         db.query(CashAdvanceDeductionLog)
         .filter(
             CashAdvanceDeductionLog.id == log_id,
-            CashAdvanceDeductionLog.cash_advance_request_id == request_id,
+            CashAdvanceDeductionLog.cash_advance_request_id == request.id,
         )
         .first()
     )
@@ -1355,7 +1329,7 @@ def reverse_deduction(
     already = (
         db.query(CashAdvanceDeductionLog.id)
         .filter(
-            CashAdvanceDeductionLog.cash_advance_request_id == request_id,
+            CashAdvanceDeductionLog.cash_advance_request_id == request.id,
             CashAdvanceDeductionLog.entry_type == "reversal",
             CashAdvanceDeductionLog.note.like(f"{mark}%"),
         )
@@ -1366,27 +1340,46 @@ def reverse_deduction(
     reason = (reason or "").strip()
     if not reason:
         raise HTTPException(status_code=400, detail="Give the reason for reversing it.")
+    return log, reason
 
+
+def apply_reversal(db: Session, request: CashAdvanceRequest, log_id: int, reason: str, user: User):
+    """Adds a "reversal" entry for the opposite amount, so the balance goes
+    back up and both entries stay in the history; what's owed doesn't
+    change. A payroll entry's reversal keeps its cutoff, so regenerating
+    that cutoff replaces both together. Doesn't commit."""
+    log, reason = check_reversal(db, request, log_id, reason)
     amount = float(log.amount)
-    db.add(
-        CashAdvanceDeductionLog(
-            cash_advance_request_id=request.id,
-            amount=-log.amount,
-            note=f"{mark} {reason}"[:2000],
-            recorded_by_user_id=current_user.id,
-            entry_type="reversal",
-            payroll_cutoff_period=log.payroll_cutoff_period,
-        )
+    entry = CashAdvanceDeductionLog(
+        cash_advance_request_id=request.id,
+        amount=-log.amount,
+        note=f"{REVERSAL_MARK.format(log.id)} {reason}"[:2000],
+        recorded_by_user_id=user.id,
+        entry_type="reversal",
+        payroll_cutoff_period=log.payroll_cutoff_period,
     )
+    db.add(entry)
     request.approval_log = append_log(
         request.approval_log,
-        current_user,
+        user,
         "reversed",
         f"Deduction of ₱{amount:,.2f} added back: {reason}",
     )
-    db.commit()
-    db.refresh(request)
-    return _serialize(request, db)
+    db.flush()
+    return entry
+
+
+def pending_reversal_log_ids(db: Session, request_ids=None) -> set[int]:
+    """Deductions with a reversal request waiting on CA Corrections."""
+    from app.models.cash_advance_correction import CashAdvanceCorrection
+
+    q = db.query(CashAdvanceCorrection.deduction_log_id).filter(
+        CashAdvanceCorrection.kind == "reversal",
+        CashAdvanceCorrection.status == "pending",
+    )
+    if request_ids is not None:
+        q = q.filter(CashAdvanceCorrection.cash_advance_request_id.in_(list(request_ids) or [0]))
+    return {lid for (lid,) in q if lid}
 
 
 @router.get("/{request_id}/transactions")
@@ -1424,6 +1417,7 @@ def get_deduction_transactions(
                 reversed_ids.add(int(log.note.split("#", 1)[1].split("]", 1)[0]))
             except (IndexError, ValueError):
                 pass
+    pending = pending_reversal_log_ids(db, [request_id])
     return [
         {
             "id": log.id,
@@ -1432,6 +1426,7 @@ def get_deduction_transactions(
             "note": log.note,
             "payroll_cutoff_period": log.payroll_cutoff_period,
             "reversed": log.id in reversed_ids,
+            "reversal_pending": log.id in pending,
             "recorded_by_name": (
                 log.recorded_by.username if log.recorded_by else None
             ),
