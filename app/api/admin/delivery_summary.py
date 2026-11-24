@@ -330,3 +330,100 @@ def get_delivery_summary(
             for (vid, label), n in sorted(untyped.items(), key=lambda x: -x[1])
         ],
     }
+
+
+# ---------------------------------------------------------------------------
+# Daily Summary tab: every trip dispatched on one day (PH date), with its
+# origin hub, truck type and outlets. Type of Truck / Origin Hub filters
+# and previous / next day are on the page; the lists for the filters come
+# back here (every active truck type and hub, so they don't change as you
+# move between days).
+# ---------------------------------------------------------------------------
+_TRIP_STATE = {
+    TripStatus.ASSIGNED: "Assigned",
+    TripStatus.ACTIVE: "On trip",
+}
+
+
+@router.get("/daily")
+def get_daily_summary(
+    day: str = Query(..., description="YYYY-MM-DD"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(_require_access),
+):
+    from sqlalchemy import func
+
+    from app.api.office.trips import _STATUS_BY_KEY, document_status, trip_outlet_names
+
+    try:
+        the_day = datetime.strptime(day, "%Y-%m-%d").date()
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Date must look like 2026-11-24.")
+    start_utc = datetime.combine(the_day, datetime.min.time()) - PH
+    end_utc = start_utc + timedelta(days=1)
+    when = func.coalesce(Trip.start_time, Trip.created_at)
+
+    trips = (
+        db.query(Trip)
+        .options(
+            joinedload(Trip.driver).joinedload(User.employee),
+            joinedload(Trip.vehicle_unit).joinedload(VehicleUnit.truck_type),
+            joinedload(Trip.origin_store),
+            joinedload(Trip.finance_review),
+            joinedload(Trip.trip_helpers).joinedload(TripHelper.helper),
+        )
+        .filter(
+            Trip.is_archived.is_(False),
+            Trip.status != TripStatus.CANCELLED,
+            when >= start_utc,
+            when < end_utc,
+        )
+        .order_by(when.asc(), Trip.id.asc())
+        .all()
+    )
+    outlets = trip_outlet_names(db, trips)
+    now = datetime.utcnow()
+
+    rows = []
+    for trip in trips:
+        vehicle = trip.vehicle_unit
+        key, _ = document_status(trip, trip.finance_review, now)
+        status = _TRIP_STATE.get(trip.status) or (_STATUS_BY_KEY.get(key) or {}).get("label") or "-"
+        rows.append(
+            {
+                "trip_id": trip.id,
+                "trip_code": trip.trip_code,
+                "shipment": trip.ticket_no,
+                "time": _hhmm(trip.start_time or trip.created_at),
+                "end_time": _hhmm(trip.end_time),
+                "driver": display_name(trip.driver) if trip.driver else None,
+                "helpers": [
+                    f"{th.helper.first_name} {th.helper.last_name}".strip()
+                    for th in trip.trip_helpers
+                    if th.helper
+                ],
+                "plate": (vehicle.plate_number or vehicle.unit_code) if vehicle else None,
+                "truck_type": vehicle.truck_type.name if vehicle and vehicle.truck_type else NO_TRUCK_TYPE,
+                "origin": trip.origin_store.name if trip.origin_store else None,
+                "outlets": outlets.get(trip.id, []),
+                "status": status,
+            }
+        )
+
+    truck_types = [
+        t.name for t in db.query(TruckType).filter(TruckType.is_active.is_(True)).order_by(TruckType.name.asc())
+    ]
+    if any(r["truck_type"] == NO_TRUCK_TYPE for r in rows):
+        truck_types.append(NO_TRUCK_TYPE)
+    hubs = [h.name for h in db.query(Store).filter(Store.is_hub.is_(True)).order_by(Store.name)]
+    for r in rows:
+        if r["origin"] and r["origin"] not in hubs:
+            hubs.append(r["origin"])
+
+    return {
+        "date": str(the_day),
+        "total_trips": len(rows),
+        "truck_types": truck_types,
+        "hubs": hubs,
+        "trips": rows,
+    }

@@ -30,7 +30,8 @@ from app.services.trip_remarks import (
     serialize_trip_remarks,
 )
 from app.utils.user_display import display_name as _display_name
-from app.api.driver.trips import shipments_for_store
+from app.api.driver.trips import _load_planned_store_ids, shipments_for_store
+from app.models.stores import Store
 
 
 router = APIRouter(
@@ -925,6 +926,22 @@ def _trip_orders(db: Session, trips: list) -> dict:
     return out
 
 
+def trip_outlet_names(db: Session, trips: list) -> dict:
+    """{trip_id: [outlet name, ...]} -- the destination stores picked at
+    dispatch (planned stops, in order), else the single destination."""
+    planned = {}
+    for t in trips:
+        ids = _load_planned_store_ids(t) or ([t.destination_store_id] if t.destination_store_id else [])
+        planned[t.id] = ids
+    all_ids = {i for ids in planned.values() for i in ids}
+    names = (
+        {s.id: s.name for s in db.query(Store.id, Store.name).filter(Store.id.in_(all_ids))}
+        if all_ids
+        else {}
+    )
+    return {tid: [names[i] for i in ids if i in names] for tid, ids in planned.items()}
+
+
 @router.get("/documents")
 def get_trip_documents(
     status: str | None = None,
@@ -988,6 +1005,7 @@ def get_trip_documents(
     rows = []
     trips = query.order_by(when.desc()).all()
     orders = _trip_orders(db, trips)
+    outlet_names = trip_outlet_names(db, trips)
     for trip in trips:
         review = trip.finance_review
         key, since = document_status(trip, review, now)
@@ -1031,6 +1049,8 @@ def get_trip_documents(
                 for h in trip.trip_helpers
             ],
             "plate_number": trip.vehicle_unit.plate_number if trip.vehicle_unit else None,
+            # Outlets the shipment(s) go to, in the dispatch order.
+            "outlets": outlet_names.get(trip.id, []),
             "trip_date": to_ph(trip.start_time or trip.created_at),
             "status": meta["key"],
             "status_no": meta["no"],
