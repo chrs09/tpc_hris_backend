@@ -64,6 +64,7 @@ from app.models.TripRate import TripRateProfile
 from app.services.vehicle_assignment import check_unit_for_trip, trip_unit_flags
 from pydantic import BaseModel
 import json
+import re
 
 router = APIRouter(prefix="/admin/trips", tags=["Admin Trips"])
 
@@ -1892,6 +1893,8 @@ def review_trip(
         "trip_id": trip.id,
         "trip_code": trip.trip_code,
         "ticket_no": trip.ticket_no,
+        # Superadmin corrections: shown as "old -> new" in the View.
+        "shipment_edits": shipment_edits(db, trip.id),
         "trip_code": trip.trip_code,
         "current_step": trip.current_step,
         **trip_unit_flags(trip),
@@ -2120,6 +2123,40 @@ def replace_trip_file(
 # route, its shipment numbers move with it. Logged with a reason (Trip
 # Bypass log, action "change-store").
 # =========================
+SHIPMENT_EDIT_RE = re.compile(r"^Shipment number ((?:\d+ -> \d+)(?:, \d+ -> \d+)*)\. ?(.*)$", re.S)
+
+
+def shipment_edits(db: Session, trip_id: int) -> list[dict]:
+    """The trip's shipment number edits, oldest first, read back from the
+    trip log: [{old, new, reason, by, at}]."""
+    out = []
+    logs = (
+        db.query(TripBypassLog)
+        .filter(
+            TripBypassLog.trip_id == trip_id,
+            TripBypassLog.action == "edit",
+            TripBypassLog.reason.like("Shipment number %"),
+        )
+        .order_by(TripBypassLog.created_at.asc(), TripBypassLog.id.asc())
+        .all()
+    )
+    for log in logs:
+        m = SHIPMENT_EDIT_RE.match(log.reason or "")
+        if not m:
+            continue
+        by = db.get(User, log.performed_by_user_id)
+        for pair in m.group(1).split(", "):
+            old, new = pair.split(" -> ")
+            out.append({
+                "old": old,
+                "new": new,
+                "reason": m.group(2).strip() or None,
+                "by": _display_name(by) if by else None,
+                "at": utc_to_ph(log.created_at).strftime("%b %d, %Y, %I:%M %p") if log.created_at else None,
+            })
+    return out
+
+
 class ShipmentNumbersEdit(BaseModel):
     # Same count and order as the trip's current numbers -- each one
     # replaces the number in its place.
