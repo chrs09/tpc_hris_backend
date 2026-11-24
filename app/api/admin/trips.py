@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session, joinedload
 from datetime import datetime, timedelta
 
 from app.core.database import get_db
-from app.core.dependencies import get_current_trip_manager, get_current_user, require_role_or_module
+from app.core.dependencies import get_current_trip_manager, get_current_user, require_role_or_module, require_superadmin
 from app.models.trips import Trip, TripStatus
 from app.models.notification import Notification
 from app.models.trip_stops import TripStop, StopStatus
@@ -2120,6 +2120,94 @@ def replace_trip_file(
 # route, its shipment numbers move with it. Logged with a reason (Trip
 # Bypass log, action "change-store").
 # =========================
+class ShipmentNumbersEdit(BaseModel):
+    # Same count and order as the trip's current numbers -- each one
+    # replaces the number in its place.
+    shipment_numbers: list[str]
+    reason: str
+
+
+@router.post("/{trip_id}/shipment-numbers")
+def edit_shipment_numbers(
+    trip_id: int,
+    payload: ShipmentNumbersEdit,
+    db: Session = Depends(get_db),
+    current_admin=Depends(require_superadmin),
+):
+    """Superadmin: correct a mistyped shipment number on any trip (Trip
+    Dashboard -> View). Only the number changes -- the trip, its stops,
+    stores, photos, pay and approval stay as they are. Kept in the trip's
+    log with the old and new numbers."""
+    from app.models.trip_charge import TripCharge
+
+    trip = db.query(Trip).filter(Trip.id == trip_id).with_for_update().first()
+    if not trip:
+        raise HTTPException(status_code=404, detail="Trip not found.")
+    if trip.status == TripStatus.CANCELLED:
+        raise HTTPException(status_code=400, detail="This trip is cancelled.")
+    if is_special_trip(trip):
+        raise HTTPException(status_code=400, detail="A special trip's ST- code can't be edited.")
+    reason = (payload.reason or "").strip()
+    if not reason:
+        raise HTTPException(status_code=400, detail="Give a reason for the change.")
+
+    old = _load_shipment_numbers(trip)
+    new = [n.strip() for n in payload.shipment_numbers]
+    if len(new) != len(old):
+        raise HTTPException(
+            status_code=400,
+            detail=f"This trip has {len(old)} shipment number(s); send the same number of them.",
+        )
+    bad = _invalid_shipment_number(new)
+    if bad is not None:
+        raise HTTPException(status_code=400, detail=f'Shipment number "{bad}" must be exactly 8 digits.')
+    if len(new) != len(set(new)):
+        raise HTTPException(status_code=400, detail="Duplicate shipment numbers entered.")
+    if new == old:
+        raise HTTPException(status_code=400, detail="No changes to save.")
+
+    changed = [n for n in new if n not in old]
+    used = set()
+    for other in db.query(Trip.id, Trip.ticket_no, Trip.shipment_numbers).filter(Trip.id != trip.id):
+        if CANCELLED_TICKET_MARKER in (other.ticket_no or ""):
+            continue
+        if other.shipment_numbers:
+            try:
+                used.update(str(x) for x in json.loads(other.shipment_numbers))
+            except Exception:
+                pass
+        elif other.ticket_no:
+            used.add(other.ticket_no)
+    taken = next((n for n in changed if n in used), None)
+    if taken:
+        raise HTTPException(status_code=400, detail=f'Shipment number "{taken}" is already on another trip.')
+
+    renamed = {o: n for o, n in zip(old, new) if o != n}
+    pairs = _load_shipment_stores(trip)
+    if pairs:
+        trip.shipment_stores = json.dumps({renamed.get(k, k): v for k, v in pairs.items()})
+    trip.shipment_numbers = json.dumps(new)
+    trip.ticket_no = ", ".join(new)
+    # Shortage / accident charges recorded against the old number.
+    for charge in db.query(TripCharge).filter(
+        TripCharge.trip_id == trip.id, TripCharge.shipment_no.in_(list(renamed))
+    ):
+        charge.shipment_no = renamed[charge.shipment_no]
+
+    db.add(
+        TripBypassLog(
+            trip_id=trip.id,
+            action="edit",
+            performed_by_user_id=current_admin.id,
+            reason="Shipment number "
+            + ", ".join(f"{o} -> {n}" for o, n in renamed.items())
+            + f". {reason}",
+        )
+    )
+    db.commit()
+    return {"message": "Shipment number updated.", "ticket_no": trip.ticket_no, "shipment_numbers": new}
+
+
 @router.post("/{trip_id}/change-store")
 def change_trip_store(
     trip_id: int,
