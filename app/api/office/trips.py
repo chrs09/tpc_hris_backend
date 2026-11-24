@@ -32,6 +32,7 @@ from app.services.trip_remarks import (
 from app.utils.user_display import display_name as _display_name
 from app.api.driver.trips import _load_planned_store_ids, shipments_for_store
 from app.models.stores import Store
+from app.services.trip_rates import category_label
 
 
 router = APIRouter(
@@ -979,6 +980,7 @@ def get_trip_documents(
             joinedload(Trip.driver).joinedload(User.employee),
             joinedload(Trip.vehicle_unit),
             joinedload(Trip.finance_review),
+            joinedload(Trip.trip_rate_profile),
             joinedload(Trip.trip_helpers).joinedload(TripHelper.helper),
         )
         .filter(Trip.is_archived.is_(False))
@@ -1051,6 +1053,7 @@ def get_trip_documents(
             "plate_number": trip.vehicle_unit.plate_number if trip.vehicle_unit else None,
             # Outlets the shipment(s) go to, in the dispatch order.
             "outlets": outlet_names.get(trip.id, []),
+            "trip_category": category_label(trip),
             "trip_date": to_ph(trip.start_time or trip.created_at),
             "status": meta["key"],
             "status_no": meta["no"],

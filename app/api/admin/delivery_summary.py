@@ -348,19 +348,26 @@ _TRIP_STATE = {
 @router.get("/daily")
 def get_daily_summary(
     day: str = Query(..., description="YYYY-MM-DD"),
+    # Optional last day (the Excel export's Daily Summary sheet covers the
+    # whole range picked); one day when left out.
+    day_to: str | None = Query(None, description="YYYY-MM-DD"),
     db: Session = Depends(get_db),
     current_user: User = Depends(_require_access),
 ):
     from sqlalchemy import func
 
     from app.api.office.trips import _STATUS_BY_KEY, document_status, trip_outlet_names
+    from app.services.trip_rates import category_label
 
-    try:
-        the_day = datetime.strptime(day, "%Y-%m-%d").date()
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Date must look like 2026-11-24.")
+    if day_to:
+        the_day, last_day = _range_bounds(day, day_to)
+    else:
+        try:
+            the_day = last_day = datetime.strptime(day, "%Y-%m-%d").date()
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Date must look like 2026-11-24.")
     start_utc = datetime.combine(the_day, datetime.min.time()) - PH
-    end_utc = start_utc + timedelta(days=1)
+    end_utc = datetime.combine(last_day + timedelta(days=1), datetime.min.time()) - PH
     when = func.coalesce(Trip.start_time, Trip.created_at)
 
     trips = (
@@ -370,6 +377,7 @@ def get_daily_summary(
             joinedload(Trip.vehicle_unit).joinedload(VehicleUnit.truck_type),
             joinedload(Trip.origin_store),
             joinedload(Trip.finance_review),
+            joinedload(Trip.trip_rate_profile),
             joinedload(Trip.trip_helpers).joinedload(TripHelper.helper),
         )
         .filter(
@@ -394,6 +402,8 @@ def get_daily_summary(
                 "trip_id": trip.id,
                 "trip_code": trip.trip_code,
                 "shipment": trip.ticket_no,
+                "date": str(((trip.start_time or trip.created_at) + PH).date()),
+                "trip_category": category_label(trip),
                 "time": _hhmm(trip.start_time or trip.created_at),
                 "end_time": _hhmm(trip.end_time),
                 "driver": display_name(trip.driver) if trip.driver else None,
@@ -422,6 +432,7 @@ def get_daily_summary(
 
     return {
         "date": str(the_day),
+        "date_to": str(last_day),
         "total_trips": len(rows),
         "truck_types": truck_types,
         "hubs": hubs,
