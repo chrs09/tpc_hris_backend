@@ -641,12 +641,11 @@ def generate_employment_form(
     if not applicant:
         raise HTTPException(status_code=404, detail="Applicant not found")
 
-    # Form generation is only allowed at "reviewed". The public form-access
-    # check (get_valid_applicant_by_token in
-    # app/api/public/applicant_onboarding.py) must keep "reviewed" in its
-    # own allow-list too, otherwise the applicant can't open the very link
-    # generated here until their status is separately advanced.
-    if applicant.status.lower() != "reviewed":
+    # The first link is made at "reviewed". Later (interview / onboarding /
+    # hired, before convert) HR can get a new link to reopen a submitted
+    # form for corrections. These match the public form's allow-list
+    # (get_valid_applicant_by_token in app/api/public/applicant_onboarding.py).
+    if applicant.status.lower() not in ("reviewed", "interview", "onboarding", "hired"):
         raise HTTPException(
             status_code=400,
             detail="Employment form can only be generated for reviewed applicants",
@@ -666,6 +665,20 @@ def generate_employment_form(
     applicant.onboarding_token = token
     applicant.onboarding_token_expires_at = datetime.utcnow() + timedelta(days=7)
     applicant.onboarding_link_sent_at = datetime.utcnow()
+
+    # Reopen a submitted form: the applicant sees their saved answers,
+    # edits them and submits again. Until then convert stays blocked.
+    reopened = False
+    onboarding = (
+        db.query(ApplicantOnboarding)
+        .filter(ApplicantOnboarding.applicant_id == applicant.id)
+        .first()
+    )
+    if onboarding and onboarding.is_submitted:
+        onboarding.is_submitted = False
+        onboarding.submitted_at = None
+        applicant.onboarding_submitted_at = None
+        reopened = True
 
     db.commit()
     db.refresh(applicant)
@@ -690,6 +703,7 @@ def generate_employment_form(
         "form_url": form_url,
         "expires_at": applicant.onboarding_token_expires_at,
         "email_sent": email_sent,
+        "reopened": reopened,
     }
 
 
@@ -749,6 +763,25 @@ def convert_to_employee(
                 "Move the applicant to Reviewed status and generate the onboarding form first."
             ),
         )
+
+    # Old forms took free text for school years; the employee record holds
+    # 10 characters. Say which row is wrong instead of failing with a 500.
+    for record in (
+        db.query(ApplicantEducation)
+        .filter(ApplicantEducation.applicant_id == applicant.id)
+        .all()
+    ):
+        for label, value in (("Year from", record.year_from), ("Year to", record.year_to)):
+            text = (value or "").strip()
+            if text and not (text.isdigit() and len(text) == 4):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f'Education "{record.level or record.institution or "-"}": '
+                        f'{label} is "{text}", not a single year. Open Get Form Link '
+                        "to reopen the form so the applicant can fix it, then convert again."
+                    ),
+                )
 
     department = payload.department.strip() if payload.department else ""
     if not department:

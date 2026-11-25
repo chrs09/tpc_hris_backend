@@ -1,6 +1,17 @@
 from datetime import date
 from typing import List, Optional
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, field_validator
+
+
+def valid_school_year(value) -> Optional[str]:
+    """A single 4-digit year, or empty. The employee record holds only
+    10 characters, so "2013 2014 2018" would fail at convert."""
+    text = str(value).strip() if value is not None else ""
+    if not text:
+        return None
+    if not (text.isdigit() and len(text) == 4 and 1900 <= int(text) <= date.today().year + 10):
+        raise ValueError("Pick one year (e.g. 2018). Use another row for each school.")
+    return text
 
 
 class ApplicantEducationPayload(BaseModel):
@@ -10,6 +21,11 @@ class ApplicantEducationPayload(BaseModel):
     year_from: Optional[str] = None
     year_to: Optional[str] = None
     skills: Optional[str] = None
+
+    @field_validator("year_from", "year_to", mode="before")
+    @classmethod
+    def _one_year(cls, value):
+        return valid_school_year(value)
 
 
 class ApplicantEmploymentPayload(BaseModel):
