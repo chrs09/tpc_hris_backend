@@ -41,6 +41,8 @@ from app.models.applicant_references import ApplicantReference
 from app.models.applicant_employment_history import ApplicantEmploymentHistory
 from app.models.applicant_questions import ApplicantQuestion
 from app.models.applicant_qresponse import ApplicantQResponse
+from pydantic import BaseModel
+from datetime import date as _date
 from app.schemas.applicant import (
     ApplicantRemarkResponse,
     ApplicantStatusUpdate,
@@ -49,6 +51,66 @@ from app.schemas.applicant import (
 )
 
 router = APIRouter(prefix="/api/admin/applicants", tags=["Admin Applicants"])
+
+
+# --- Fix & Submit -----------------------------------------------------------
+# HR can submit the onboarding form for the applicant. Only the answers that
+# would stop the form (missing required ones, or values the employee record
+# can't hold) are editable; everything else stays as the applicant entered it.
+
+FORM_REQUIRED = [
+    # key, section, label, kind, max length
+    ("first_name", "Basic Information", "First name", "text", 100),
+    ("last_name", "Basic Information", "Last name", "text", 100),
+    ("email", "Basic Information", "Email", "email", 150),
+    ("birthday", "Personal Information", "Birthday", "date", None),
+    ("contact_number", "Personal Information", "Contact number", "text", 50),
+    ("current_address", "Personal Information", "Current address", "text", 255),
+]
+
+
+def _one_year(value) -> bool:
+    text = (value or "").strip()
+    return text.isdigit() and len(text) == 4
+
+
+def form_problems(db: Session, applicant: Applicant, onboarding) -> list[dict]:
+    problems = []
+    for key, section, label, kind, _ in FORM_REQUIRED:
+        value = getattr(onboarding, key, None) if onboarding else None
+        if value in (None, ""):
+            # Suggest what the application already has (name, email, contact).
+            suggestion = getattr(applicant, key, None) if hasattr(applicant, key) else None
+            problems.append({
+                "key": key, "section": section, "label": label, "kind": kind,
+                "current": None, "suggested": suggestion,
+                "message": "Missing",
+            })
+    if onboarding:
+        for record in (
+            db.query(ApplicantEducation)
+            .filter(ApplicantEducation.applicant_id == applicant.id)
+            .order_by(ApplicantEducation.id)
+            .all()
+        ):
+            school = record.level or record.institution or "School"
+            for field, label in (("year_from", "Year from"), ("year_to", "Year to")):
+                value = getattr(record, field)
+                if not _one_year(value):
+                    problems.append({
+                        "key": f"education:{record.id}:{field}",
+                        "section": "Education",
+                        "label": f"{school} · {label}",
+                        "kind": "year",
+                        "current": value,
+                        "suggested": None,
+                        "message": "Missing" if not (value or "").strip() else "Not a single year",
+                    })
+    return problems
+
+
+class FixAndSubmitPayload(BaseModel):
+    values: dict[str, str | None] = {}
 
 # A new hire's login role from their department (Driver / Helper /
 # Employee) -- same rule as Bulk Create Accounts.
@@ -707,6 +769,139 @@ def generate_employment_form(
     }
 
 
+@router.get("/{applicant_id}/onboarding/problems")
+def get_onboarding_problems(
+    request: Request,
+    applicant_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    require_role_or_module(
+        roles=["admin", "superadmin", "hr"], module_key="hris.applicants"
+    )(request=request, current_user=current_user, db=db)
+    applicant = db.query(Applicant).filter(Applicant.id == applicant_id).first()
+    if not applicant:
+        raise HTTPException(status_code=404, detail="Applicant not found")
+    onboarding = (
+        db.query(ApplicantOnboarding)
+        .filter(ApplicantOnboarding.applicant_id == applicant.id)
+        .first()
+    )
+    return {
+        "has_form": onboarding is not None,
+        "is_submitted": bool(onboarding and onboarding.is_submitted),
+        "is_converted": bool(applicant.is_converted_to_employee),
+        "problems": form_problems(db, applicant, onboarding),
+    }
+
+
+@router.post("/{applicant_id}/onboarding/submit-for-applicant")
+def submit_onboarding_for_applicant(
+    request: Request,
+    applicant_id: int,
+    payload: FixAndSubmitPayload,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """HR submits the form for the applicant. Only answers listed as
+    problems can be changed; anything else sent is ignored."""
+    require_role_or_module(
+        roles=["admin", "superadmin", "hr"], module_key="hris.applicants"
+    )(request=request, current_user=current_user, db=db)
+    applicant = db.query(Applicant).filter(Applicant.id == applicant_id).first()
+    if not applicant:
+        raise HTTPException(status_code=404, detail="Applicant not found")
+    if applicant.is_converted_to_employee:
+        raise HTTPException(status_code=400, detail="Applicant has already been converted to employee")
+
+    onboarding = (
+        db.query(ApplicantOnboarding)
+        .filter(ApplicantOnboarding.applicant_id == applicant.id)
+        .first()
+    )
+    if not onboarding:
+        onboarding = ApplicantOnboarding(applicant_id=applicant.id)
+        db.add(onboarding)
+        db.flush()
+
+    problems = {p["key"]: p for p in form_problems(db, applicant, onboarding)}
+    limits = {key: limit for key, *_rest, limit in FORM_REQUIRED}
+    values = payload.values or {}
+    errors: dict[str, str] = {}
+    changes: list[str] = []
+    year_updates: dict[int, dict[str, str]] = {}
+
+    for key, problem in problems.items():
+        raw = values.get(key)
+        text = (raw or "").strip()
+        if not text:
+            errors[key] = "Required."
+            continue
+        kind = problem["kind"]
+        if kind == "year":
+            if not _one_year(text):
+                errors[key] = "Pick one year."
+                continue
+            _, record_id, field = key.split(":")
+            year_updates.setdefault(int(record_id), {})[field] = text
+        elif kind == "date":
+            try:
+                value = _date.fromisoformat(text)
+            except ValueError:
+                errors[key] = "Use a valid date."
+                continue
+            if value >= _date.today():
+                errors[key] = "Must be a past date."
+                continue
+            onboarding.birthday = value
+        else:
+            if kind == "email" and "@" not in text:
+                errors[key] = "Enter a valid email."
+                continue
+            if limits.get(key) and len(text) > limits[key]:
+                errors[key] = f"Keep it under {limits[key]} characters."
+                continue
+            setattr(onboarding, key, text)
+        changes.append(f"{problem['section']} · {problem['label']}: "
+                       f"{problem['current'] or '(blank)'} -> {text}")
+
+    for record_id, fields in year_updates.items():
+        record = db.get(ApplicantEducation, record_id)
+        if not record or record.applicant_id != applicant.id:
+            continue
+        year_from = fields.get("year_from", record.year_from)
+        year_to = fields.get("year_to", record.year_to)
+        if _one_year(year_from) and _one_year(year_to) and int(year_to) < int(year_from):
+            errors[f"education:{record_id}:year_to"] = "Can't be before Year from."
+            continue
+        for field, value in fields.items():
+            setattr(record, field, value)
+
+    if errors:
+        db.rollback()
+        raise HTTPException(
+            status_code=400,
+            detail={"message": "Fix the highlighted answers.", "errors": errors},
+        )
+
+    now = datetime.utcnow()
+    onboarding.is_submitted = True
+    onboarding.submitted_at = now
+    applicant.onboarding_submitted_at = now
+    who = current_user.username or f"user #{current_user.id}"
+    note = f"Onboarding form submitted by {who} for the applicant."
+    if changes:
+        note += " Changed: " + "; ".join(changes) + "."
+    db.add(ApplicantRemark(
+        applicant_id=applicant.id,
+        status=applicant.status,
+        remark=note,
+        created_by_user_id=current_user.id,
+    ))
+    db.commit()
+    return {"message": "Form submitted for the applicant.", "changed": changes}
+
+
 @router.post("/{applicant_id}/convert-to-employee")
 def convert_to_employee(
     request: Request,
@@ -759,8 +954,9 @@ def convert_to_employee(
         raise HTTPException(
             status_code=400,
             detail=(
-                "Applicant did not fill the onboarding form yet. "
-                "Move the applicant to Reviewed status and generate the onboarding form first."
+                "The onboarding form isn't submitted yet (the applicant hasn't "
+                "sent it, or it was reopened). Click Fix & Submit to submit it "
+                "for them, or wait for the applicant to submit."
             ),
         )
 
@@ -778,8 +974,8 @@ def convert_to_employee(
                     status_code=400,
                     detail=(
                         f'Education "{record.level or record.institution or "-"}": '
-                        f'{label} is "{text}", not a single year. Open Get Form Link '
-                        "to reopen the form so the applicant can fix it, then convert again."
+                        f'{label} is "{text}", not a single year. Click Fix & Submit '
+                        "to correct it, then convert again."
                     ),
                 )
 
