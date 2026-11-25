@@ -41,6 +41,11 @@ class EmployeeModuleAccess(Base):
     # work on; empty / null = every group (app/services/payroll_scope.py).
     payroll_groups = Column(Text, nullable=True)
 
+    # Modules that list records people encode (e.g. Finance -> Expense):
+    # "all" = see everyone's; null = only the ones they encoded.
+    # See app/services/record_scope.py.
+    view_scope = Column(String(10), nullable=True)
+
     granted_by_user_id = Column(Integer, ForeignKey("tpc_users.id"), nullable=True)
 
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)

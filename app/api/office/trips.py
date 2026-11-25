@@ -33,6 +33,7 @@ from app.utils.user_display import display_name as _display_name
 from app.api.driver.trips import _load_planned_store_ids, shipments_for_store
 from app.models.stores import Store
 from app.services.trip_rates import category_label
+from app.services.user_roles import driver_employee_ids
 
 
 router = APIRouter(
@@ -277,11 +278,15 @@ def review_office_trip(
         .all()
     )
 
+    driver_ids = driver_employee_ids(db)
     helpers_data = [
         {
             "id": helper.id,
             "first_name": helper.first_name,
             "last_name": helper.last_name,
+            # Driver as Helper: shown with a tag.
+            "is_driver_as_helper": helper.id in driver_ids
+            and (helper.position or "").upper() != "HELPER",
         }
         for helper in trip_helpers
     ]

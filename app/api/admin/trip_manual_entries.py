@@ -35,7 +35,7 @@ from app.services.file_service import FileService
 from app.utils.timezone import ph_to_utc, utc_to_ph
 from app.services.customer_tiers import plan_trip
 from app.services.trip_rates import category_label
-from app.services.user_roles import driver_user_condition, is_relief_driver
+from app.services.user_roles import can_be_helper, driver_user_condition, is_relief_driver
 from app.utils.user_display import display_name
 from app.api.admin.trips import CANCELLED_TICKET_MARKER
 from app.api.driver.trips import (
@@ -151,6 +151,16 @@ def get_manual_entry_options(
         ],
         "helpers": [
             {"id": h.id, "label": f"{h.first_name} {h.last_name}"} for h in helpers
+        ]
+        # Driver as Helper (rare): drivers too, tagged, after the helpers.
+        + [
+            {
+                "id": d.employee.id,
+                "label": f"{d.employee.first_name} {d.employee.last_name} · Driver",
+                "is_driver": True,
+            }
+            for d in drivers
+            if d.employee and not is_relief_driver(d) and d.is_active
         ],
     }
 
@@ -513,7 +523,7 @@ async def create_manual_entry(
         raise HTTPException(status_code=400, detail="Maximum of 3 helpers allowed.")
     for hid in helper_ids:
         helper = db.query(Employee).filter(Employee.id == hid).first()
-        if not helper or (helper.position or "").upper() != "HELPER":
+        if not can_be_helper(db, helper):
             raise HTTPException(status_code=400, detail=f"Helper {hid} not found.")
 
     # ---- payroll lock: no new trips in a locked cutoff

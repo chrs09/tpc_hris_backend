@@ -27,6 +27,7 @@ from app.models.trips import Trip, TripStatus
 from app.models.user import User, UserRole
 from app.models.vehicle_unit import VehicleUnit
 from app.utils.user_display import display_name
+from app.services.user_roles import driver_employee_ids, helper_name
 
 router = APIRouter(prefix="/admin/delivery-summary", tags=["Delivery Summary"])
 
@@ -87,6 +88,7 @@ def get_delivery_summary(
         first, last = _month_bounds(month)
     else:
         raise HTTPException(status_code=400, detail="Pick a date range.")
+    driver_ids = driver_employee_ids(db)  # Driver as Helper tag
     start_utc = datetime.combine(first, datetime.min.time()) - PH
     end_utc = datetime.combine(last + timedelta(days=1), datetime.min.time()) - PH
 
@@ -158,7 +160,7 @@ def get_delivery_summary(
             row["categories"].append(category)
         for th in trip.trip_helpers:
             if th.helper:
-                name = f"{th.helper.first_name} {th.helper.last_name}"
+                name = helper_name(th.helper, driver_ids)
                 if name not in row["helpers"]:
                     row["helpers"].append(name)
         if trip.end_time and (row["_last_end"] is None or trip.end_time > row["_last_end"]):
@@ -359,6 +361,8 @@ def get_daily_summary(
     from app.api.office.trips import _STATUS_BY_KEY, document_status, trip_outlet_names
     from app.services.trip_rates import category_label
 
+    driver_ids = driver_employee_ids(db)  # Driver as Helper tag
+
     if day_to:
         the_day, last_day = _range_bounds(day, day_to)
     else:
@@ -408,7 +412,7 @@ def get_daily_summary(
                 "end_time": _hhmm(trip.end_time),
                 "driver": display_name(trip.driver) if trip.driver else None,
                 "helpers": [
-                    f"{th.helper.first_name} {th.helper.last_name}".strip()
+                    helper_name(th.helper, driver_ids)
                     for th in trip.trip_helpers
                     if th.helper
                 ],

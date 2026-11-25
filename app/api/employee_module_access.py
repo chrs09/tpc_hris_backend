@@ -286,6 +286,18 @@ def set_employee_module_access(
         )
         payroll_groups = load_groups(existing[0]) if existing else []
 
+    # View all vs only their own: from the request, else what each key had.
+    if payload.view_all_keys is not None:
+        view_all = set(payload.view_all_keys) & set(payload.module_keys)
+    else:
+        view_all = {
+            row.module_key
+            for row in db.query(EmployeeModuleAccess).filter(
+                EmployeeModuleAccess.employee_id == employee_id,
+                EmployeeModuleAccess.view_scope == "all",
+            )
+        }
+
     # Full replace -- simplest semantics for a checkbox grid saved per row.
     db.query(EmployeeModuleAccess).filter(
         EmployeeModuleAccess.employee_id == employee_id
@@ -297,6 +309,7 @@ def set_employee_module_access(
                 employee_id=employee_id,
                 module_key=key,
                 can_edit=key not in read_only,
+                view_scope="all" if key in view_all else None,
                 granted_by_user_id=current_user.id,
                 payroll_groups=(
                     json.dumps(payroll_groups)
@@ -319,6 +332,7 @@ def set_employee_module_access(
         "module_keys": sorted(set(payload.module_keys)),
         "read_only_keys": sorted(read_only & set(payload.module_keys)),
         "payroll_groups": payroll_groups if PAYROLL_MODULE in payload.module_keys else [],
+        "view_all_keys": sorted(view_all),
         "has_custom_access": True,
     }
 
@@ -381,6 +395,58 @@ def list_role_defaults(
         "counts": _role_counts(db),
         "editable_roles": EDITABLE_ROLES,
         "per_person_keys": sorted(PER_PERSON_KEYS),
+    }
+
+
+@router.get("/role-defaults/{role}/people")
+def list_role_people(
+    role: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_superadmin),
+):
+    """Role Access counts, clicked: the active people with this role who
+    follow its defaults, and those with their own access (with their
+    granted / view-only keys, so the page can show what differs)."""
+    rows = (
+        db.query(User, Employee)
+        .join(Employee, Employee.id == User.employee_id)
+        .filter(Employee.is_active == 1)
+        .order_by(Employee.first_name.asc(), Employee.last_name.asc())
+        .all()
+    )
+    people = [(u, e) for u, e in rows if role_value(u.role) == role]
+    custom_ids = [e.id for _, e in people if e.has_custom_module_access]
+    grants: dict[int, list[str]] = {}
+    read_only: dict[int, list[str]] = {}
+    for row in db.query(EmployeeModuleAccess).filter(
+        EmployeeModuleAccess.employee_id.in_(custom_ids or [0])
+    ):
+        grants.setdefault(row.employee_id, []).append(row.module_key)
+        if not row.can_edit:
+            read_only.setdefault(row.employee_id, []).append(row.module_key)
+
+    def person(u: User, e: Employee) -> dict:
+        return {
+            "employee_id": e.id,
+            "user_id": u.id,
+            "name": " ".join(f"{e.first_name or ''} {e.last_name or ''}".split()),
+            "username": u.username,
+            "position": e.position,
+            "department": e.department,
+        }
+
+    return {
+        "role": role,
+        "following": [person(u, e) for u, e in people if not e.has_custom_module_access],
+        "custom": [
+            {
+                **person(u, e),
+                "module_keys": sorted(grants.get(e.id, [])),
+                "read_only_keys": sorted(read_only.get(e.id, [])),
+            }
+            for u, e in people
+            if e.has_custom_module_access
+        ],
     }
 
 

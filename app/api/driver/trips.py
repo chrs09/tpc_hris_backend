@@ -38,7 +38,14 @@ from app.services.route_ride import busy_on_trip, my_role, on_my_trip, riders_of
 from app.services.trip_rates import LANE_RATE_LABEL, category_label, load_rules, resolve_trip_rates
 from app.services.vehicle_assignment import check_unit_for_trip
 from app.services.customer_tiers import plan_trip
-from app.services.user_roles import check_trip_crew, driver_user_condition
+from app.services.user_roles import (
+    check_trip_crew,
+    driver_employee_ids,
+    driver_user_condition,
+    driving_now,
+    is_driver_as_helper,
+    out_as_helper,
+)
 from app.services.trip_payroll_service import (
     to_ph,
     now_ph,
@@ -404,6 +411,8 @@ class TrackLocationRequest(BaseModel):
 @router.get("/available-helpers")
 def get_available_helpers(
     driver_id: int | None = Query(None),
+    # Dispatch's "Driver as Helper" switch: also list drivers (rare).
+    include_drivers: bool = Query(False),
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
@@ -466,7 +475,7 @@ def get_available_helpers(
     # ---------------------------------------
     # 4️⃣ Return Clean Response
     # ---------------------------------------
-    return [
+    result = [
         {
             "id": helper.id,
             "first_name": helper.first_name,
@@ -475,6 +484,33 @@ def get_available_helpers(
         }
         for helper in helpers
     ]
+
+    # Driver as Helper: only for dispatch, never the driver's own app.
+    if include_drivers and _can_dispatch(db, current_user):
+        driver_ids = driver_employee_ids(db) - {employee_id}
+        drivers = (
+            db.query(Employee)
+            .filter(Employee.id.in_(driver_ids or {0}), Employee.is_active == 1)
+            .order_by(Employee.first_name.asc())
+            .all()
+        )
+        busy = {
+            **driving_now(db, [d.id for d in drivers]),
+            **out_as_helper(db, [d.id for d in drivers]),
+        }
+        result += [
+            {
+                "id": d.id,
+                "first_name": d.first_name,
+                "last_name": d.last_name,
+                "department": d.department,
+                "is_driver": True,
+                # Shown greyed out with the trip they're on.
+                "busy_trip": busy.get(d.id),
+            }
+            for d in drivers
+        ]
+    return result
 
 
 # =========================
@@ -980,6 +1016,10 @@ def dispatch_trip(
         helper = db.query(Employee).filter(Employee.id == helper_id).first()
         if not helper:
             raise HTTPException(status_code=404, detail=f"Helper {helper_id} not found.")
+        if is_driver_as_helper(db, helper):
+            # Driver as Helper: busy checks are in check_trip_crew.
+            helper_objects.append(helper)
+            continue
         if helper.position.upper() != "HELPER":
             raise HTTPException(status_code=400, detail="Invalid helper position.")
         if helper.department not in required_departments:

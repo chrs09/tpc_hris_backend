@@ -30,6 +30,33 @@ from app.schemas.finance_expense import (
 from app.services.file_service import FileService
 from app.services.expense_ocr_service import ExpenseOCRService
 from app.utils.response import api_response
+from app.services.record_scope import sees_all_records
+from app.utils.user_display import display_name
+
+EXPENSE_MODULE = "finance.finance_expenses"
+
+
+def _scoped(query, db: Session, user: User):
+    """Not superadmin and not granted "View all": only what they encoded."""
+    if sees_all_records(db, user, EXPENSE_MODULE):
+        return query
+    return query.filter(FinanceExpense.created_by_user_id == user.id)
+
+
+def _get_visible_expense(db: Session, user: User, expense_id: int):
+    expense = _scoped(
+        db.query(FinanceExpense).filter(FinanceExpense.id == expense_id), db, user
+    ).first()
+    if not expense:
+        raise HTTPException(status_code=404, detail="Expense not found")
+    return expense
+
+
+def _encoders(db: Session, expenses) -> dict:
+    ids = {e.created_by_user_id for e in expenses if e.created_by_user_id}
+    if not ids:
+        return {}
+    return {u.id: display_name(u) for u in db.query(User).filter(User.id.in_(ids))}
 
 
 router = APIRouter(
@@ -309,6 +336,8 @@ def serialize_expense(expense: FinanceExpense):
         # ==============================
 
         "created_by_user_id": expense.created_by_user_id,
+        # Encoded By (filled in by the list / detail endpoints).
+        "created_by_name": getattr(expense, "_created_by_name", None),
         "updated_by_user_id": expense.updated_by_user_id,
 
         "created_at": expense.created_at,
@@ -369,7 +398,7 @@ def get_expenses(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    query = db.query(FinanceExpense)
+    query = _scoped(db.query(FinanceExpense), db, current_user)
 
     if search:
         search_value = f"%{search.strip()}%"
@@ -427,6 +456,9 @@ def get_expenses(
         .all()
     )
 
+    names = _encoders(db, expenses)
+    for expense in expenses:
+        expense._created_by_name = names.get(expense.created_by_user_id)
     response = [
         serialize_expense(expense)
         for expense in expenses
@@ -499,19 +531,8 @@ def get_expense(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    expense = (
-        db.query(FinanceExpense)
-        .filter(
-            FinanceExpense.id == expense_id
-        )
-        .first()
-    )
-
-    if not expense:
-        raise HTTPException(
-            status_code=404,
-            detail="Expense not found",
-        )
+    expense = _get_visible_expense(db, current_user, expense_id)
+    expense._created_by_name = _encoders(db, [expense]).get(expense.created_by_user_id)
 
     return api_response(
         serialize_expense(expense)
@@ -821,19 +842,7 @@ async def update_expense(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    expense = (
-        db.query(FinanceExpense)
-        .filter(
-            FinanceExpense.id == expense_id
-        )
-        .first()
-    )
-
-    if not expense:
-        raise HTTPException(
-            status_code=404,
-            detail="Expense not found",
-        )
+    expense = _get_visible_expense(db, current_user, expense_id)
 
     # Parse items only when the frontend
     # actually sends the items field.
@@ -1173,19 +1182,7 @@ def delete_expense(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    expense = (
-        db.query(FinanceExpense)
-        .filter(
-            FinanceExpense.id == expense_id
-        )
-        .first()
-    )
-
-    if not expense:
-        raise HTTPException(
-            status_code=404,
-            detail="Expense not found",
-        )
+    expense = _get_visible_expense(db, current_user, expense_id)
 
     db.delete(expense)
     db.commit()

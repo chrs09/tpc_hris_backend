@@ -10,6 +10,10 @@ class ModuleAccessSet(BaseModel):
     # Payroll: the payroll groups they may work on ([] = all). Omit to
     # keep what they had.
     payroll_groups: list[str] | None = None
+    # Granted keys where they see everyone's records, not only the ones
+    # they encoded (e.g. "finance.finance_expenses"). Omit to keep each
+    # key's current setting.
+    view_all_keys: list[str] | None = None
 
 
 class RoleDefaultsSet(BaseModel):

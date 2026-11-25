@@ -111,7 +111,10 @@ def get_org_chart(
     grants: dict[int, list[str]] = {}
     read_only: dict[int, list[str]] = {}
     payroll_scope: dict[int, list[str]] = {}
+    view_all: dict[int, list[str]] = {}
     for row in db.query(EmployeeModuleAccess):
+        if row.view_scope == "all":
+            view_all.setdefault(row.employee_id, []).append(row.module_key)
         grants.setdefault(row.employee_id, []).append(row.module_key)
         if not row.can_edit:
             read_only.setdefault(row.employee_id, []).append(row.module_key)
@@ -146,6 +149,8 @@ def get_org_chart(
             "read_only_keys": sorted(read_only.get(emp.id, [])),
             # Payroll groups their Payroll access is limited to ([] = all).
             "payroll_groups": payroll_scope.get(emp.id, []),
+            # Keys where they see everyone's records (else only their own).
+            "view_all_keys": sorted(view_all.get(emp.id, [])),
         }
 
     def person_from_user(user: User) -> dict:
@@ -163,6 +168,7 @@ def get_org_chart(
             "module_keys": [],
             "read_only_keys": [],
             "payroll_groups": [],
+            "view_all_keys": [],
         }
 
     result = []

@@ -39,7 +39,15 @@ from app.services.trip_remarks import (
 from app.utils.timezone import ph_to_utc, utc_to_ph
 from app.services.customer_tiers import apply_plan, plan_trip
 from app.services.trip_rates import category_label
-from app.services.user_roles import check_trip_crew, driver_user_condition, is_relief_driver
+from app.services.user_roles import (
+    check_trip_crew,
+    driver_employee_ids,
+    driver_user_condition,
+    helper_name,
+    is_driver_as_helper,
+    is_relief_driver,
+    out_as_helper,
+)
 from app.utils.user_display import display_name as _display_name
 from app.services.approval_chain import immediate_head, trips_for_me
 from app.models.route_ride import RouteRide
@@ -281,6 +289,7 @@ def get_available_drivers(
         .order_by(User.username.asc())
         .all()
     )
+    out_helpers = out_as_helper(db, [d.employee_id for d in drivers if d.employee_id])
 
     return [
         {
@@ -300,6 +309,8 @@ def get_available_drivers(
         if driver.id not in drivers_with_active_trip
         # A relief driver out on a trip as a helper is busy too.
         and not (is_relief_driver(driver) and not driver.employee.is_available)
+        # ...and so is a driver out on a trip as a helper (Driver as Helper).
+        and driver.employee_id not in out_helpers
     ]
 
 
@@ -727,6 +738,7 @@ def get_assigned_trips(
         .order_by(Trip.created_at.desc())
         .all()
     )
+    driver_ids = driver_employee_ids(db)  # Driver as Helper tag
 
     result = []
     route_riders = riders_of(db, [t.id for t in trips])
@@ -790,7 +802,8 @@ def get_assigned_trips(
                 "helpers": [
                     {
                         "id": th.helper.id,
-                        "name": f"{th.helper.first_name} {th.helper.last_name}",
+                        "name": helper_name(th.helper, driver_ids),
+                        "is_driver": is_driver_as_helper(db, th.helper),
                     }
                     for th in trip.trip_helpers
                     if th.helper
@@ -1185,6 +1198,10 @@ def update_assigned_trip(
         helper = db.query(Employee).filter(Employee.id == hid).first()
         if not helper:
             raise HTTPException(status_code=404, detail=f"Helper {hid} not found.")
+        if is_driver_as_helper(db, helper):
+            # Driver as Helper: busy checks are in check_trip_crew.
+            new_helpers[hid] = helper
+            continue
         if (helper.position or "").upper() != "HELPER":
             raise HTTPException(status_code=400, detail="Invalid helper position.")
         if helper.department not in allowed_departments:
@@ -1542,11 +1559,15 @@ def review_trip(
         .all()
     )
 
+    driver_ids = driver_employee_ids(db)
     helpers_data = [
         {
             "id": helper.id,
             "first_name": helper.first_name,
             "last_name": helper.last_name,
+            # Driver as Helper: shown with a tag.
+            "is_driver_as_helper": helper.id in driver_ids
+            and (helper.position or "").upper() != "HELPER",
         }
         for helper in trip_helpers
     ]
