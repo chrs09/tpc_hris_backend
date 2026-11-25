@@ -1,9 +1,11 @@
-from fastapi import APIRouter, Depends, Query
+from datetime import date
+
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.dependencies import require_role_or_module
+from app.core.dependencies import require_role_or_module, require_superadmin
 from app.models.error_log import ErrorLog
 from app.models.user import User
 
@@ -12,6 +14,47 @@ router = APIRouter(prefix="/error-logs", tags=["Error Logs"])
 _require_error_logs_access = require_role_or_module(
     roles=[], module_key="administrator.error_logs"
 )
+
+
+@router.get("/cleanup-info")
+def error_log_cleanup_info(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_superadmin),
+):
+    """For the "Delete older logs" button: the two cut-off choices and how
+    many rows each would remove. Logs older than last month are also
+    deleted automatically once a day."""
+    from app.services.log_cleanup import month_start, ph_day_to_utc, ph_today
+
+    today = ph_today()
+    choices = []
+    for months_back, label in ((0, "Keep this month only"), (1, "Keep this month and last month")):
+        before = month_start(today, months_back)
+        count = (
+            db.query(ErrorLog)
+            .filter(ErrorLog.created_at < ph_day_to_utc(before))
+            .count()
+        )
+        choices.append({"before": before.isoformat(), "label": label, "count": count})
+    return {"choices": choices, "auto_keeps": "this month and last month"}
+
+
+@router.delete("/older")
+def delete_older_error_logs(
+    before: date = Query(..., description="Delete logs before this PH date (YYYY-MM-DD)"),
+    current_user: User = Depends(require_superadmin),
+):
+    """Superadmin: delete Error Logs before a date (the 1st of a month).
+    This month's logs can't be deleted from here."""
+    from app.services.log_cleanup import delete_error_logs_before, month_start, ph_today
+
+    if before > month_start(ph_today(), 0):
+        raise HTTPException(
+            status_code=400,
+            detail="Pick a date on or before the 1st of this month.",
+        )
+    removed = delete_error_logs_before(before)
+    return {"deleted": removed, "before": before.isoformat()}
 
 
 @router.get("")

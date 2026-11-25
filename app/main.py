@@ -240,11 +240,15 @@ def apply_scheduled_job_changes():
 
 
 @app.on_event("startup")
-def prune_system_logs():
-    # System Logs keep 180 days.
-    from app.services.activity_log_service import prune_old_logs
+def start_log_cleanup():
+    # Once a day: Error Logs keep this month and last month; System Logs
+    # keep 180 days. See app/services/log_cleanup.py.
+    from app.services.log_cleanup import start_log_cleanup as start
 
-    prune_old_logs()
+    try:
+        start()
+    except Exception as exc:  # never block startup
+        logger.warning("Log cleanup not started: %s", exc)
 
 
 @app.on_event("startup")
