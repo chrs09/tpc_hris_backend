@@ -2952,6 +2952,13 @@ def adjust_attendance_time(
             status_code=404,
             detail="Attendance record not found.",
         )
+    # Times now change through Time Corrections (filed by the employee and
+    # approved up the chain). Direct edits are left to superadmin only.
+    if not _is_superadmin_user(current_user):
+        raise HTTPException(
+            status_code=403,
+            detail="Times can't be edited directly. File a Time Correction instead.",
+        )
     ensure_in_team(db, current_user, attendance.employee_id)
     ensure_unlocked(db, attendance.employee_id, attendance.attendance_date, "attendance")
 
