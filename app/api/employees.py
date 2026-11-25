@@ -290,6 +290,65 @@ def get_my_employee_profile(
     return get_employee_detail(current_user.employee_id, db, current_user)
 
 
+@router.get("/me/salary")
+def get_my_salary(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """My Profile -> Salary: your own current pay and how it changed
+    (from Work History). Only ever your own record."""
+    if not current_user.employee_id:
+        raise HTTPException(
+            status_code=404,
+            detail="Your account isn't linked to an employee record.",
+        )
+    employee = _employee_or_404(db, current_user.employee_id)
+
+    def money(value):
+        return float(value) if value is not None else None
+
+    def pay(source) -> dict:
+        return {
+            "payroll_type": source.payroll_type,
+            "daily_rate": money(source.daily_rate),
+            "monthly_basic": money(source.monthly_basic),
+            "monthly_allow": money(source.monthly_allow),
+        }
+
+    rows = (
+        db.query(EmployeeJobChange)
+        .filter(
+            EmployeeJobChange.employee_id == employee.id,
+            EmployeeJobChange.status != "CANCELLED",
+        )
+        .order_by(EmployeeJobChange.effective_date.asc(), EmployeeJobChange.id.asc())
+        .all()
+    )
+    history, previous = [], None
+    for row in rows:
+        current = pay(row)
+        if previous is None or current != previous:
+            history.append(
+                {
+                    "effective_date": row.effective_date.isoformat(),
+                    "status": row.status,  # APPLIED / SCHEDULED (future)
+                    "kind": row.kind,
+                    "position": row.position,
+                    "department": row.department,
+                    **current,
+                    "previous": previous,
+                    "reason": row.reason,
+                }
+            )
+            previous = current
+    history.reverse()  # newest first
+
+    return {
+        "current": {**pay(employee), "date_hired": str(employee.date_hired) if employee.date_hired else None},
+        "history": history,
+    }
+
+
 @router.get("/{employee_id}")
 def get_employee_detail(
     employee_id: int,
