@@ -1796,6 +1796,18 @@ def update_attendance(
     ensure_in_team(db, current_user, record.employee_id)
     ensure_unlocked(db, record.employee_id, record.attendance_date, "attendance")
 
+    # Timed in = they worked that day: only a superadmin changes the status.
+    # Heads set a status for people with no time in (e.g. Absent).
+    if (
+        record.check_in_time is not None
+        and record.status != attendance_in.status
+        and not _is_superadmin_user(current_user)
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="This person timed in, so the status can't be changed. Wrong time? File a Time Correction.",
+        )
+
     if (
         record.status == attendance_in.status
         and record.remarks == attendance_in.remarks
