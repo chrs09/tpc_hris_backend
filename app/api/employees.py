@@ -42,6 +42,30 @@ _require_employee_editor = require_role_or_module(
 
 
 # Validation error
+# Salary and allowance: only a superadmin sees or enters them. Everyone
+# else with Employees access gets these left out of every response, and
+# any value they send is ignored.
+PAY_FIELDS = ("daily_rate", "monthly_basic", "monthly_allow")
+
+
+def _sees_pay(user: User | None) -> bool:
+    return bool(user) and (getattr(user.role, "value", user.role) or "") == "superadmin"
+
+
+def _reads_pay(db: Session, user: User | None) -> bool:
+    """Seeing the figures: superadmin, or Payroll access (payroll needs
+    the rates). The Employees screens still show them to superadmin only."""
+    from app.services.approval_chain import can_view_all_payroll
+
+    return _sees_pay(user) or can_view_all_payroll(db, user)
+
+
+def _without_pay(data: dict, user: User | None, db: Session | None = None) -> dict:
+    if _sees_pay(user) or (db is not None and _reads_pay(db, user)):
+        return data
+    return {k: v for k, v in data.items() if k not in PAY_FIELDS}
+
+
 def validate_employee_required_fields(data):
     errors = {}
 
@@ -243,6 +267,7 @@ def get_employees(
         }
         for emp in employees
     ]
+    response = [_without_pay(row, current_user, db) for row in response]
 
     return api_response(response)
 
@@ -250,6 +275,21 @@ def get_employees(
 # ==============================
 # Employee Detail
 # ==============================
+@router.get("/me")
+def get_my_employee_profile(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """My Profile: the logged-in person's own employee record (read-only).
+    Open to everyone with a login linked to an employee."""
+    if not current_user.employee_id:
+        raise HTTPException(
+            status_code=404,
+            detail="Your account isn't linked to an employee record.",
+        )
+    return get_employee_detail(current_user.employee_id, db, current_user)
+
+
 @router.get("/{employee_id}")
 def get_employee_detail(
     employee_id: int,
@@ -480,6 +520,7 @@ def get_employee_detail(
             else None
         ),
     }
+    response = _without_pay(response, current_user, db)
 
     return api_response(response)
 
@@ -589,9 +630,10 @@ async def create_employee(
         date_hired=parse_date(date_hired),
         created_by_user_id=current_user.id,
         is_active=1,
-        daily_rate=daily_rate,
-        monthly_basic=monthly_basic,
-        monthly_allow=monthly_allow,
+        # Pay only from a superadmin.
+        daily_rate=daily_rate if _sees_pay(current_user) else None,
+        monthly_basic=monthly_basic if _sees_pay(current_user) else None,
+        monthly_allow=monthly_allow if _sees_pay(current_user) else None,
         employment_type=employment_type,
         payroll_type=payroll_type,
         schedule_template_id=schedule_template_id,
@@ -917,6 +959,8 @@ async def patch_employee(
     # still sends them; same value = fine, a different one is refused.
     from app.services.job_history import snapshot, snapshot_equal
 
+    if not _sees_pay(current_user):
+        daily_rate = monthly_basic = monthly_allow = None
     sent = {
         "department": department,
         "position": position,
@@ -1662,7 +1706,7 @@ def _job_row(row: EmployeeJobChange) -> dict:
     }
 
 
-def _history_payload(db: Session, employee: Employee) -> dict:
+def _history_payload(db: Session, employee: Employee, user: User | None = None) -> dict:
     rows = (
         db.query(EmployeeJobChange)
         .filter(EmployeeJobChange.employee_id == employee.id)
@@ -1672,8 +1716,8 @@ def _history_payload(db: Session, employee: Employee) -> dict:
     return {
         "employee_id": employee.id,
         "today": job_history.today_ph().isoformat(),
-        "current": job_history.snapshot(employee),
-        "changes": [_job_row(r) for r in rows],
+        "current": _without_pay(job_history.snapshot(employee), user, db),
+        "changes": [_without_pay(_job_row(r), user, db) for r in rows],
     }
 
 
@@ -1694,7 +1738,7 @@ def get_job_history(
     employee = _employee_or_404(db, employee_id)
     job_history.ensure_starting_row(db, employee)
     db.commit()
-    return _history_payload(db, employee)
+    return _history_payload(db, employee, current_user)
 
 
 @router.post("/{employee_id}/job-history")
@@ -1716,6 +1760,10 @@ def record_job_change(
         if value is not None and value < 0:
             raise HTTPException(status_code=400, detail="Rates can't be negative.")
     values = payload.model_dump(exclude={"effective_date", "reason"}, exclude_none=True)
+    if not _sees_pay(current_user):
+        # Pay changes only from a superadmin.
+        for field in PAY_FIELDS:
+            values.pop(field, None)
     # Blank fields mean "unchanged" -- except the schedule, where an explicit
     # null means "no work schedule" (e.g. a driver, paid per trip).
     if "schedule_template_id" in payload.model_fields_set:
@@ -1723,7 +1771,7 @@ def record_job_change(
     job_history.record_change(db, employee, values, effective, payload.reason, current_user)
     employee.updated_by_user_id = current_user.id
     db.commit()
-    return _history_payload(db, employee)
+    return _history_payload(db, employee, current_user)
 
 
 @router.delete("/{employee_id}/job-history/{change_id}")
@@ -1743,4 +1791,4 @@ def cancel_job_change(
         raise HTTPException(status_code=404, detail="Change not found.")
     job_history.cancel_change(db, employee, row)
     db.commit()
-    return _history_payload(db, employee)
+    return _history_payload(db, employee, current_user)
