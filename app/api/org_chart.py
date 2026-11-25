@@ -29,6 +29,7 @@ from app.models.org_unit import OrgUnit
 from app.models.user import User, UserRole
 from app.services.approval_chain import (
     APPROVAL_KINDS,
+    load_covers,
     my_approver_kinds,
     unit_approves,
 )
@@ -76,6 +77,8 @@ class UnitUpdate(BaseModel):
     # What the head approves for the units below: "cash_advance",
     # "overtime", "attendance".
     approves: list[str] | None = None
+    # {"attendance": "all" | [unit ids] | None} -- see OrgUnit.also_covers.
+    also_covers: dict | None = None
 
 
 @router.get("/my-approvals")
@@ -197,6 +200,7 @@ def get_org_chart(
                 "sort_order": unit.sort_order,
                 "head": person_from_user(head_user) if head_user else None,
                 "approves": sorted(unit_approves(unit)),
+                "also_covers": load_covers(unit),
                 "rules": {
                     "positions": _load(unit.member_positions),
                     "roles": _load(unit.member_roles),
@@ -341,6 +345,21 @@ def update_unit(
         if bad:
             raise HTTPException(status_code=400, detail=f"Unknown approval type: {bad[0]}")
         unit.approves = json.dumps(sorted(set(payload.approves)))
+    if payload.also_covers is not None:
+        covers = {}
+        for kind, value in payload.also_covers.items():
+            if kind not in APPROVAL_KINDS:
+                raise HTTPException(status_code=400, detail=f"Unknown approval type: {kind}")
+            if value == "all":
+                covers[kind] = "all"
+            elif isinstance(value, list) and value:
+                ids = sorted({int(i) for i in value if int(i) != unit.id})
+                found = {u.id for u in db.query(OrgUnit.id).filter(OrgUnit.id.in_(ids or [0]))}
+                if any(i not in found for i in ids):
+                    raise HTTPException(status_code=400, detail="Unit not found.")
+                if ids:
+                    covers[kind] = ids
+        unit.also_covers = json.dumps(covers) if covers else None
 
     unit.updated_by_user_id = current_user.id
     db.commit()
@@ -363,6 +382,20 @@ def delete_unit(
         ids = [int(i) for i in _load(other.also_reports_to)]
         if unit.id in ids:
             other.also_reports_to = json.dumps([i for i in ids if i != unit.id])
+    # ...and from their "also covers" picks.
+    for other in db.query(OrgUnit).filter(OrgUnit.also_covers.isnot(None)):
+        covers = load_covers(other)
+        changed = False
+        for kind, value in list(covers.items()):
+            if isinstance(value, list) and unit.id in value:
+                rest = [i for i in value if i != unit.id]
+                if rest:
+                    covers[kind] = rest
+                else:
+                    covers.pop(kind)
+                changed = True
+        if changed:
+            other.also_covers = json.dumps(covers) if covers else None
     db.flush()
     db.delete(unit)
     db.commit()

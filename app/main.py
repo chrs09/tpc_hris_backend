@@ -78,6 +78,7 @@ from app.api import holidays as holiday_router
 from app.api.finance import trips as finance_trips_router
 from app.api.finance import expenses as finance_expense_router
 from app.api import error_logs as error_logs_router
+from app.api import system_logs as system_logs_router
 from app.api import tickets as tickets_router
 from app.api import mobile_crash as mobile_crash_router
 
@@ -239,6 +240,14 @@ def apply_scheduled_job_changes():
 
 
 @app.on_event("startup")
+def prune_system_logs():
+    # System Logs keep 180 days.
+    from app.services.activity_log_service import prune_old_logs
+
+    prune_old_logs()
+
+
+@app.on_event("startup")
 def start_missed_time_in_checks():
     # Scheduled employees not timed in -> their head is asked (and
     # emailed); see app/services/attendance_alerts.py. Every 5 minutes.
@@ -256,6 +265,57 @@ async def log_requests(request: Request, call_next):
     response = await call_next(request)
     logger.info("STATUS: %s", response.status_code)
     return response
+
+
+# System Logs (superadmin): every change request -- who, URL, what was
+# sent, the result and the rows it changed. See activity_log_service.py.
+@app.middleware("http")
+async def record_activity(request: Request, call_next):
+    import time as _time
+
+    from starlette.concurrency import run_in_threadpool
+
+    from app.services import activity_log_service as activity
+
+    path = request.url.path
+    if not activity.should_log(request.method, path):
+        return await call_next(request)
+
+    content_type = request.headers.get("content-type", "")
+    body_bytes = b""
+    if "json" in content_type:
+        try:
+            if int(request.headers.get("content-length") or 0) <= 65536:
+                body_bytes = await request.body()
+        except Exception:
+            body_bytes = b""
+
+    token, changes = activity.start_capture()
+    started = _time.perf_counter()
+    status_code = 500
+    try:
+        response = await call_next(request)
+        status_code = response.status_code
+        return response
+    finally:
+        activity.stop_capture(token)
+        forwarded = request.headers.get("x-forwarded-for", "")
+        client_ip = forwarded.split(",")[0].strip() if forwarded else (
+            request.client.host if request.client else None
+        )
+        await run_in_threadpool(
+            activity.finish,
+            changes,
+            method=request.method,
+            path=path,
+            query=request.url.query,
+            status_code=status_code,
+            duration_ms=int((_time.perf_counter() - started) * 1000),
+            headers=request.headers,
+            client_ip=client_ip,
+            body_bytes=body_bytes,
+            content_type=content_type,
+        )
 
 
 allowed_origins = [
@@ -368,6 +428,7 @@ app.include_router(office_trip_review_router.router, prefix="/api")  # Add this 
 app.include_router(holiday_router.router, prefix="/api")  # Add this line to include the holiday router
 
 app.include_router(error_logs_router.router, prefix="/api")
+app.include_router(system_logs_router.router, prefix="/api")
 app.include_router(tickets_router.router, prefix="/api")
 app.include_router(mobile_crash_router.router, prefix="/api")
 

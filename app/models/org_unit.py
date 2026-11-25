@@ -29,6 +29,11 @@ class OrgUnit(Base):
     # What the head approves for the people below them: JSON list of
     # "cash_advance" / "overtime" / "attendance" (approval_chain.py).
     approves = Column(Text, nullable=True)
+    # Extra people the head also reviews, per approval type. JSON like
+    # {"attendance": "all"} (all office staff) or {"attendance": [unit ids]}.
+    # Only counts while that type is ticked in `approves`. Drivers and
+    # helpers (trip-based) are never included. See approval_chain.py.
+    also_covers = Column(Text, nullable=True)
 
     member_positions = Column(Text, nullable=True)
     member_roles = Column(Text, nullable=True)

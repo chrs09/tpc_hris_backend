@@ -414,6 +414,76 @@ def team_scope(db: Session, user: User | None) -> dict | None:
     }
 
 
+# =========================================================
+# ALSO COVERS -- a head who also reviews other units' attendance
+#
+# Set per unit on the Org Chart (Edit Unit -> Also covers). "all" = every
+# active office employee; a list = those units' people and heads (not the
+# units under them). Trip-based people (drivers, helpers) are left out.
+# Only counts while the unit has that approval type ticked.
+# =========================================================
+def load_covers(unit: OrgUnit) -> dict:
+    try:
+        value = json.loads(unit.also_covers) if unit.also_covers else {}
+    except (TypeError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def covered_employee_ids(db: Session, user: User | None, kind: str = "attendance") -> set[int]:
+    """People this user reviews through Also covers (empty if none)."""
+    if not user:
+        return set()
+    from app.services.attendance_alerts import is_trip_based
+
+    units = db.query(OrgUnit).all()
+    settings = [
+        load_covers(u).get(kind)
+        for u in units
+        if u.head_user_id == user.id and kind in unit_approves(u)
+    ]
+    settings = [s for s in settings if s]
+    if not settings:
+        return set()
+    cover_all = any(s == "all" for s in settings)
+    picked_ids = {
+        int(i) for s in settings if isinstance(s, list) for i in s if str(i).isdigit()
+    }
+    picked = [u for u in units if u.id in picked_ids]
+    head_ids = {u.head_user_id for u in picked if u.head_user_id}
+
+    employees = db.query(Employee).filter(Employee.is_active == 1).all()
+    users_by_employee = {
+        u.employee_id: u
+        for u in db.query(User).filter(User.employee_id.isnot(None)).all()
+    }
+    ids = set()
+    for emp in employees:
+        person = users_by_employee.get(emp.id)
+        if is_trip_based(emp, person):
+            continue
+        if cover_all or (person and person.id in head_ids) or any(
+            _is_member(u, emp, person) for u in picked
+        ):
+            ids.add(emp.id)
+    return ids
+
+
+def attendance_team_scope(db: Session, user: User | None) -> dict | None:
+    """team_scope for attendance, plus the people from Also covers."""
+    scope = team_scope(db, user)
+    if scope is None:
+        return None
+    extra = covered_employee_ids(db, user, "attendance")
+    if not extra:
+        return scope
+    return {
+        "employee_ids": set(scope["employee_ids"]) | extra,
+        "unit_names": scope["unit_names"],
+        "covered_ids": extra - set(scope["employee_ids"]),
+    }
+
+
 def can_view_all_payroll(db: Session, user: User | None) -> bool:
     """Payroll needs everyone's attendance: superadmin, the payroll roles,
     or anyone granted the Payroll module."""

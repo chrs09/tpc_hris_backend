@@ -7,6 +7,7 @@ from datetime import datetime, date, timedelta
 from zoneinfo import ZoneInfo
 
 from fastapi import (
+    BackgroundTasks,
     Body,
     APIRouter,
     Depends,
@@ -46,11 +47,12 @@ from app.services.face_recognition_service import FaceRecognitionService
 from app.services.photo_orientation import PHOTO_SIDES, rescore_side, rotate_stored_photo
 from app.services.approval_chain import (
     acting_index,
-    team_scope as _team_scope,
+    # Attendance: a head's team plus the people from Also covers.
+    attendance_team_scope as _team_scope,
     effective_step,
     log_skipped,
     can_view_all_payroll,
-    team_scope,
+    attendance_team_scope as team_scope,
     append_log,
     describe_chain,
     dump_chain,
@@ -569,8 +571,23 @@ def log_adjustment(db: Session, record, field: str, old, new, user, reason=None)
     )
 
 
+def _is_superadmin_user(user) -> bool:
+    return (getattr(user.role, "value", user.role) or "") == "superadmin"
+
+
+def ensure_not_self(user, employee_id: int):
+    """Nobody but a superadmin edits or approves their own attendance."""
+    if user and user.employee_id and user.employee_id == employee_id and not _is_superadmin_user(user):
+        raise HTTPException(
+            status_code=403,
+            detail="You can't edit your own attendance. Ask your head or a superadmin.",
+        )
+
+
 def ensure_in_team(db: Session, user, employee_id: int):
-    """Org chart heads only act on their own people (team_scope)."""
+    """Org chart heads only act on their own people (team_scope, plus
+    Also covers). Nobody but a superadmin acts on their own record."""
+    ensure_not_self(user, employee_id)
     scope = team_scope(db, user)
     if scope is not None and employee_id not in scope["employee_ids"]:
         raise HTTPException(
@@ -1067,6 +1084,7 @@ def get_my_attendance_history(
 @router.post("/", response_model=AttendanceResponse)
 def mark_attendance(
     attendance_in: AttendanceCreate,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -1113,6 +1131,10 @@ def mark_attendance(
     log_adjustment(
         db, record, "created", None, f"Entered manually ({attendance_in.status})", current_user
     )
+    notify_status_change(
+        db, background_tasks, current_user, employee.id, attendance_in.attendance_date,
+        None, attendance_in.status, attendance_in.remarks,
+    )
     db.commit()
     db.refresh(record)
 
@@ -1144,6 +1166,13 @@ def bulk_mixed_attendance(
 
     for att in attendance_in.attendances:
         if att.employee_id not in valid_employee_ids:
+            continue
+        # Not your own attendance (superadmin excepted).
+        if (
+            current_user.employee_id == att.employee_id
+            and not _is_superadmin_user(current_user)
+        ):
+            skipped_employee_ids.append(att.employee_id)
             continue
 
         record = create_attendance_record(
@@ -1724,12 +1753,16 @@ def get_attendance_records(
         # (their team) are included / should be shown.
         "team_employee_ids": sorted(team["employee_ids"]) if team else None,
         "team_units": team["unit_names"] if team else None,
+        # The viewer's own record can't be edited by them (superadmin
+        # excepted) -- the grid hides the edit controls on it.
+        "my_employee_id": None if _is_superadmin_user(current_user) else current_user.employee_id,
     }
 
 
 @router.patch("/update", response_model=AttendanceResponse)
 def update_attendance(
     attendance_in: AttendanceUpdate,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -1774,13 +1807,131 @@ def update_attendance(
 
     log_adjustment(db, record, "status", record.status, attendance_in.status, current_user, attendance_in.reason)
     log_adjustment(db, record, "remarks", record.remarks, attendance_in.remarks, current_user, attendance_in.reason)
+    old_status = record.status
     record.status = attendance_in.status
     record.remarks = attendance_in.remarks
 
+    notify_status_change(
+        db, background_tasks, current_user, record.employee_id, record.attendance_date,
+        old_status, attendance_in.status, attendance_in.reason or attendance_in.remarks,
+    )
     db.commit()
     db.refresh(record)
 
     return record
+
+
+# =========================
+# STATUS CHANGE NOTICES -- a non-superadmin set someone's attendance
+# status (e.g. marked Absent with remarks): every superadmin gets a bell
+# notice (NULL recipient = all superadmins) and an email.
+# =========================
+STATUS_CHANGE_TYPE = "ATTENDANCE_STATUS_CHANGED"
+
+
+def notify_status_change(
+    db: Session,
+    background_tasks: BackgroundTasks,
+    actor: User,
+    employee_id: int,
+    day: date,
+    old_status: str | None,
+    new_status: str | None,
+    remarks: str | None,
+):
+    if _is_superadmin_user(actor) or (old_status or "") == (new_status or ""):
+        return
+    from app.models.notification import Notification
+    from app.services.email_service import send_email
+
+    employee = db.get(Employee, employee_id)
+    who = display_name(actor) or actor.username
+    whose = (
+        f"{employee.first_name or ''} {employee.last_name or ''}".strip()
+        if employee
+        else f"employee #{employee_id}"
+    )
+    message = (
+        f"{who} set {whose}'s attendance on {day:%b %d, %Y} to {new_status} "
+        f"(was: {old_status or 'no record'})."
+        + (f" Remarks: {remarks.strip()}" if remarks and remarks.strip() else "")
+    )
+    db.add(
+        Notification(
+            type=STATUS_CHANGE_TYPE,
+            ref_id=employee_id,
+            recipient_user_id=None,
+            message=message[:255],
+            status="PENDING",
+            created_at=datetime.utcnow(),
+        )
+    )
+    emails = [
+        u.email
+        for u in db.query(User).filter(User.is_active.is_(True))
+        if _is_superadmin_user(u) and u.email
+    ]
+    html = (
+        "<p>An attendance status was changed by someone other than a superadmin.</p>"
+        f"<p>{message}</p>"
+        "<p>See Attendance &rarr; Grid View, or the bell in the portal.</p>"
+    )
+    for to in emails:
+        background_tasks.add_task(send_email, to, f"Attendance changed: {whose} ({day:%b %d})", html)
+
+
+def _status_alert_query(db: Session, user: User):
+    from app.models.notification import Notification
+
+    if not _is_superadmin_user(user):
+        return None
+    return db.query(Notification).filter(
+        Notification.type == STATUS_CHANGE_TYPE,
+        Notification.status == "PENDING",
+        or_(Notification.recipient_user_id.is_(None), Notification.recipient_user_id == user.id),
+    )
+
+
+@router.get("/status-change-alerts")
+def get_status_change_alerts(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    query = _status_alert_query(db, current_user)
+    if query is None:
+        return []
+    from app.models.notification import Notification
+
+    return [
+        {
+            "id": n.id,
+            "message": n.message,
+            "employee_id": n.ref_id,
+            "created_at": utc_to_ph(n.created_at).strftime("%b %d, %Y %I:%M %p")
+            if n.created_at
+            else None,
+        }
+        for n in query.order_by(Notification.created_at.desc()).limit(100)
+    ]
+
+
+@router.post("/status-change-alerts/{notification_id}/acknowledge")
+def acknowledge_status_change_alert(
+    notification_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    query = _status_alert_query(db, current_user)
+    from app.models.notification import Notification
+
+    notice = query.filter(Notification.id == notification_id).first() if query is not None else None
+    if not notice:
+        raise HTTPException(status_code=404, detail="Alert not found.")
+    notice.status = "ACKNOWLEDGED"
+    notice.reviewed_by_admin_id = current_user.id
+    notice.reviewed_at = datetime.utcnow()
+    db.commit()
+    return {"message": "Acknowledged."}
 
 
 @router.get("/kiosk/status/{employee_id}")
@@ -2292,6 +2443,14 @@ def approve_attendance(
             else None
         )
         upper = resolve_chain(db, approver_employee, current_user, "attendance")
+        scope = _team_scope(db, current_user) or {}
+        if attendance.employee_id in scope.get("covered_ids", set()):
+            # Also covers: the covering head takes the person's own head's
+            # step; the rest of that person's chain stays the same.
+            person = db.get(Employee, attendance.employee_id)
+            owner = db.query(User).filter(User.employee_id == attendance.employee_id).first()
+            own_chain = chain or resolve_chain(db, person, owner, "attendance")
+            upper = [uid for uid in own_chain[1:] if uid != current_user.id]
         if upper:
             # Record their approval as the first step, then the heads above.
             chain = [current_user.id] + [uid for uid in upper if uid != current_user.id]
@@ -2451,6 +2610,7 @@ def set_missed_time_out(
     record = db.query(AttendanceRecord).filter(AttendanceRecord.id == attendance_id).first()
     if not record:
         raise HTTPException(status_code=404, detail="Attendance record not found.")
+    ensure_not_self(current_user, record.employee_id)
     if not _can_set_missed(db, current_user, record):
         raise HTTPException(status_code=403, detail="You can't set this time out.")
     if record.check_out_time is not None:

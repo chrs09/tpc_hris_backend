@@ -102,6 +102,7 @@ from .cash_advance_deduction_log import (
     CashAdvanceDeductionLog as CashAdvanceDeductionLog,
 )
 from .error_log import ErrorLog as ErrorLog
+from .activity_log import ActivityLog as ActivityLog
 from .trip_bypass_log import TripBypassLog as TripBypassLog
 from .trip_remark import TripRemark as TripRemark
 from .ticket import Ticket as Ticket
