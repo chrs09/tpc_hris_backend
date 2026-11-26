@@ -126,6 +126,15 @@ def _deepest(units: list, by_id: dict):
     return sorted(units, key=lambda u: (-_depth(u, by_id), u.sort_order or 0, u.id))[0]
 
 
+def _highest(units: list, by_id: dict):
+    """Of the units someone heads, the one highest on the chart. Their own
+    requests start above it: a person heading Mechanics (under Admins) and
+    also Wingvan (under Coordinator) goes to Admins, not Coordinator."""
+    if not units:
+        return None
+    return sorted(units, key=lambda u: (_depth(u, by_id), u.sort_order or 0, u.id))[0]
+
+
 def resolve_chain(
     db: Session, employee: Employee | None, user: User | None, kind: str, units: list | None = None
 ) -> list[int]:
@@ -136,10 +145,11 @@ def resolve_chain(
     by_id = {u.id: u for u in units}
     user_id = user.id if user else None
 
-    # A head sits one layer above the people they lead.
+    # A head sits one layer above the people they lead; heading several
+    # units, their own requests go above the highest one.
     headed = [u for u in units if user_id and u.head_user_id == user_id]
     if headed:
-        start_unit = _deepest(headed, by_id)
+        start_unit = _highest(headed, by_id)
         current = by_id.get(start_unit.parent_id) if start_unit.parent_id else None
     else:
         current = _home_unit(units, by_id, employee, user)
@@ -165,7 +175,7 @@ def immediate_head(db: Session, employee: Employee | None, user: User | None) ->
     user_id = user.id if user else None
     headed = [u for u in units if user_id and u.head_user_id == user_id]
     if headed:
-        start = _deepest(headed, by_id)
+        start = _highest(headed, by_id)
         current = by_id.get(start.parent_id) if start.parent_id else None
     else:
         current = _home_unit(units, by_id, employee, user)
