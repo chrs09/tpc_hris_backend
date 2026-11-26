@@ -85,13 +85,17 @@ def hr_dashboard(
     ids = [e.id for e in employees]
 
     have_docs: dict[int, set[str]] = {}
+    photos: dict[int, str] = {}  # profile picture for the cards
     if ids:
-        for emp_id, doc in (
-            db.query(FileModel.entity_id, FileModel.document_type)
+        for emp_id, doc, url in (
+            db.query(FileModel.entity_id, FileModel.document_type, FileModel.file_url)
             .filter(FileModel.entity_type == "employee", FileModel.entity_id.in_(ids))
+            .order_by(FileModel.id.asc())
             .all()
         ):
             have_docs.setdefault(emp_id, set()).add(doc)
+            if (doc or "").upper() == "PROFILE_IMAGE" and url:
+                photos[emp_id] = url
     expiries = expiry_map(db, ids)
     gov_rows = (
         {
@@ -118,6 +122,7 @@ def hr_dashboard(
             "name": _name(emp),
             "department": emp.department,
             "position": emp.position,
+            "photo_url": photos.get(emp.id),
         }
         have = have_docs.get(emp.id, set())
 
