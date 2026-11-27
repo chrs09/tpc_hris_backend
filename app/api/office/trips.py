@@ -1023,11 +1023,11 @@ def get_trip_documents(
     now = datetime.utcnow()
     counts = {row["key"]: 0 for row in DOCUMENT_STATUSES}
     rows = []
+    trips = query.order_by(when.desc()).all()
     helpers_by_trip = trip_helpers(db, [t.id for t in trips])
     from app.api.admin.trips import _trip_of_day
 
     trip_of_day = _trip_of_day(db, trips)
-    trips = query.order_by(when.desc()).all()
     orders = _trip_orders(db, trips)
     outlet_names = trip_outlet_names(db, trips)
     for trip in trips:
