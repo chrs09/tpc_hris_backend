@@ -38,6 +38,7 @@ from app.services.route_ride import busy_on_trip, my_role, on_my_trip, riders_of
 from app.services.trip_rates import LANE_RATE_LABEL, category_label, load_rules, resolve_trip_rates
 from app.services.vehicle_assignment import check_unit_for_trip
 from app.services.customer_tiers import plan_trip
+from app.services.trip_source import trip_helpers
 from app.services.user_roles import (
     check_trip_crew,
     driver_employee_ids,
@@ -796,6 +797,8 @@ def get_active_trip(
         # step; GPS is tracked from the driver's phone).
         "my_role": my_role(trip, current_user.id),
         "driver_name": _person_name(trip.driver) if trip.driver else None,
+        # Helpers assigned to this trip (shown on the phone's Active Trip).
+        "helpers": trip_helpers(db, [trip.id]).get(trip.id, []),
         "route_rider_names": [
             _person_name(ride.rider) for ride in riders_of(db, [trip.id]).get(trip.id, []) if ride.rider
         ],

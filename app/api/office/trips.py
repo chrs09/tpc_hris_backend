@@ -34,6 +34,7 @@ from app.api.driver.trips import _load_planned_store_ids, shipments_for_store
 from app.models.stores import Store
 from app.services.trip_rates import category_label
 from app.services.user_roles import driver_employee_ids
+from app.services.trip_source import trip_helpers
 
 
 router = APIRouter(
@@ -104,6 +105,7 @@ def get_pending_office_review_trips(
     for_me_ids = trips_for_me(
         db, [review.trip for review in reviews if review.trip], current_user, "trip_office"
     )
+    helpers_by_trip = trip_helpers(db, [review.trip_id for review in reviews])
 
     for review in reviews:
         trip = review.trip
@@ -125,6 +127,12 @@ def get_pending_office_review_trips(
                 "trip_id": trip.id,
                 "for_me": trip.id in for_me_ids,
                 "ticket_no": trip.ticket_no,
+                # Trip Document cards: category and the crew.
+                "trip_category": category_label(trip),
+                "trip_category_code": (
+                    (trip.trip_rate_profile.code or None) if trip.trip_rate_profile else None
+                ),
+                "helpers": helpers_by_trip.get(trip.id, []),
                 **trip_unit_flags(trip),
 
                 "status": (
@@ -1010,6 +1018,7 @@ def get_trip_documents(
     now = datetime.utcnow()
     counts = {row["key"]: 0 for row in DOCUMENT_STATUSES}
     rows = []
+    helpers_by_trip = trip_helpers(db, [t.id for t in trips])
     trips = query.order_by(when.desc()).all()
     orders = _trip_orders(db, trips)
     outlet_names = trip_outlet_names(db, trips)
@@ -1059,6 +1068,8 @@ def get_trip_documents(
             # Outlets the shipment(s) go to, in the dispatch order.
             "outlets": outlet_names.get(trip.id, []),
             "trip_category": category_label(trip),
+            "trip_category_code": (trip.trip_rate_profile.code or None) if trip.trip_rate_profile else None,
+            "helpers": helpers_by_trip.get(trip.id, []),
             "trip_date": to_ph(trip.start_time or trip.created_at),
             "status": meta["key"],
             "status_no": meta["no"],

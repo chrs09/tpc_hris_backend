@@ -27,6 +27,7 @@ from app.models.user import User, UserRole
 from app.models.employees import Employee
 from app.models.trip_helper import TripHelper
 from app.models.trip_bypass_log import TripBypassLog
+from app.services.trip_source import trip_helpers, trip_sources
 from app.models.trip_remark import TripRemark
 from app.models.trip_finance_review import FinanceReviewStatus, TripFinanceReview
 from app.models.files import File
@@ -40,6 +41,7 @@ from app.utils.timezone import ph_to_utc, utc_to_ph
 from app.services.customer_tiers import apply_plan, plan_trip
 from app.services.trip_rates import category_label
 from app.services.user_roles import (
+    can_be_helper,
     check_trip_crew,
     driver_employee_ids,
     driver_user_condition,
@@ -587,6 +589,8 @@ def get_approval_pipeline(
         return utc_to_ph(dt).strftime("%Y-%m-%d %I:%M %p") if dt else None
 
     items = []
+    helpers_by_trip = trip_helpers(db, [t.id for t in trips])
+    sources = trip_sources(db, [t.id for t in trips])
     for trip in trips:
         review = reviews.get(trip.id)
         # When the trip reached its current stage.
@@ -617,6 +621,9 @@ def get_approval_pipeline(
                 "status_label": PIPELINE_STATUSES[trip.status],
                 "status_since": fmt(stage_at),
                 "is_manual_entry": trip.id in manual_ids,
+                "helpers": helpers_by_trip.get(trip.id, []),
+                # "app" / "manual" / "bypass" (any step done by the office).
+                "source": sources.get(trip.id, {}).get("source", "app"),
                 "trip_of_day": trip_of_day.get(trip.id),
                 "route_rider_names": [
                     _display_name(ride.rider)
@@ -673,6 +680,7 @@ def get_active_trips(
 
     result = []
     trip_of_day = _trip_of_day(db, trips)
+    helpers_by_trip = trip_helpers(db, [t.id for t in trips])
     for trip in trips:
         planned_ids = _load_planned_store_ids(trip)
         delivered_ids = _delivered_store_ids(db, trip.id) if planned_ids else set()
@@ -713,6 +721,9 @@ def get_active_trips(
                 ),
                 "started_outside_hub_range": trip.started_outside_hub_range,
                 "trip_of_day": trip_of_day.get(trip.id),
+                # Helpers on the truck (editable from the dashboard).
+                "driver_id": trip.driver_id,
+                "helpers": helpers_by_trip.get(trip.id, []),
                 **trip_unit_flags(trip),
             }
         )
@@ -1284,6 +1295,112 @@ def update_assigned_trip(
     db.commit()
 
     return {"message": "Trip updated.", "trip_id": trip.id, "changed": changes}
+
+
+# =========================
+# EDIT HELPERS -- Assigned or Active trip (Trip Dashboard)
+# =========================
+class TripHelpersUpdate(BaseModel):
+    helper_ids: list[int]
+    reason: str | None = None
+
+
+@router.put("/{trip_id}/helpers")
+def update_trip_helpers(
+    trip_id: int,
+    payload: TripHelpersUpdate,
+    db: Session = Depends(get_db),
+    current_admin=Depends(
+        require_role_or_module(
+            roles=["admin", "superadmin", "coordinator_admin", "coordinator"],
+            module_key="trip_management.trip_dashboard",
+        )
+    ),
+):
+    """Fix a trip's helpers while it's assigned or on the road. Same rules
+    as dispatch: helpers (or drivers, Driver as Helper), max 3, nobody busy
+    on another trip. Logged like any trip edit."""
+    trip = (
+        db.query(Trip)
+        .options(joinedload(Trip.trip_helpers).joinedload(TripHelper.helper))
+        .filter(Trip.id == trip_id)
+        .first()
+    )
+    if not trip:
+        raise HTTPException(status_code=404, detail="Trip not found.")
+    if trip.status not in (TripStatus.ASSIGNED, TripStatus.ACTIVE):
+        raise HTTPException(
+            status_code=400,
+            detail="Helpers can only be changed while the trip is assigned or active.",
+        )
+    helper_ids = [int(h) for h in payload.helper_ids]
+    if len(helper_ids) != len(set(helper_ids)):
+        raise HTTPException(status_code=400, detail="Duplicate helpers selected.")
+    if len(helper_ids) > 3:
+        raise HTTPException(status_code=400, detail="Maximum of 3 helpers allowed.")
+
+    current = {th.helper_id: th for th in trip.trip_helpers}
+    if set(helper_ids) == set(current):
+        raise HTTPException(status_code=400, detail="No changes to save.")
+
+    new_helpers = {}
+    for hid in helper_ids:
+        helper = db.get(Employee, hid)
+        if not helper or not helper.is_active:
+            raise HTTPException(status_code=404, detail=f"Helper {hid} not found.")
+        if not can_be_helper(db, helper):
+            raise HTTPException(status_code=400, detail=f"{helper.first_name} can't be a helper.")
+        if hid not in current and not helper.is_available and not is_driver_as_helper(db, helper):
+            raise HTTPException(status_code=400, detail=f"{helper.first_name} is out on another trip.")
+        new_helpers[hid] = helper
+
+    driver = db.get(User, trip.driver_id)
+    check_trip_crew(db, driver, helper_ids, trip_id=trip.id, keep_helper_ids=set(current))
+    busy_elsewhere = out_as_helper(
+        db, [h for h in helper_ids if h not in current], exclude_trip_id=trip.id
+    )
+    if busy_elsewhere:
+        hid, code = next(iter(busy_elsewhere.items()))
+        raise HTTPException(
+            status_code=400,
+            detail=f"{new_helpers[hid].first_name} is already a helper on {code}.",
+        )
+
+    def names(ids_):
+        return ", ".join(
+            f"{e.first_name} {e.last_name}".strip()
+            for e in (new_helpers.get(i) or (current[i].helper if i in current else None) for i in ids_)
+            if e
+        ) or "none"
+
+    before = names(list(current))
+    for hid, th in list(current.items()):
+        if hid not in new_helpers:
+            if th.helper:
+                th.helper.is_available = 1
+            db.delete(th)
+    for hid, helper in new_helpers.items():
+        if hid not in current:
+            helper.is_available = 0
+            db.add(TripHelper(trip_id=trip.id, helper_id=hid))
+
+    summary = f"Edited helpers: {before} -> {names(helper_ids)}."
+    if payload.reason and payload.reason.strip():
+        summary += f" {payload.reason.strip()}"
+    db.add(
+        TripBypassLog(
+            trip_id=trip.id,
+            action="edit",
+            performed_by_user_id=current_admin.id,
+            reason=summary,
+        )
+    )
+    db.commit()
+    return {
+        "message": "Helpers updated.",
+        "trip_id": trip.id,
+        "helpers": trip_helpers(db, [trip.id]).get(trip.id, []),
+    }
 
 
 # =========================
@@ -1922,6 +2039,8 @@ def review_trip(
         "current_step_label": _current_step_label(trip.current_step),
         "current_stop": _current_stop_name(db, trip),
         "is_manual_entry": bool(_manual_entry_trip_ids(db, [trip.id])),
+        # Trip Details badge: Driver App / Manual Entry / Bypass (+ steps).
+        **trip_sources(db, [trip.id]).get(trip.id, {"source": "app", "bypassed_steps": []}),
         "status": (
             trip.status.value
             if hasattr(trip.status, "value")
