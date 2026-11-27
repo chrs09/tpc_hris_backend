@@ -660,7 +660,7 @@ def get_my_team_cash_advances(
     ]
     for r in mine:
         r._can_act = r.status == "pending" and _can_review(r, current_user, db)
-    rows = [_serialize(r, db) for r in mine]
+    rows = _with_account(db, [_serialize(r, db) for r in mine], mine, current_user)
     return {
         "requests": _with_balance(rows, _employee_balances(db, [r.employee_id for r in mine])),
         "team_size": len(team_ids),
@@ -701,7 +701,7 @@ def get_requests_for_my_approval(
                 r._can_act = False
                 r._away = away
                 mine.append(r)
-    rows = [_serialize(r, db) for r in mine]
+    rows = _with_account(db, [_serialize(r, db) for r in mine], mine, current_user)
     # The person's current CA balance, to help decide.
     return _with_balance(rows, _employee_balances(db, [r.employee_id for r in mine]))
 
@@ -882,6 +882,51 @@ def _apply_exception(request: CashAdvanceRequest) -> None:
     request.deduction_per_pay_amount = request.exception_deduction_per_pay
     # Custom repayment -- not one of the preset per-pay options.
     request.deduction_option_id = None
+
+
+def _sees_account(db: Session, request: CashAdvanceRequest, user: User) -> bool:
+    """The employee's bank account is shown only to the final approver
+    (the last person in the chain, or whoever is acting on that last step
+    while they're out, or who gave the final approval) and higher
+    (superadmin)."""
+    if _is_superadmin(user):
+        return True
+    chain = [int(i) for i in load_json_list(request.approval_chain)]
+    if request.approved_by_user_id == user.id and request.status == "approved":
+        return True
+    if chain:
+        if chain[-1] == user.id:
+            return True
+        return request.status == "pending" and _is_last_step(db, request, user)
+    # Routed the old way: the one reviewer is the final approver.
+    return request.requested_by_user_id == user.id
+
+
+def _with_account(db: Session, rows: list[dict], requests, user: User) -> list[dict]:
+    """Adds the employee's bank account (bank, name, number) to the rows
+    this viewer may see it on; null elsewhere."""
+    from app.models.employee_bank import EmployeeBank
+
+    visible = {r.id for r in requests if _sees_account(db, r, user)}
+    emp_ids = {r.employee_id for r in requests if r.id in visible and r.employee_id}
+    banks = (
+        {b.employee_id: b for b in db.query(EmployeeBank).filter(EmployeeBank.employee_id.in_(emp_ids))}
+        if emp_ids
+        else {}
+    )
+    for row in rows:
+        bank = banks.get(row.get("employee_id")) if row["id"] in visible else None
+        row["can_see_account"] = row["id"] in visible
+        row["bank_account"] = (
+            {
+                "bank": bank.bank_type,
+                "account_name": bank.account_name,
+                "account_number": bank.account_number,
+            }
+            if bank and (bank.account_number or bank.bank_type)
+            else None
+        )
+    return rows
 
 
 def _is_last_step(db: Session, request: CashAdvanceRequest, user: User) -> bool:
@@ -1662,7 +1707,7 @@ def list_all_cash_advance_requests(
         .order_by(CashAdvanceRequest.created_at.desc())
         .all()
     )
-    return [_serialize(r, db) for r in requests]
+    return _with_account(db, [_serialize(r, db) for r in requests], requests, current_user)
 
 
 _require_finance = require_role_or_module(roles=[], module_key="finance.cash_advance")
