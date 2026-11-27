@@ -2134,6 +2134,7 @@ def get_my_trips(
     trips = query.order_by(Trip.start_time.desc()).all()
 
     results = []
+    helpers_by_trip = trip_helpers(db, [t.id for t in trips])
 
     for trip in trips:
         # Delivery stores, in stop order, de-duplicated (a trip can have
@@ -2164,6 +2165,8 @@ def get_my_trips(
                 "end_time": trip.end_time,
                 "stores": stores,
                 "my_role": my_role(trip, current_user.id),
+                # Helpers on this trip (Trips tab -> Trip Details).
+                "helpers": helpers_by_trip.get(trip.id, []),
             }
         )
 
