@@ -75,6 +75,14 @@ def generate(db: Session, run: IncentiveRun, user_id: int | None) -> None:
     programs = db.query(IncentiveProgram).filter(IncentiveProgram.id.in_(ids or [0])).all()
     if not programs:
         raise RunError("Pick at least one incentive program.")
+    # Paid through Payroll -> Incentive Reports instead.
+    from app.services.incentive_reports import has_report
+
+    reported = [p.name for p in programs if has_report(db, p.id)]
+    if reported:
+        raise RunError(
+            f"{', '.join(reported)} is paid through Incentive Reports. Take it out of this run."
+        )
 
     frozen = [_freeze(p) for p in sorted(programs, key=lambda p: (p.period_start, p.id))]
     for line in [ln for ln in run.lines if not ln.is_adjustment]:

@@ -35,6 +35,7 @@ from app.api import (
     banks,
     preferences,
 )
+from app.api.payroll import incentive_reports as incentive_reports_api
 from app.api.payroll import incentive_programs, incentive_runs, overtime_approval, payroll_cutoffs, payroll_deductions, payroll_runs
 from app.api.payroll import payroll_groups
 from app.api import trip_expenses
@@ -253,6 +254,18 @@ def start_log_cleanup():
 
 
 @app.on_event("startup")
+def start_incentive_reports():
+    # Incentive Reports: made at 4 AM (PH) on each program's release date;
+    # checked every 30 min so a missed 4 AM is retried.
+    from app.services.incentive_reports import start_background_job
+
+    try:
+        start_background_job()
+    except Exception as exc:  # never block startup
+        logger.warning("Incentive reports job not started: %s", exc)
+
+
+@app.on_event("startup")
 def start_missed_time_in_checks():
     # Scheduled employees not timed in -> their head is asked (and
     # emailed); see app/services/attendance_alerts.py. Every 5 minutes.
@@ -386,6 +399,7 @@ app.include_router(schedule_changes.router, prefix="/api")
 app.include_router(hr_dashboard.router, prefix="/api")
 app.include_router(incentive_programs.router, prefix="/api")
 app.include_router(incentive_runs.router, prefix="/api")
+app.include_router(incentive_reports_api.router, prefix="/api")
 app.include_router(gov_contributions.router, prefix="/api")
 app.include_router(loan_amortization.router, prefix="/api")
 app.include_router(payroll_runs.router, prefix="/api")

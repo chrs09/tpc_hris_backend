@@ -76,6 +76,14 @@ MODULE_GROUPS = {
         # (app/api/payroll/incentive_runs.py). The steps on a run still
         # follow the Payroll ticks (Prepare / Approve / Release).
         "incentive_runs",
+        # Incentive Reports (app/api/payroll/incentive_reports.py): made at
+        # 4 AM on a program's release date. The module = view + approve /
+        # reject / edit rows (Can edit); Final confirm = the trip
+        # coordinator passes it to Finance; Release = Finance pays it out.
+        {
+            "key": "incentive_reports",
+            "children": ["incentive_reports_confirm", "incentive_reports_release"],
+        },
     ],
     "trip_management": [
         # Assigned/Active trip monitoring, with each active trip's live
