@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 from app.models.trip_bypass_log import TripBypassLog
 from app.models.trip_helper import TripHelper
 
-NOT_A_STEP = {"edit", "correction", "reorder", "cancel", "fix", "returned"}
+NOT_A_STEP = {"edit", "correction", "reorder", "cancel", "fix", "returned", "change-category"}
 
 STEP_LABELS = {
     "checkout": "Checkout",

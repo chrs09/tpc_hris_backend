@@ -66,6 +66,7 @@ BYPASS_ACTION_LABELS = {
     "manual-entry": "Manual trip entry",
     "manual-entry-approved": "Manual entry approved",
     "manual-entry-rejected": "Manual entry rejected",
+    "change-category": "Changed trip category",
 }
 
 

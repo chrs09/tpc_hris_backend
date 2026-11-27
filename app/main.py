@@ -56,6 +56,7 @@ from app.api.admin import delivery_summary as admin_delivery_summary
 from app.api.admin import stores as stores
 from app.api.admin import customer_chart as admin_customer_chart
 from app.api.admin import trip_corrections as admin_trip_corrections
+from app.api.admin import trip_category as admin_trip_category
 from app.api import cash_advance_corrections
 from app.api.admin import origins as origins
 from app.api.admin import truck_types as truck_types
@@ -405,6 +406,7 @@ app.include_router(admin_delivery_summary.router, prefix="/api")
 app.include_router(stores.router, prefix="/api")
 app.include_router(admin_customer_chart.router, prefix="/api")
 app.include_router(admin_trip_corrections.router, prefix="/api")
+app.include_router(admin_trip_category.router, prefix="/api")
 app.include_router(cash_advance_corrections.router, prefix="/api")
 app.include_router(origins.router, prefix="/api")
 app.include_router(truck_types.router, prefix="/api")
