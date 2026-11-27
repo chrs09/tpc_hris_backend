@@ -11,7 +11,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.dependencies import require_role_or_module
+from app.core.dependencies import get_current_user, require_role_or_module
 from app.models.employee_government import EmployeeGovernmentDetails
 from app.models.employees import Employee
 from app.models.user import User
@@ -159,3 +159,68 @@ def bulk_update(
         setattr(gov, payload.flag, payload.value)
     db.commit()
     return {"updated": len(valid)}
+
+
+# =========================================================
+# SSS BASIS (what the SSS bracket is looked up from)
+# =========================================================
+# Per payroll type: "basic" = Base Pay (basic for the cutoff, no allowance /
+# OT / holiday / others) or "gross" = Gross Pay. Payroll reads this.
+SSS_BASIS_KEY = "sss_basis"
+SSS_BASIS_TYPES = ("Monthly", "Daily", "Weekly")
+SSS_BASIS_DEFAULT = {t: "basic" for t in SSS_BASIS_TYPES}
+
+
+def sss_basis(db: Session) -> dict:
+    import json
+
+    from app.models.app_setting import AppSetting
+
+    row = db.query(AppSetting).filter(AppSetting.key == SSS_BASIS_KEY).first()
+    try:
+        saved = json.loads(row.value) if row and row.value else {}
+    except ValueError:
+        saved = {}
+    return {
+        t: saved.get(t) if saved.get(t) in ("basic", "gross") else SSS_BASIS_DEFAULT[t]
+        for t in SSS_BASIS_TYPES
+    }
+
+
+@router.get("/settings/sss-basis")
+def get_sss_basis(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    return sss_basis(db)
+
+
+@router.put("/settings/sss-basis")
+def set_sss_basis(
+    payload: dict,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(_require_view),
+):
+    import json
+
+    from app.models.app_setting import AppSetting
+
+    _ensure_can_edit(db, current_user)
+    value = sss_basis(db)
+    for t in SSS_BASIS_TYPES:
+        if t in payload:
+            if payload[t] not in ("basic", "gross"):
+                raise HTTPException(status_code=400, detail="Pick Base Pay or Gross Pay.")
+            value[t] = payload[t]
+    row = db.query(AppSetting).filter(AppSetting.key == SSS_BASIS_KEY).first()
+    if row is None:
+        row = AppSetting(
+            key=SSS_BASIS_KEY,
+            value=json.dumps(value),
+            description="SSS bracket basis per payroll type: basic (Base Pay) or gross (Gross Pay).",
+        )
+        db.add(row)
+    else:
+        row.value = json.dumps(value)
+    db.commit()
+    return value

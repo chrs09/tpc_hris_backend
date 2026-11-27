@@ -128,6 +128,10 @@ def _save_deduction(db: Session, payload: dict, user: User) -> PayrollDeduction:
             existing.other_deduction = payload["other_deduction"]
         if "other_deduction_note" in payload:
             existing.other_deduction_note = (payload["other_deduction_note"] or "")[:200] or None
+        if "other_earning" in payload:
+            existing.other_earning = payload["other_earning"]
+        if "other_earning_note" in payload:
+            existing.other_earning_note = (payload["other_earning_note"] or "")[:200] or None
 
         existing.tardiness_deduction = payload.get("tardiness_deduction", 0)
 
@@ -164,6 +168,8 @@ def _save_deduction(db: Session, payload: dict, user: User) -> PayrollDeduction:
         pagibig_loan=payload.get("pagibig_loan"),
         other_deduction=payload.get("other_deduction"),
         other_deduction_note=(payload.get("other_deduction_note") or "")[:200] or None,
+        other_earning=payload.get("other_earning"),
+        other_earning_note=(payload.get("other_earning_note") or "")[:200] or None,
         tardiness_deduction=payload.get("tardiness_deduction", 0),
         undertime_deduction=payload.get("undertime_deduction", 0),
         absent_deduction=payload.get("absent_deduction", 0),
@@ -193,6 +199,65 @@ def save_payroll_deduction(
         "message": "Deduction saved.",
         "id": deduction.id,
     }
+
+
+@router.put("/other-earning")
+def save_other_earning(
+    payload: dict,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(_require_payroll),
+):
+    """Payroll list -> Others: saves just the amount and what it's for, as
+    soon as it's typed (the rest of the row is saved at Generate)."""
+    try:
+        employee_id = int(payload["employee_id"])
+        cutoff_period = str(payload["cutoff_period"])
+        department = str(payload["department"])
+    except (KeyError, TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Missing employee, cutoff or payroll group.")
+    segment = payload.get("segment") or ""
+    try:
+        amount = round(float(payload.get("amount") or 0), 2)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Enter a valid amount.")
+    if amount < 0:
+        raise HTTPException(status_code=400, detail="Others can't be negative -- use a deduction instead.")
+    note = (payload.get("note") or "").strip()[:200] or None
+
+    if not db.query(Employee.id).filter(Employee.id == employee_id).first():
+        raise HTTPException(status_code=404, detail="Employee not found.")
+    ensure_payroll_editable(db, department, cutoff_period)
+    ensure_can_payroll(db, current_user, PAYROLL_PREPARE)
+    ensure_payroll_allowed(db, current_user, department)
+
+    row = (
+        db.query(PayrollDeduction)
+        .filter(
+            PayrollDeduction.employee_id == employee_id,
+            PayrollDeduction.cutoff_period == cutoff_period,
+            PayrollDeduction.department == department,
+            PayrollDeduction.segment == segment,
+        )
+        .first()
+    )
+    if row is None:
+        row = PayrollDeduction(
+            employee_id=employee_id,
+            cutoff_period=cutoff_period,
+            department=department,
+            segment=segment,
+            gross_pay=0,
+            sss_deduction=0,
+            philhealth_deduction=0,
+            pagibig_deduction=0,
+            net_pay=0,
+        )
+        db.add(row)
+    row.other_earning = amount or None
+    row.other_earning_note = note
+    row.updated_at = datetime.utcnow()
+    db.commit()
+    return {"message": "Saved.", "amount": amount, "note": note}
 
 
 @router.post("/save-bulk")

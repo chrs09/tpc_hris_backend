@@ -45,6 +45,10 @@ class PayrollDeduction(Base):
     pagibig_loan = Column(Numeric(12, 2), nullable=True)
     other_deduction = Column(Numeric(12, 2), nullable=True)
     other_deduction_note = Column(String(200), nullable=True)
+    # Others (earning): a typed extra added to gross pay -- bonus,
+    # adjustment, back pay -- with what it's for (shown on the payslip).
+    other_earning = Column(Numeric(12, 2), nullable=True)
+    other_earning_note = Column(String(200), nullable=True)
     tardiness_deduction = Column(Numeric(12, 2), nullable=False, default=0)
     undertime_deduction = Column(Numeric(12, 2), nullable=False, default=0)
     absent_deduction = Column(Numeric(12, 2), nullable=False, default=0)
