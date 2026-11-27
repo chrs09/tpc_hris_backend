@@ -121,6 +121,7 @@ def _serialize(req: FuelRequest, db: Session | None = None) -> dict:
         "completed_by": display_name(req.completed_by) if req.completed_by else None,
         "completed_at": _fmt(req.completed_at),
         "note": req.note,
+        "driver_note": req.driver_note,
         "created_at": _fmt(req.created_at),
         # Org chart approval progress (empty when there's no chain).
         "awaiting_approval": bool(req.awaiting_approval),
@@ -359,6 +360,8 @@ def create_fuel_request(
     odometer_reading: int | None = Form(None),
     # A yard head filing for a unit with no driver (vehicle_unit_id).
     for_yard: bool = Form(False),
+    # Optional note for the coordinator.
+    note: str | None = Form(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -463,6 +466,7 @@ def create_fuel_request(
         plate_number=plate_number,
         vehicle_unit_id=unit_id,
         unit_reason=unit_reason,
+        driver_note=((note or "").strip()[:1000] or None),
         for_yard=bool(for_yard),
         city=city,
         odo_photo_url="",

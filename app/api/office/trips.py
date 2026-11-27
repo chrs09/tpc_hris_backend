@@ -106,6 +106,9 @@ def get_pending_office_review_trips(
         db, [review.trip for review in reviews if review.trip], current_user, "trip_office"
     )
     helpers_by_trip = trip_helpers(db, [review.trip_id for review in reviews])
+    from app.api.admin.trips import _trip_of_day
+
+    trip_of_day = _trip_of_day(db, [review.trip for review in reviews if review.trip])
 
     for review in reviews:
         trip = review.trip
@@ -133,6 +136,8 @@ def get_pending_office_review_trips(
                     (trip.trip_rate_profile.code or None) if trip.trip_rate_profile else None
                 ),
                 "helpers": helpers_by_trip.get(trip.id, []),
+                # 2 = the driver's 2nd trip that day ("2nd trip of the day").
+                "trip_of_day": trip_of_day.get(trip.id),
                 **trip_unit_flags(trip),
 
                 "status": (
@@ -1019,6 +1024,9 @@ def get_trip_documents(
     counts = {row["key"]: 0 for row in DOCUMENT_STATUSES}
     rows = []
     helpers_by_trip = trip_helpers(db, [t.id for t in trips])
+    from app.api.admin.trips import _trip_of_day
+
+    trip_of_day = _trip_of_day(db, trips)
     trips = query.order_by(when.desc()).all()
     orders = _trip_orders(db, trips)
     outlet_names = trip_outlet_names(db, trips)
@@ -1070,6 +1078,7 @@ def get_trip_documents(
             "trip_category": category_label(trip),
             "trip_category_code": (trip.trip_rate_profile.code or None) if trip.trip_rate_profile else None,
             "helpers": helpers_by_trip.get(trip.id, []),
+            "trip_of_day": trip_of_day.get(trip.id),
             "trip_date": to_ph(trip.start_time or trip.created_at),
             "status": meta["key"],
             "status_no": meta["no"],

@@ -75,6 +75,9 @@ class FuelRequest(Base):
 
     # Why it was declined, or why the receipt was sent back.
     note = Column(Text, nullable=True)
+    # Typed by the person filing the request (optional); the coordinator
+    # sees it on Fuel Requests.
+    driver_note = Column(Text, nullable=True)
 
     # Driver cancelled the issued code (Cancel Code in the app).
     code_cancelled_at = Column(DateTime, nullable=True)
