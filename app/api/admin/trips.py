@@ -2627,7 +2627,9 @@ def trips_to_fix(
     db: Session = Depends(get_db),
     current_user=Depends(require_role_or_module(roles=["admin", "superadmin", "coordinator_admin", "coordinator"], module_key=["trip_management.trips", "trip_management.trip_dashboard"])),
 ):
-    """Returned trips handed to me to fix (a superadmin sees everyone's)."""
+    """Returned trips handed to me to fix. A superadmin -- and whoever
+    approves trips (coordinator admin, e.g. Aiza) -- sees everyone's, so
+    they can fix one for a coordinator who's out."""
     query = (
         db.query(TripFinanceReview)
         .join(Trip, Trip.id == TripFinanceReview.trip_id)
@@ -2638,7 +2640,8 @@ def trips_to_fix(
             Trip.status == TripStatus.PENDING_APPROVAL,
         )
     )
-    if _role_of(current_user) != "superadmin":
+    sees_all = _role_of(current_user) == "superadmin" or _can_approve_trips(db, current_user)
+    if not sees_all:
         query = query.filter(TripFinanceReview.resolver_user_id == current_user.id)
     rows = []
     for review in query.order_by(TripFinanceReview.resolver_assigned_at.asc()).all():
@@ -2651,8 +2654,12 @@ def trips_to_fix(
             "start_time": _ph(trip.start_time),
             "return_reason": review.return_reason,
             "returned_at": _ph(review.returned_at),
+            # Handed to someone else: fixing it is on their behalf.
+            "on_behalf": review.resolver_user_id != current_user.id,
             **_fix_info(db, review),
         })
+    # Mine first, then the others'.
+    rows.sort(key=lambda r: r["on_behalf"])
     return rows
 
 
@@ -2668,10 +2675,16 @@ def mark_trip_fixed(
     trip, review = _returned_review(db, trip_id)
     if not review.resolver_user_id or review.resolved_at:
         raise HTTPException(status_code=400, detail="This trip isn't waiting on a fix.")
-    if review.resolver_user_id != current_user.id and _role_of(current_user) != "superadmin":
+    on_behalf = review.resolver_user_id != current_user.id
+    if on_behalf and not (_role_of(current_user) == "superadmin" or _can_approve_trips(db, current_user)):
         raise HTTPException(status_code=403, detail="This trip was handed to someone else.")
+    note = (note or "").strip()
+    if on_behalf:
+        resolver = db.get(User, review.resolver_user_id)
+        prefix = f"Fixed by {_display_name(current_user)} for {_display_name(resolver) if resolver else 'the coordinator'}"
+        note = f"{prefix}. {note}" if note else prefix
     review.resolved_at = datetime.utcnow()
-    review.resolved_note = (note or "").strip()[:1000] or None
+    review.resolved_note = note[:1000] or None
     db.commit()
     return {"message": "Marked fixed. It's back in Trip Approvals.", **_fix_info(db, review)}
 
