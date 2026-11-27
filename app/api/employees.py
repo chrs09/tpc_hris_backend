@@ -256,6 +256,8 @@ def get_employees(
                     "saturday_out": emp.schedule_template.saturday_out,
                     "sunday_in": emp.schedule_template.sunday_in,
                     "sunday_out": emp.schedule_template.sunday_out,
+                    "is_trip_based": bool(emp.schedule_template.is_trip_based),
+                    "work_days": emp.schedule_template.work_days,
                 }
                 if emp.schedule_template
                 else None
@@ -447,6 +449,8 @@ def get_employee_detail(
                 "saturday_out": employee.schedule_template.saturday_out,
                 "sunday_in": employee.schedule_template.sunday_in,
                 "sunday_out": employee.schedule_template.sunday_out,
+                "is_trip_based": bool(employee.schedule_template.is_trip_based),
+                "work_days": employee.schedule_template.work_days,
             }
             if employee.schedule_template
             else None

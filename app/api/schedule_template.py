@@ -61,6 +61,23 @@ def parse_time(value):
         )
 
 
+DAY_KEYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+_DAY_FIELDS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+
+
+def _make_trip_based(template: ScheduleTemplate, work_days: str | None):
+    """Trip-based: no clock times, only work days (the rest are rest days)."""
+    days = [d.strip().lower()[:3] for d in (work_days or "").split(",") if d.strip()]
+    days = [d for d in DAY_KEYS if d in days]
+    if not days:
+        raise HTTPException(status_code=400, detail="Pick at least one work day.")
+    template.is_trip_based = True
+    template.work_days = ",".join(days)
+    for field in _DAY_FIELDS:
+        setattr(template, f"{field}_in", None)
+        setattr(template, f"{field}_out", None)
+
+
 @router.get("/")
 def get_schedule_templates(
     db: Session = Depends(get_db),
@@ -88,6 +105,8 @@ def get_schedule_templates(
                 "saturday_out": str(t.saturday_out) if t.saturday_out else None,
                 "sunday_in": str(t.sunday_in) if t.sunday_in else None,
                 "sunday_out": str(t.sunday_out) if t.sunday_out else None,
+                "is_trip_based": bool(t.is_trip_based),
+                "work_days": t.work_days,
             }
             for t in templates
         ]
@@ -182,6 +201,8 @@ def get_schedule_template(
             ),
             "sunday_in": str(template.sunday_in) if template.sunday_in else None,
             "sunday_out": str(template.sunday_out) if template.sunday_out else None,
+            "is_trip_based": bool(template.is_trip_based),
+            "work_days": template.work_days,
         }
     )
 
@@ -204,6 +225,8 @@ def create_schedule_template(
     saturday_out: str = Form(None),
     sunday_in: str = Form(None),
     sunday_out: str = Form(None),
+    is_trip_based: bool = Form(None),
+    work_days: str = Form(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(_require_schedule_write_access),
 ):
@@ -233,6 +256,8 @@ def create_schedule_template(
         sunday_in=parse_time(sunday_in),
         sunday_out=parse_time(sunday_out),
     )
+    if is_trip_based:
+        _make_trip_based(template, work_days)
 
     db.add(template)
     db.commit()
@@ -262,6 +287,8 @@ def update_schedule_template(
     saturday_out: str = Form(None),
     sunday_in: str = Form(None),
     sunday_out: str = Form(None),
+    is_trip_based: bool = Form(None),
+    work_days: str = Form(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(_require_schedule_write_access),
 ):
@@ -333,6 +360,13 @@ def update_schedule_template(
 
     if sunday_out is not None:
         template.sunday_out = parse_time(sunday_out)
+
+    if is_trip_based is not None:
+        template.is_trip_based = bool(is_trip_based)
+    if template.is_trip_based:
+        _make_trip_based(template, work_days if work_days is not None else template.work_days)
+    elif is_trip_based is not None:
+        template.work_days = None
 
     db.commit()
     db.refresh(template)

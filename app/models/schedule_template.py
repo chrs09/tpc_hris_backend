@@ -6,6 +6,7 @@ from sqlalchemy import (
     String,
     Time,
     DateTime,
+    Boolean,
 )
 
 from sqlalchemy.orm import relationship
@@ -53,6 +54,12 @@ class ScheduleTemplate(Base):
 
     sunday_in = Column(Time, nullable=True)
     sunday_out = Column(Time, nullable=True)
+
+    # Trip-based schedule (drivers / helpers): no clock times, just which
+    # days are work days ("mon,tue,...,sat"); the rest are rest days. A
+    # trip on a rest day gets the rest-day premium in payroll.
+    is_trip_based = Column(Boolean, nullable=False, default=False, server_default="0")
+    work_days = Column(String(40), nullable=True)
 
     created_at = Column(
         DateTime,
