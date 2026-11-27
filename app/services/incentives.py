@@ -25,7 +25,10 @@
 #   complete_attendance -- every workday present (approved leave and
 #                          holidays don't break it); bonus % of the
 #                          base, weekday holidays worked x2, Saturdays
-#                          +30% when the base is the daily rate.
+#                          +30% when the base is the daily rate. Days
+#                          not ticked as workdays (e.g. Sunday) are rest
+#                          days: never an absence; worked, they add the
+#                          rest-day premium (daily-rate base).
 # A trip's day is the PH date it started (same as payroll / route rides).
 #
 #
@@ -101,6 +104,7 @@ RULE_TYPES = {
             "workdays": [0, 1, 2, 3, 4, 5],
             "holiday_multiplier": 2,
             "saturday_premium_percent": 30,
+            "rest_day_premium_percent": 30,
             "leave_counts_as_present": True,
         },
     },
@@ -240,6 +244,12 @@ def _clean_type(rule_type: str, settings: dict) -> dict:
         "workdays": _weekdays(s.get("workdays"), "Workdays"),
         "holiday_multiplier": _num(s.get("holiday_multiplier"), "Holiday multiplier", 1),
         "saturday_premium_percent": _num(s.get("saturday_premium_percent"), "Saturday premium %"),
+        # Older programs had no rest-day pay: None keeps them as they were.
+        "rest_day_premium_percent": (
+            None
+            if s.get("rest_day_premium_percent") in (None, "")
+            else _num(s.get("rest_day_premium_percent"), "Rest day premium %")
+        ),
         "leave_counts_as_present": bool(s.get("leave_counts_as_present")),
     }
 
@@ -854,10 +864,26 @@ def _complete_attendance(db, program, s):
     workdays = [d for d in _days(start, end) if d.weekday() in s["workdays"]]
     hol_mult = s["holiday_multiplier"]
     sat_mult = 1 + s["saturday_premium_percent"] / 100
+    # Rest days (not ticked as workdays, e.g. Sunday): skipping one is
+    # never an absence; working one adds the rest-day premium.
+    rest_pct = s.get("rest_day_premium_percent")
+    rest_days = (
+        [d for d in _days(start, end) if d.weekday() not in s["workdays"]]
+        if rest_pct is not None
+        else []
+    )
+    rest_mult = 1 + (rest_pct or 0) / 100
     rows = []
     for emp in emps:
         absences, leave_days = [], 0
         regular = holiday_worked = saturday_worked = 0
+        rest_worked = 0
+        for d in rest_days:
+            if d in present[emp.id]:
+                if d in holidays:
+                    holiday_worked += 1
+                else:
+                    rest_worked += 1
         for d in workdays:
             if d in present[emp.id]:
                 if d in holidays:
@@ -877,7 +903,12 @@ def _complete_attendance(db, program, s):
         complete = not absences
         if s["base"] == "daily_rate":
             rate = float(emp.daily_rate or 0)
-            base = rate * (regular + holiday_worked * hol_mult + saturday_worked * sat_mult)
+            base = rate * (
+                regular
+                + holiday_worked * hol_mult
+                + saturday_worked * sat_mult
+                + rest_worked * rest_mult
+            )
         elif s["base"] == "monthly_basic":
             base = float(emp.monthly_basic or 0)
         else:
@@ -889,9 +920,10 @@ def _complete_attendance(db, program, s):
             "department": emp.department,
             "group": group,
             "workdays": len(workdays),
-            "days_present": regular + holiday_worked + saturday_worked,
+            "days_present": regular + holiday_worked + saturday_worked + rest_worked,
             "holidays_worked": holiday_worked,
             "saturdays_worked": saturday_worked,
+            "rest_days_worked": rest_worked,
             "leave_days": leave_days,
             "absences": absences,
             "complete": complete,
