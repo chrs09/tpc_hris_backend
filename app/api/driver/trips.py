@@ -414,9 +414,13 @@ def get_available_helpers(
     driver_id: int | None = Query(None),
     # Dispatch's "Driver as Helper" switch: also list drivers (rare).
     include_drivers: bool = Query(False),
+    # Editing a finished trip's helpers: everyone, even those out on a
+    # trip right now (it's about the past). Dispatchers only.
+    include_busy: bool = Query(False),
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
+    include_busy = include_busy and _can_dispatch(db, current_user)
     # ---------------------------------------
     # 1️⃣ Get Driver Employee Record
     #
@@ -451,15 +455,16 @@ def get_available_helpers(
     # ---------------------------------------
     # 3️⃣ Get Available Helpers
     # ---------------------------------------
-    helpers = (
-        db.query(Employee)
-        .filter(
-            Employee.position == "HELPER",
-            Employee.department.in_(required_departments),
-            Employee.is_active == 1,
+    helper_filters = [
+        Employee.position == "HELPER",
+        Employee.department.in_(required_departments),
+        Employee.is_active == 1,
+        # Not the driver themselves (a relief driver is a helper too).
+        Employee.id != employee_id,
+    ]
+    if not include_busy:
+        helper_filters += [
             Employee.is_available == 1,
-            # Not the driver themselves (a relief driver is a helper too).
-            Employee.id != employee_id,
             # Nor a relief driver who is driving a trip right now.
             ~Employee.id.in_(
                 db.query(User.employee_id)
@@ -469,7 +474,11 @@ def get_available_helpers(
                     Trip.status.in_([TripStatus.ASSIGNED, TripStatus.ACTIVE]),
                 )
             ),
-        )
+        ]
+    helpers = (
+        db.query(Employee)
+        .filter(*helper_filters)
+        .order_by(Employee.first_name.asc())
         .all()
     )
 
