@@ -160,6 +160,112 @@ def generate(db: Session, program: IncentiveProgram, user_id: int | None = None)
     return report
 
 
+_STATUS_REASON = {
+    "ASSIGNED": "Not started yet",
+    "ACTIVE": "Still on the road",
+    "PENDING_MANUAL_APPROVAL": "Manual entry waiting for superadmin",
+    "PENDING_APPROVAL": "Waiting in Trip Approvals",
+    "PENDING_OFFICE_REVIEW": "In Office review",
+    "PENDING_FINANCE_REVIEW": "In Finance review",
+}
+_DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
+
+def trip_check(db: Session, program, settings: dict) -> list[dict]:
+    """Every trip that started in the program's period, each marked counted
+    or not with the reason -- why a trip is or isn't in the report.
+    Only COMPLETED (cleared by Finance) trips count."""
+    from sqlalchemy.orm import joinedload
+
+    from app.models.employees import Employee
+    from app.models.trips import Trip, TripStatus
+    from app.models.user import User
+    from app.services.incentives import HUB_DEPARTMENTS, _is_excluded, _ph_start, _trip_category
+    from app.utils.timezone import ph_to_utc
+    from app.utils.user_display import display_name
+
+    if program.rule_type == "complete_attendance":
+        return []
+    start = ph_to_utc(datetime.combine(program.period_start, time.min))
+    end = ph_to_utc(datetime.combine(program.period_end + timedelta(days=1), time.min))
+    trips = (
+        db.query(Trip)
+        .options(joinedload(Trip.trip_rate_profile), joinedload(Trip.driver))
+        .filter(
+            Trip.is_archived.is_(False),
+            Trip.status != TripStatus.CANCELLED,
+            Trip.start_time >= start,
+            Trip.start_time < end,
+        )
+        .order_by(Trip.start_time)
+        .all()
+    )
+    allowed_depts = {
+        HUB_DEPARTMENTS[h][role]
+        for h in settings.get("hubs") or []
+        for role in ("driver", "helper")
+    }
+    emp_ids = {t.driver.employee_id for t in trips if t.driver and t.driver.employee_id}
+    depts = (
+        {e.id: e.department for e in db.query(Employee).filter(Employee.id.in_(emp_ids))}
+        if emp_ids
+        else {}
+    )
+    rows = []
+    for t in trips:
+        status = getattr(t.status, "value", t.status)
+        started = _ph_start(t)
+        reason = None
+        if status != "COMPLETED":
+            reason = _STATUS_REASON.get(status, status) + " (only trips cleared by Finance count)"
+        elif program.rule_type == "daily_cash":
+            if started.weekday() not in settings.get("days", []):
+                reason = f"{_DAY_NAMES[started.weekday()]} isn't an applicable day"
+            elif _is_excluded(t, settings.get("exclude_categories") or []):
+                reason = f"Category {_trip_category(t)} isn't counted"
+            elif settings.get("origin_store_id") and t.origin_store_id != settings["origin_store_id"]:
+                reason = "Didn't start from the program's hub"
+            elif allowed_depts and t.driver and depts.get(t.driver.employee_id) not in allowed_depts:
+                reason = f"Driver's department ({depts.get(t.driver.employee_id) or 'none'}) isn't in the program"
+        elif program.rule_type == "trip_tiers":
+            if not settings.get("include_sundays") and started.weekday() == 6:
+                reason = "Sundays aren't counted"
+        rows.append({
+            "id": t.id,
+            "ticket_no": t.ticket_no,
+            "trip_code": t.trip_code,
+            "date": started.date().isoformat(),
+            "time": started.strftime("%I:%M %p"),
+            "driver": display_name(t.driver) if t.driver else None,
+            "category": _trip_category(t) or None,
+            "status": status,
+            "counted": reason is None,
+            "reason": reason,
+        })
+    return rows
+
+
+def preview(db: Session, program) -> dict:
+    """What the report would contain if made now (current program
+    settings), plus every trip in the period with why it counts or not."""
+    settings = load_settings(program)
+    computed = compute_program(db, program, settings=settings)
+    lines = _lines_for(program, computed)
+    return {
+        "program_id": program.id,
+        "program_name": program.name,
+        "rule_type": program.rule_type,
+        "period_start": program.period_start.isoformat(),
+        "period_end": program.period_end.isoformat(),
+        "lines": [
+            {**ln, "day": ln["day"].isoformat() if ln["day"] else None}
+            for ln in lines
+        ],
+        "total": round(sum(ln["amount"] for ln in lines), 2),
+        "trips": trip_check(db, program, settings),
+    }
+
+
 def due_programs(db: Session, now_ph: datetime | None = None) -> list[IncentiveProgram]:
     """Active programs whose release date has come (from 4 AM PH) and
     that have no report yet."""

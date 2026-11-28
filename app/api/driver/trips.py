@@ -2069,8 +2069,14 @@ def driver_trip_summary(
 
     active_count = base_query.filter(Trip.status == TripStatus.ACTIVE).count()
 
+    # Being checked: waiting for the coordinator, Office or Finance.
     pending_count = base_query.filter(
-        Trip.status == TripStatus.PENDING_APPROVAL
+        Trip.status.in_([
+            TripStatus.PENDING_MANUAL_APPROVAL,
+            TripStatus.PENDING_APPROVAL,
+            TripStatus.PENDING_OFFICE_REVIEW,
+            TripStatus.PENDING_FINANCE_REVIEW,
+        ])
     ).count()
 
     completed_today_count = base_query.filter(

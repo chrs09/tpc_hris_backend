@@ -321,6 +321,19 @@ def release_report(
     return {"message": "Released."}
 
 
+@router.get("/programs/{program_id}/preview")
+def preview_program(program_id: int, db: Session = Depends(get_db), current_user: User = Depends(_require_view)):
+    """Before generating / regenerating: the rows the report would have
+    and every trip in the period (counted or not, with the reason)."""
+    program = db.query(IncentiveProgram).filter(IncentiveProgram.id == program_id).first()
+    if not program:
+        raise HTTPException(status_code=404, detail="Program not found.")
+    data = R.preview(db, program)
+    for ln in data["lines"]:
+        ln["details"] = json.loads(json.dumps(ln["details"], default=str))
+    return data
+
+
 @router.post("/programs/{program_id}/generate")
 def generate_now(program_id: int, db: Session = Depends(get_db), current_user: User = Depends(_require_view)):
     """Make a program's report now (its release date has come)."""
