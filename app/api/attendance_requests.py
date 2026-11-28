@@ -448,6 +448,14 @@ def _correction_payload(db: Session, c: TimeCorrectionRequest, user: User | None
         # What the attendance shows now (to compare).
         "current_time_in": format_attendance_time_only(record.check_in_time) if record else None,
         "current_time_out": format_attendance_time_only(record.check_out_time) if record else None,
+        # What it showed before this correction: the record now while
+        # pending, the saved original once decided (history 2 PM -> 8 PM).
+        "from_time_in": (
+            format_attendance_time_only(record.check_in_time) if record else None
+        ) if c.status == "pending" else format_attendance_time_only(c.original_time_in),
+        "from_time_out": (
+            format_attendance_time_only(record.check_out_time) if record else None
+        ) if c.status == "pending" else format_attendance_time_only(c.original_time_out),
         "current_status": record.status if record else None,
         "reason": c.reason,
         "time_in_photo_url": c.time_in_photo_url,
@@ -483,6 +491,29 @@ def time_correction_eligibility(
     if is_trip_based(employee, current_user):
         return {"can_file": False, "reason": "Your attendance comes from your trips."}
     return {"can_file": True, "reason": None}
+
+
+@router.get("/time-corrections/day")
+def my_recorded_day(
+    attendance_date: date,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """What my attendance shows for a day -- File Time Correction fills
+    these in when the day is picked, so only what's wrong is changed."""
+    if not current_user.employee_id:
+        return {"has_record": False}
+    record = _record(db, current_user.employee_id, attendance_date)
+    if not record:
+        return {"has_record": False}
+    return {
+        "has_record": True,
+        "status": record.status,
+        "time_in": format_attendance_time_only(record.check_in_time),
+        "time_out": format_attendance_time_only(record.check_out_time),
+        "time_in_hhmm": _hhmm(record.check_in_time),
+        "time_out_hhmm": _hhmm(record.check_out_time),
+    }
 
 
 @router.get("/time-corrections/mine")
@@ -548,6 +579,8 @@ def file_time_correction(
         attendance_date=day,
         time_in=start,
         time_out=end,
+        original_time_in=record.check_in_time if record else None,
+        original_time_out=record.check_out_time if record else None,
         reason=reason[:1000],
         status="pending",
         approval_chain=dump_chain(chain),

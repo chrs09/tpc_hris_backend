@@ -22,6 +22,9 @@ class TimeCorrectionRequest(Base):
 
     time_in = Column(DateTime, nullable=True)
     time_out = Column(DateTime, nullable=True)
+    # What the attendance showed when it was filed (history: 2 PM -> 8 PM).
+    original_time_in = Column(DateTime, nullable=True)
+    original_time_out = Column(DateTime, nullable=True)
     reason = Column(Text, nullable=False)
     # Proof (optional): photos / screenshots for the time in and time out.
     time_in_photo_url = Column(String(1000), nullable=True)
