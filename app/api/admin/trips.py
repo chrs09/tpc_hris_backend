@@ -608,6 +608,7 @@ def get_approval_pipeline(
                 "is_corrected": trip.id in corrected_ids,
                 "trip_code": trip.trip_code,
                 "ticket_no": trip.ticket_no,
+                "driver_id": trip.driver_id,
                 "driver_name": _display_name(trip.driver) if trip.driver else None,
                 "username": trip.driver.username if trip.driver else None,
                 "trip_category": category_label(trip),
@@ -657,7 +658,13 @@ def get_approval_pipeline(
             }
         )
 
-    return {"items": items, "total": total, "counts": counts}
+    return {
+        "items": items,
+        "total": total,
+        "counts": counts,
+        # Add / fix helpers on a finished trip (forgot at dispatch / manual entry).
+        "can_edit_helpers": _can_approve_trips(db, current_admin),
+    }
 
 
 # =========================
@@ -1328,11 +1335,18 @@ def update_trip_helpers(
     )
     if not trip:
         raise HTTPException(status_code=404, detail="Trip not found.")
-    if trip.status not in (TripStatus.ASSIGNED, TripStatus.ACTIVE):
-        raise HTTPException(
-            status_code=400,
-            detail="Helpers can only be changed while the trip is assigned or active.",
-        )
+    # Finished trips (forgot a helper at dispatch / on a manual entry):
+    # trip approvers only, never cancelled or in a locked payroll, and the
+    # helpers' availability isn't touched (the trip is over).
+    finished = trip.status not in (TripStatus.ASSIGNED, TripStatus.ACTIVE)
+    if finished:
+        if trip.status == TripStatus.CANCELLED or trip.is_archived:
+            raise HTTPException(status_code=400, detail="This trip is cancelled.")
+        if not _can_approve_trips(db, current_admin):
+            raise HTTPException(
+                status_code=403,
+                detail="Only trip approvers can change the helpers on a finished trip.",
+            )
     helper_ids = [int(h) for h in payload.helper_ids]
     if len(helper_ids) != len(set(helper_ids)):
         raise HTTPException(status_code=400, detail="Duplicate helpers selected.")
@@ -1350,13 +1364,29 @@ def update_trip_helpers(
             raise HTTPException(status_code=404, detail=f"Helper {hid} not found.")
         if not can_be_helper(db, helper):
             raise HTTPException(status_code=400, detail=f"{helper.first_name} can't be a helper.")
-        if hid not in current and not helper.is_available and not is_driver_as_helper(db, helper):
+        if (
+            not finished
+            and hid not in current
+            and not helper.is_available
+            and not is_driver_as_helper(db, helper)
+        ):
             raise HTTPException(status_code=400, detail=f"{helper.first_name} is out on another trip.")
         new_helpers[hid] = helper
 
+    if finished:
+        from app.services.payroll_lock import ensure_trip_unlocked, ensure_unlocked
+        from app.utils.timezone import utc_to_ph_date
+
+        ensure_trip_unlocked(db, trip, "this trip")
+        day = utc_to_ph_date(trip.start_time or trip.created_at)
+        for hid in helper_ids:
+            if hid not in current:
+                ensure_unlocked(db, hid, day, "this trip")
+
     driver = db.get(User, trip.driver_id)
-    check_trip_crew(db, driver, helper_ids, trip_id=trip.id, keep_helper_ids=set(current))
-    busy_elsewhere = out_as_helper(
+    if not finished:
+        check_trip_crew(db, driver, helper_ids, trip_id=trip.id, keep_helper_ids=set(current))
+    busy_elsewhere = {} if finished else out_as_helper(
         db, [h for h in helper_ids if h not in current], exclude_trip_id=trip.id
     )
     if busy_elsewhere:
@@ -1376,12 +1406,13 @@ def update_trip_helpers(
     before = names(list(current))
     for hid, th in list(current.items()):
         if hid not in new_helpers:
-            if th.helper:
+            if th.helper and not finished:
                 th.helper.is_available = 1
             db.delete(th)
     for hid, helper in new_helpers.items():
         if hid not in current:
-            helper.is_available = 0
+            if not finished:
+                helper.is_available = 0
             db.add(TripHelper(trip_id=trip.id, helper_id=hid))
 
     summary = f"Edited helpers: {before} -> {names(helper_ids)}."
